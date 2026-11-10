@@ -454,7 +454,7 @@ private struct DirectSwitchHomeView: View {
                         Spacer()
                         InfoCircleButton(
                             title: "Invia",
-                            message: "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (iPhone o Android) dove hai aperto 'Ricevi'.\n• Tra due iPhone è sempre 100% gratuito.\n• Verso Android senza cavo e senza formattare utilizza la modalità Premium Direct."
+                            message: "Invia i dati da questo telefono direttamente senza cavo all'altro telefono dove hai aperto 'Ricevi'. Con Premium Direct trasferisci tutto anche tra iPhone e Android già configurati, senza formattare."
                         )
                     }
 
@@ -692,21 +692,22 @@ private struct DirectSwitchTransferProgressView: View {
                 if transport.gatedPreviewCount > 0 && !isProUnlocked {
                     Button(action: onOpenProSheet) {
                         HStack(spacing: 10) {
-                            AppleSettingsIcon(systemName: "lock.open.fill", color: AppleTheme.orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("\(transport.gatedPreviewCount) file oltre l'anteprima gratuita")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                Text("Tocca per sbloccare il passaggio completo iPhone ↔ Android")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(AppleTheme.textSecondary)
-                            }
+                            AppleSettingsIcon(systemName: "crown.fill", color: AppleTheme.premiumAmber)
+                            Text("Sblocca i restanti \(transport.gatedPreviewCount) file con Premium Direct")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.premiumGold)
                             Spacer()
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(AppleTheme.textTertiary)
+                                .foregroundColor(AppleTheme.premiumGold)
                         }
-                        .appleCard(padding: 14, selected: true)
+                        .padding(14)
+                        .background(AppleTheme.premiumSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -762,7 +763,7 @@ private struct DirectSwitchTransferProgressView: View {
     }
 }
 
-// MARK: - Sheet Premium Direct
+// MARK: - Sheet Premium Direct (Passaggio completo iPhone <-> Android senza formattare)
 
 private struct DirectSwitchProPassSheet: View {
     @Binding var isProUnlocked: Bool
@@ -770,30 +771,74 @@ private struct DirectSwitchProPassSheet: View {
     var onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 16) {
-            DirectSwitchAppleEmblem(size: 68)
-                .padding(.top, 8)
-
-            HStack(spacing: 6) {
+        VStack(spacing: 14) {
+            // Pill superiore che chiarisce subito iPhone <-> Android
+            HStack(spacing: 5) {
                 Image(systemName: "crown.fill")
-                    .font(.system(size: 18, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundColor(AppleTheme.premiumAmber)
-                Text("Premium Direct")
-                    .font(.system(size: 23, weight: .bold))
-                    .foregroundColor(AppleTheme.textPrimary)
-                InfoCircleButton(
-                    title: "Come funziona Premium Direct",
-                    message: "• Il passaggio tra due iPhone è sempre 100% gratuito.\n• Con Premium Direct sblocchi il trasferimento illimitato di foto originali, video 4K, calendari, messaggi e file tra iPhone e Android su entrambi i telefoni con un solo acquisto Una Tantum."
-                )
+                Text("PASSAGGIO DIRETTO iPHONE ↔ ANDROID")
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(0.4)
+                    .foregroundColor(AppleTheme.premiumGold)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(AppleTheme.premiumSurface)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
+            )
+            .padding(.top, 6)
+
+            DirectSwitchAppleEmblem(size: 64)
+
+            VStack(spacing: 5) {
+                HStack(spacing: 6) {
+                    Text("Premium Direct")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    InfoCircleButton(
+                        title: "Perché scegliere Premium Direct",
+                        message: "Le app tradizionali ti costringono a formattare il telefono ai dati di fabbrica o a comprare costosi abbonamenti Cloud mensili per spostare i tuoi GB tra iPhone e Android.\n\nCon Premium Direct sposti tutto in Wi-Fi o Hotspot 5GHz diretto tra telefoni già configurati, alla massima velocità e senza perdere nessun dato già presente."
+                    )
+                }
+
+                Text("Trasferisci tutto tra iPhone e Android senza resettare")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(AppleTheme.premiumGold)
+                    .multilineTextAlignment(.center)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                featureLine(icon: "checkmark.circle.fill", text: "iPhone ↔ iPhone sempre 100% gratuito")
-                featureLine(icon: "photo.stack.fill", text: "Foto HEIC/JPG e Video 4K originali con Album")
-                featureLine(icon: "crown.fill", text: "Un solo sblocco vale per entrambi i telefoni")
+            VStack(alignment: .leading, spacing: 11) {
+                featureLine(
+                    icon: "bolt.fill",
+                    color: AppleTheme.premiumAmber,
+                    text: "Da iPhone ad Android (e viceversa) senza cavi"
+                )
+                featureLine(
+                    icon: "iphone",
+                    color: AppleTheme.blue,
+                    text: "Zero formattazione: funziona su telefoni già in uso"
+                )
+                featureLine(
+                    icon: "photo.stack.fill",
+                    color: AppleTheme.orange,
+                    text: "Foto originali, Video 4K, Album, Contatti e Chat"
+                )
+                featureLine(
+                    icon: "checkmark.seal.fill",
+                    color: AppleTheme.teal,
+                    text: "Un solo acquisto sblocca entrambi i telefoni"
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .appleCard(padding: 14)
+
+            Text("Pagamento unico • Nessun abbonamento mensile")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(AppleTheme.textSecondary)
 
             if let note = billingNote, !note.isEmpty {
                 Text(note)
@@ -803,7 +848,7 @@ private struct DirectSwitchProPassSheet: View {
             }
 
             ApplePrimaryButton(
-                title: isProUnlocked ? "Premium Direct già attivo" : "Attiva Premium Direct (9,99 €)",
+                title: isProUnlocked ? "Premium Direct Attivo" : "Sblocca Premium Direct — 9,99 €",
                 icon: isProUnlocked ? "checkmark.seal.fill" : "crown.fill",
                 color: isProUnlocked ? AppleTheme.green : AppleTheme.premiumGold,
                 isDisabled: isProUnlocked
@@ -842,18 +887,16 @@ private struct DirectSwitchProPassSheet: View {
         }
         .padding(20)
         .background(AppleTheme.backgroundGradient.ignoresSafeArea())
-        .presentationDetents([.height(480), .large])
+        .presentationDetents([.height(540), .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.light)
     }
 
-    private func featureLine(icon: String, text: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(AppleTheme.blue)
+    private func featureLine(icon: String, color: Color, text: String) -> some View {
+        HStack(spacing: 11) {
+            AppleSettingsIcon(systemName: icon, color: color, size: 28)
             Text(text)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(AppleTheme.textPrimary)
         }
     }

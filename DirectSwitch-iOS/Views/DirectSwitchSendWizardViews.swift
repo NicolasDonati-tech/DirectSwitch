@@ -357,10 +357,10 @@ struct SendCategoriesStepView: View {
                         InfoCircleButton(
                             title: "Stato collegamento",
                             message: !isCrossOs
-                                ? "Collegamento diretto iPhone ↔ iPhone attivo. Il trasferimento di tutti i dati è 100% gratuito e illimitato."
+                                ? "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati."
                                 : (isSessionFullUnlocked
-                                   ? "Collegamento iPhone ↔ Android con Premium Direct attivo: copia illimitata sbloccata."
-                                   : "Modalità gratuita attiva: include tutta la Rubrica + anteprima multimediale. Attiva Premium Direct per trasferire foto, video e file senza limiti.")
+                                   ? "Premium Direct attivo: trasferimento completo iPhone ↔ Android sbloccato senza limiti."
+                                   : "Con Premium Direct sblocchi il trasferimento illimitato di foto originali, video 4K, album, calendari e file verso Android senza formattare.")
                         )
 
                         Spacer()
@@ -379,7 +379,7 @@ struct SendCategoriesStepView: View {
                                 Image(systemName: "crown.fill")
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(AppleTheme.premiumAmber)
-                                Text("Attiva Premium Direct")
+                                Text("Sblocca trasferimento completo iPhone ↔ Android")
                                     .font(.system(size: 13, weight: .bold))
                                     .foregroundColor(AppleTheme.premiumGold)
                                 Spacer()

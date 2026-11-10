@@ -1593,7 +1593,7 @@ private fun QuickPortalWizardView(
     DirectSwitchPrimaryButton(text = "Chiudi", onClick = onClose)
 }
 
-// MARK: - Bottom Sheet Pass Cross-OS & Google Setup Bridge
+// MARK: - Bottom Sheet Premium Direct (Passaggio completo iPhone <-> Android)
 
 @Composable
 private fun CrossOsProPassSheetContent(
@@ -1610,19 +1610,69 @@ private fun CrossOsProPassSheetContent(
             .background(DirectSwitchTheme.backgroundBrush)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        DirectSwitchAppleEmblem(size = 68.dp)
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = DirectSwitchTheme.premiumSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
         ) {
-            Text("Premium Direct", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-            InfoCircleButton(
-                title = "Premium Direct",
-                message = "Android ↔ Android è sempre 100% gratuito. Con Premium Direct sblocchi il trasferimento illimitato tra iPhone e Android su entrambi i telefoni con un solo acquisto."
+            Text(
+                text = "PASSAGGIO DIRETTO iPHONE ↔ ANDROID",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = DirectSwitchTheme.premiumGold,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
             )
         }
+
+        DirectSwitchAppleEmblem(size = 64.dp)
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Premium Direct", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+                InfoCircleButton(
+                    title = "Perché scegliere Premium Direct",
+                    message = "Le app tradizionali ti costringono a formattare il telefono ai dati di fabbrica o a comprare abbonamenti Cloud mensili per spostare i tuoi GB tra iPhone e Android.\n\nCon Premium Direct sposti tutto in Wi-Fi o Hotspot 5GHz diretto tra telefoni già in uso, senza perdere alcun dato già presente."
+                )
+            }
+            Text(
+                "Trasferisci tutto tra iPhone e Android senza resettare",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = DirectSwitchTheme.premiumGold,
+                textAlign = TextAlign.Center
+            )
+        }
+
+        DirectSwitchCard {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.premiumAmber, size = 28.dp)
+                Text("Da iPhone ad Android (e viceversa) senza cavi", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AppleSettingsIcon(icon = Icons.Filled.PhoneIphone, color = DirectSwitchTheme.blue, size = 28.dp)
+                Text("Zero formattazione: funziona su telefoni già in uso", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AppleSettingsIcon(icon = Icons.Filled.Image, color = DirectSwitchTheme.orange, size = 28.dp)
+                Text("Foto originali, Video 4K, Album, Contatti e Chat", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AppleSettingsIcon(icon = Icons.Filled.CheckCircle, color = DirectSwitchTheme.teal, size = 28.dp)
+                Text("Un solo acquisto sblocca entrambi i telefoni", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            }
+        }
+
+        Text(
+            "Pagamento unico • Nessun abbonamento mensile",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = DirectSwitchTheme.textSecondary
+        )
 
         if (hasCloudSave && !isUnlocked) {
             Text("App CloudSave rilevata sul dispositivo", fontSize = 12.sp, color = DirectSwitchTheme.blue)
@@ -1632,7 +1682,7 @@ private fun CrossOsProPassSheetContent(
         }
 
         DirectSwitchPrimaryButton(
-            text = if (isUnlocked) "Premium Direct già attivo" else "Attiva Premium Direct (9,99 €)",
+            text = if (isUnlocked) "Premium Direct Attivo" else "Sblocca Premium Direct — 9,99 €",
             onClick = onPurchasePass,
             enabled = !isUnlocked,
             containerColor = if (isUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.premiumGold
