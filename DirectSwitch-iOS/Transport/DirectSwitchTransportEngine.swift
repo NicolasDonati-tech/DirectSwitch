@@ -45,10 +45,10 @@ private final class IncomingHttpStreamState: @unchecked Sendable {
 
 @MainActor
 final class DirectSwitchTransportViewModel: ObservableObject {
-    private static let maxPinAttempts = 3
-    private static let maxHeaderBytes = 32 * 1024
-    private static let maxControlBodyBytes: Int64 = 32 * 1024 * 1024
-    private static let maxStreamItemBytes: Int64 = 32 * 1024 * 1024 * 1024
+    private nonisolated static let maxPinAttempts = 3
+    private nonisolated static let maxHeaderBytes = 32 * 1024
+    private nonisolated static let maxControlBodyBytes: Int64 = 32 * 1024 * 1024
+    private nonisolated static let maxStreamItemBytes: Int64 = 32 * 1024 * 1024 * 1024
 
     @Published var statusLabel: String = "Pronto al trasferimento diretto"
     @Published var peerName: String = ""
@@ -190,7 +190,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     }
 
     private func startHttpListener(port: UInt16, advertiseBonjour: Bool) {
-        guard let nwPort = NWEndpoint.Port(rawValue: port),
+        guard let nwPort = Network.NWEndpoint.Port(rawValue: port),
               let nwListener = try? NWListener(using: .tcp, on: nwPort) else {
             errorMessage = "Impossibile aprire la porta locale \(port)."
             return
@@ -228,7 +228,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         handshakeAuthenticated = false
     }
 
-    private nonisolated static func isAllowedPeerEndpoint(_ endpoint: NWEndpoint) -> Bool {
+    private nonisolated static func isAllowedPeerEndpoint(_ endpoint: Network.NWEndpoint) -> Bool {
         if case .hostPort(let host, _) = endpoint {
             let raw = "\(host)"
             let cleanIp = raw.components(separatedBy: "%").first ?? raw
@@ -707,11 +707,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     func startUdpAutoDiscovery() {
         stopUdpAutoDiscovery()
         discoveredBeacons.removeAll()
-        guard let port = NWEndpoint.Port(rawValue: 49444),
+        guard let port = Network.NWEndpoint.Port(rawValue: 49444),
               let udpListener = try? NWListener(using: .udp, on: port) else { return }
         udpListener.newConnectionHandler = { [weak self] conn in
             conn.start(queue: .global(qos: .userInitiated))
-            conn.receiveMessage { data, _, _, _ in
+            conn.receiveMessage { [weak self] data, _, _, _ in
                 if let d = data,
                    let str = String(data: d, encoding: .utf8),
                    let rawBeacon = try? DiscoveryBeaconPayload.fromJson(str) {
@@ -726,7 +726,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                             port: rawBeacon.port,
                             receiverHasPro: rawBeacon.receiverHasPro
                         )
-                        Task { @MainActor in
+                        Task { @MainActor [weak self] in
                             guard let self else { return }
                             if let idx = self.discoveredBeacons.firstIndex(where: { $0.sessionId == sanitized.sessionId }) {
                                 self.discoveredBeacons[idx] = sanitized
