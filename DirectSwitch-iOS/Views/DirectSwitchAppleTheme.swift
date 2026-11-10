@@ -186,7 +186,7 @@ extension View {
     }
 }
 
-// MARK: - Barra superiore Apple HIG (senza icona ingannevole a sinistra nella Home + dicitura italiana chiara)
+// MARK: - Barra superiore Apple HIG (logo piccolo + DirectSwitch a sinistra nella Home, Premium Direct a destra)
 
 struct AppleTopNavigationBar: View {
     let title: String
@@ -198,10 +198,12 @@ struct AppleTopNavigationBar: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(AppleTheme.textPrimary)
-                    .lineLimit(1)
+                if showBackButton {
+                    Text(title)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .lineLimit(1)
+                }
 
                 HStack {
                     if showBackButton {
@@ -215,6 +217,13 @@ struct AppleTopNavigationBar: View {
                             .foregroundColor(AppleTheme.blue)
                         }
                         .buttonStyle(.plain)
+                    } else {
+                        HStack(spacing: 8) {
+                            DirectSwitchAppleEmblem(size: 26)
+                            Text("DirectSwitch")
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                        }
                     }
 
                     Spacer()

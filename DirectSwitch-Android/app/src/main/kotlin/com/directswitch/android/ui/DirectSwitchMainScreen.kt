@@ -734,19 +734,14 @@ private fun AndroidHomeView(
             }
             InfoCircleButton(
                 title = "Invia",
-                message = "Invia i dati da questo telefono verso il dispositivo di destinazione:\n• 'Invia a un nuovo iPhone' per trasferire verso un iPhone.\n• 'Passa a un nuovo Android' per trasferire verso un altro telefono Android."
+                message = "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (Android o iPhone) dove hai aperto 'Ricevi'."
             )
         }
 
         DirectSwitchPrimaryButton(
-            text = "Invia a un nuovo iPhone",
+            text = "Invia",
             onClick = onStartSend,
             containerColor = DirectSwitchTheme.blue
-        )
-
-        DirectSwitchNeutralOutlinedButton(
-            text = "Passa a un nuovo Android",
-            onClick = onStartSend
         )
     }
 

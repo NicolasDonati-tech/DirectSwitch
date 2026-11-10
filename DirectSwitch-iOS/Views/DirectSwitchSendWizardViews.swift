@@ -34,12 +34,7 @@ struct SendConnectStepView: View {
     @State private var showManualField: Bool = false
 
     private var headerTitle: String {
-        switch targetDestination {
-        case .newIPhone:
-            return "Invia a un nuovo iPhone"
-        case .newAndroid:
-            return "Passa a un nuovo Android"
-        }
+        "Invia"
     }
 
     var body: some View {
@@ -54,10 +49,8 @@ struct SendConnectStepView: View {
                             .font(.system(size: 23, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
-                            title: headerTitle,
-                            message: targetDestination == .newIPhone
-                                ? "Apri DirectSwitch sul nuovo iPhone e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR."
-                                : "Apri DirectSwitch sul nuovo Android e tocca 'Ricevi' (anche in Hotspot 5GHz diretto senza Wi-Fi). Inserisci qui il codice a 6 cifre oppure inquadra il codice QR."
+                            title: "Come inviare i dati",
+                            message: "Sull'altro telefono (iPhone o Android) apri DirectSwitch e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR."
                         )
                     }
                 }
@@ -65,7 +58,7 @@ struct SendConnectStepView: View {
                 // Card 1: Rilevamento automatico + Codice a 6 cifre (stile Passa a iOS / Passa a Android, sottotitoli dentro ⓘ)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 6) {
-                        Text(targetDestination == .newIPhone ? "iPhone rilevati" : "Dispositivi rilevati")
+                        Text("Dispositivi rilevati")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
@@ -91,7 +84,7 @@ struct SendConnectStepView: View {
                     if discoveredBeacons.isEmpty {
                         HStack(spacing: 12) {
                             AppleSettingsIcon(systemName: "wifi", color: AppleTheme.blue)
-                            Text(targetDestination == .newIPhone ? "Ricerca del nuovo iPhone..." : "Ricerca del nuovo Android...")
+                            Text("Ricerca dell'altro telefono...")
                                 .font(.system(size: 15, weight: .medium))
                                 .foregroundColor(AppleTheme.textPrimary)
                             Spacer()

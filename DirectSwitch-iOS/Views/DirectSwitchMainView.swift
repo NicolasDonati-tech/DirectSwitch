@@ -444,7 +444,7 @@ private struct DirectSwitchHomeView: View {
                 }
                 .padding(.bottom, 10)
 
-                // Sezione 1 (SOPRA): Invia (freccia verso destra ->, sottotitolo dentro ⓘ)
+                // Sezione 1 (SOPRA): Invia (freccia verso destra ->, sottotitolo dentro ⓘ, pulsante unico "Invia")
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
                         AppleSettingsIcon(systemName: "arrow.right", color: AppleTheme.blue)
@@ -454,21 +454,15 @@ private struct DirectSwitchHomeView: View {
                         Spacer()
                         InfoCircleButton(
                             title: "Invia",
-                            message: "Invia i dati da questo telefono verso il telefono di destinazione:\n• 'Invia a un nuovo iPhone' per trasferire verso un altro iPhone (100% gratuito).\n• 'Passa a un nuovo Android' per trasferire direttamente verso un telefono Android qui dentro l'app."
+                            message: "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (iPhone o Android) dove hai aperto 'Ricevi'.\n• Tra due iPhone è sempre 100% gratuito.\n• Verso Android senza cavo e senza formattare utilizza la modalità Premium Direct."
                         )
                     }
 
                     ApplePrimaryButton(
-                        title: "Invia a un nuovo iPhone",
+                        title: "Invia",
                         icon: "arrow.right",
                         color: AppleTheme.blue,
                         action: onStartSendToIPhone
-                    )
-
-                    AppleNeutralOutlinedButton(
-                        title: "Passa a un nuovo Android",
-                        icon: "arrow.right",
-                        action: onStartSendToAndroid
                     )
                 }
                 .appleCard()

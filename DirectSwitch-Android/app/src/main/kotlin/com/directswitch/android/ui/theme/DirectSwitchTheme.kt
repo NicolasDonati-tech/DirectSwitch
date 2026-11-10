@@ -249,14 +249,16 @@ fun AppleTopNavigationBar(
                 .padding(horizontal = 16.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = title,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.textPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            if (showBackButton) {
+                Text(
+                    text = title,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = DirectSwitchTheme.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -284,7 +286,18 @@ fun AppleTopNavigationBar(
                         )
                     }
                 } else {
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        DirectSwitchAppleEmblem(size = 26.dp)
+                        Text(
+                            text = "DirectSwitch",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.textPrimary
+                        )
+                    }
                 }
 
                 Surface(
