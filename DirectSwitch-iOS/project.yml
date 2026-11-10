@@ -1,0 +1,98 @@
+name: DirectSwitch
+options:
+  bundleIdPrefix: com.directswitch
+  xcodeVersion: "15.0"
+  objectVersion: 56
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  DirectSwitch:
+    type: application
+    platform: iOS
+    sources:
+      - DirectSwitchApp.swift
+      - Protocol
+      - Migrators
+      - Transport
+      - Views
+      - Resources
+      - Assets.xcassets
+      - PrivacyInfo.xcprivacy
+    scheme:
+      testTargets:
+        - DirectSwitchTests
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: DirectSwitch
+        CFBundleName: DirectSwitch
+        CFBundleDevelopmentRegion: it
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSHumanReadableCopyright: "Copyright © 2026 Nicolas Donati. Tutti i diritti riservati."
+        LSRequiresIPhoneOS: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSBonjourServices:
+          - _directswitch._tcp
+        NSLocalNetworkUsageDescription: "DirectSwitch utilizza la rete Wi-Fi locale per trasferire i tuoi dati ad alta velocità direttamente tra i due telefoni senza passare dal cloud."
+        NSContactsUsageDescription: "DirectSwitch legge e unisce la Rubrica sul nuovo telefono evitando duplicati."
+        NSPhotoLibraryUsageDescription: "DirectSwitch accede a foto e video per trasferirli mantenendo data di scatto, posizione GPS e Album."
+        NSPhotoLibraryAddUsageDescription: "DirectSwitch salva nel Rullino le foto e i video ricevuti dal vecchio telefono."
+        NSCalendarsUsageDescription: "DirectSwitch trasferisce gli appuntamenti del Calendario sul nuovo telefono."
+        NSCalendarsFullAccessUsageDescription: "DirectSwitch legge e importa gli appuntamenti del Calendario evitando eventi duplicati sul nuovo telefono."
+        NSCalendarsWriteOnlyAccessUsageDescription: "DirectSwitch salva gli appuntamenti ricevuti nel Calendario del nuovo telefono."
+        NSCameraUsageDescription: "DirectSwitch utilizza la fotocamera per inquadrare il codice QR del telefono ricevente."
+        LSApplicationQueriesSchemes:
+          - com.cloudsave.ios
+          - whatsapp
+          - whatsapp-smb
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: "Archivio WhatsApp o Documento DirectSwitch"
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.zip-archive
+              - com.pkware.zip-archive
+              - com.adobe.pdf
+              - public.plain-text
+              - public.text
+              - public.data
+              - public.content
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: com.directswitch.ios.pairing
+            CFBundleURLSchemes:
+              - directswitch
+              - com.directswitch.ios
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.directswitch.ios
+        MARKETING_VERSION: 1.1.0
+        CURRENT_PROJECT_VERSION: 2
+        SWIFT_VERSION: 5.9
+        ENABLE_TESTABILITY: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: DirectSwitch.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+  DirectSwitchTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: DirectSwitch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.directswitch.ios.tests
+        SWIFT_VERSION: 5.9
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/DirectSwitch.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/DirectSwitch"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES

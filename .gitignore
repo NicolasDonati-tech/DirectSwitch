@@ -1,0 +1,26 @@
+# Android / Gradle
+DirectSwitch-Android/.gradle/
+DirectSwitch-Android/.kotlin/
+DirectSwitch-Android/build/
+DirectSwitch-Android/app/build/
+DirectSwitch-Android/local.properties
+DirectSwitch-Android/keystore.properties
+
+# Keystores & Secrets (NEVER commit)
+*.jks
+*.keystore
+keystore.properties
+
+# Built Binaries
+*.apk
+*.aab
+*.ipa
+
+# iOS / XcodeGen
+DirectSwitch-iOS/*.xcodeproj/
+DirectSwitch-iOS/build_output/
+DirectSwitch-iOS/Payload/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,162 @@
+name: DirectSwitch CI & Release (Android APK & iOS IPA)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Run Android Unit Tests & Build APK
+        env:
+          DS_STORE_PASSWORD: ${{ secrets.DS_STORE_PASSWORD }}
+          DS_KEY_ALIAS: ${{ secrets.DS_KEY_ALIAS }}
+          DS_KEY_PASSWORD: ${{ secrets.DS_KEY_PASSWORD }}
+        run: |
+          ANDROID_DIR="DirectSwitch-Android"
+          if [ -d "DirectSwitch/DirectSwitch-Android" ]; then
+            ANDROID_DIR="DirectSwitch/DirectSwitch-Android"
+          fi
+          cd "$ANDROID_DIR"
+          chmod +x gradlew
+          if [ -n "${{ secrets.DS_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.DS_KEYSTORE_BASE64 }}" | base64 -d > directswitch-release-key.jks
+            DS_STORE_FILE="$PWD/directswitch-release-key.jks" ./gradlew --console=plain testDebugUnitTest assembleRelease
+            rm -f directswitch-release-key.jks
+          else
+            ./gradlew --console=plain testDebugUnitTest assembleDebug
+          fi
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DirectSwitch-Android-APK
+          path: |
+            **/DirectSwitch-Android/app/build/outputs/apk/release/*.apk
+            **/DirectSwitch-Android/app/build/outputs/apk/debug/*.apk
+
+  build-and-test-ios:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: which xcodegen || brew install xcodegen
+
+      - name: Generate Xcode Project & Compile DirectSwitch iOS Release
+        run: |
+          set -o pipefail
+          IOS_DIR="DirectSwitch-iOS"
+          if [ -d "DirectSwitch/DirectSwitch-iOS" ]; then
+            IOS_DIR="DirectSwitch/DirectSwitch-iOS"
+          fi
+          cd "$IOS_DIR"
+          xcodegen generate
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' DirectSwitch.xcodeproj/project.pbxproj
+          sed -i '' 's/preferredProjectObjectVersion = 77;/preferredProjectObjectVersion = 56;/g' DirectSwitch.xcodeproj/project.pbxproj
+          xcodebuild -project DirectSwitch.xcodeproj \
+            -scheme DirectSwitch \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build_output \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            clean build 2>&1 | tee "$GITHUB_WORKSPACE/xcodebuild.log"
+
+      - name: Verify Bundle & Package Free-Install + Release IPAs
+        run: |
+          set -o pipefail
+          IOS_DIR="DirectSwitch-iOS"
+          if [ -d "DirectSwitch/DirectSwitch-iOS" ]; then
+            IOS_DIR="DirectSwitch/DirectSwitch-iOS"
+          fi
+          cd "$IOS_DIR"
+          APP_BUNDLE="build_output/Build/Products/Release-iphoneos/DirectSwitch.app"
+          APP_PLIST="$APP_BUNDLE/Info.plist"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PLIST")
+          APP_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PLIST")
+          echo "Verified DirectSwitch.app: bundleId=$BUNDLE_ID version=$APP_VER"
+          test "$BUNDLE_ID" = "com.directswitch.ios"
+
+          # 1. DirectSwitch-Free-Install.ipa (compatibile Apple ID gratuito via Sideloadly / AltStore)
+          rm -rf Payload_Free
+          mkdir -p Payload_Free/Payload
+          cp -r "$APP_BUNDLE" Payload_Free/Payload/
+          rm -rf Payload_Free/Payload/DirectSwitch.app/_CodeSignature
+          (cd Payload_Free && zip -r9 "$GITHUB_WORKSPACE/DirectSwitch-Free-Install.ipa" Payload)
+          rm -rf Payload_Free
+
+          # 2. DirectSwitch-Release.ipa (con entitlements completi HotspotConfiguration + App Groups)
+          rm -rf Payload
+          mkdir -p Payload
+          cp -r "$APP_BUNDLE" Payload/
+          codesign --force --sign - --entitlements DirectSwitch.entitlements Payload/DirectSwitch.app
+          zip -r9 "$GITHUB_WORKSPACE/DirectSwitch-Release.ipa" Payload
+          rm -rf Payload
+
+      - name: Upload DirectSwitch IPA Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DirectSwitch-Release-IPA
+          path: |
+            DirectSwitch-Free-Install.ipa
+            DirectSwitch-Release.ipa
+
+      - name: Publish latest DirectSwitch IPAs to latest-directswitch-ipa branch
+        if: success() && github.event_name != 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TMP_DIR=$(mktemp -d)
+          cp DirectSwitch-Free-Install.ipa "$TMP_DIR/DirectSwitch-Free-Install.ipa"
+          cp DirectSwitch-Release.ipa "$TMP_DIR/DirectSwitch-Release.ipa"
+          echo "${GITHUB_SHA}" > "$TMP_DIR/commit.txt"
+          cd "$TMP_DIR"
+          git init -b latest-directswitch-ipa
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add DirectSwitch-Free-Install.ipa DirectSwitch-Release.ipa commit.txt
+          git commit -m "Build DirectSwitch IPAs for ${GITHUB_SHA}"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" latest-directswitch-ipa
+
+      - name: Publish build diagnostics on failure
+        if: failure() && github.event_name != 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TMP_DIR=$(mktemp -d)
+          echo "${GITHUB_SHA}" > "$TMP_DIR/failed-commit.txt"
+          if [ -f "$GITHUB_WORKSPACE/xcodebuild.log" ]; then
+            grep -E "(error:|warning:.*error|fatal error|BUILD FAILED)" -B 2 -A 5 "$GITHUB_WORKSPACE/xcodebuild.log" | tail -n 250 > "$TMP_DIR/errors.log" || true
+            tail -n 250 "$GITHUB_WORKSPACE/xcodebuild.log" > "$TMP_DIR/tail.log" || true
+          fi
+          cd "$TMP_DIR"
+          git init -b latest-directswitch-ipa
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "DirectSwitch build failure diagnostics for ${GITHUB_SHA}"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" latest-directswitch-ipa

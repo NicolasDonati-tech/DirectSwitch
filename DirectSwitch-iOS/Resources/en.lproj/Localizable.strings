@@ -1,0 +1,13 @@
+/* 
+  Localizable.strings (en)
+  DirectSwitch-iOS
+*/
+"app_title" = "DirectSwitch";
+"app_subtitle" = "Direct transfer without wiping your iPhone";
+"pro_active" = "PRO ACTIVE";
+"android_bridge" = "Android Bridge";
+"receive_on_iphone" = "Receive Data on This iPhone";
+"send_from_iphone" = "Send Data from This iPhone";
+"start_encrypted_transfer" = "Start Encrypted Transfer";
+"pin_label_format" = "Auto-Discovery PIN Code: %@";
+"add_documents_whatsapp" = "Add Documents or WhatsApp Archive (.zip)";

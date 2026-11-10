@@ -1,0 +1,13 @@
+/* 
+  Localizable.strings (it)
+  DirectSwitch-iOS
+*/
+"app_title" = "DirectSwitch";
+"app_subtitle" = "Trasferimento diretto senza formattare l'iPhone";
+"pro_active" = "PRO ATTIVO";
+"android_bridge" = "Android Bridge";
+"receive_on_iphone" = "Ricevi Dati su Questo iPhone";
+"send_from_iphone" = "Invia Dati da Questo iPhone";
+"start_encrypted_transfer" = "Avvia Trasferimento Cifrato";
+"pin_label_format" = "Codice PIN Auto-Discovery: %@";
+"add_documents_whatsapp" = "Aggiungi Documenti o Archivio WhatsApp (.zip)";

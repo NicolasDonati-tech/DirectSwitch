@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DirectSwitch</string>
+    <string name="app_subtitle">Direct transfer to already set up phones</string>
+    <string name="share_with_directswitch">Transfer with DirectSwitch</string>
+    <string name="pro_active_badge">PRO ACTIVE</string>
+    <string name="ios_bridge_badge">iOS Bridge</string>
+    <string name="back_button">Back</string>
+    <string name="close_button">Close</string>
+    <string name="start_encrypted_transfer">Start Encrypted Direct Transfer</string>
+    <string name="restore_default_sms_prompt">SMS import complete: tap below to restore your default Messages app.</string>
+    <string name="restore_default_sms_button">Restore Default Messages App</string>
+    <string name="add_docs_or_whatsapp_button">Add Documents or WhatsApp Chat Export (.zip)</string>
+</resources>

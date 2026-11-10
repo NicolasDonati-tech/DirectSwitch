@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DirectSwitch</string>
+    <string name="app_subtitle">Trasferimento diretto a telefoni già configurati</string>
+    <string name="share_with_directswitch">Trasferisci con DirectSwitch</string>
+    <string name="pro_active_badge">PRO ATTIVO</string>
+    <string name="ios_bridge_badge">iOS Bridge</string>
+    <string name="back_button">Indietro</string>
+    <string name="close_button">Chiudi</string>
+    <string name="start_encrypted_transfer">Avvia Trasferimento Diretto Cifrato</string>
+    <string name="restore_default_sms_prompt">Importazione SMS completata: tocca qui per ripristinare la tua app Messaggi predefinita.</string>
+    <string name="restore_default_sms_button">Ripristina App Messaggi Predefinita</string>
+    <string name="add_docs_or_whatsapp_button">Aggiungi Documenti o Export Chat WhatsApp (.zip)</string>
+</resources>
