@@ -10,7 +10,7 @@ import SwiftUI
 import CoreImage.CIFilterBuiltins
 import UIKit
 
-// MARK: - Tema grafico Apple HIG (identità visiva condivisa con CloudSave)
+// MARK: - Tema grafico Apple HIG (Base Perla + Colori Neutri ed Eleganti, Zero Viola)
 
 enum AppleTheme {
     static let canvasTop = Color(red: 0.878, green: 0.906, blue: 0.945)      // #E0E7F1
@@ -25,12 +25,15 @@ enum AppleTheme {
     static let hairline = Color(red: 0.780, green: 0.816, blue: 0.871)       // #C7D0DE
 
     static let blue = Color(red: 0.000, green: 0.478, blue: 1.000)           // Apple #007AFF
+    static let teal = Color(red: 0.000, green: 0.541, blue: 0.659)           // Ocean Teal #008AA8
     static let green = Color(red: 0.204, green: 0.780, blue: 0.349)          // Apple #34C759
     static let orange = Color(red: 1.000, green: 0.584, blue: 0.000)         // Apple #FF9500
     static let red = Color(red: 1.000, green: 0.231, blue: 0.188)            // Apple #FF3B30
-    static let indigo = Color(red: 0.345, green: 0.337, blue: 0.839)         // Apple #5856D6
-    static let teal = Color(red: 0.188, green: 0.690, blue: 0.780)           // Apple #30B0C7
-    static let charcoal = Color(red: 0.110, green: 0.110, blue: 0.118)       // Apple #1C1C1E
+    static let slate = Color(red: 0.216, green: 0.255, blue: 0.318)          // Grigio Ardesia Neutro #374151
+    static let charcoal = Color(red: 0.110, green: 0.118, blue: 0.137)       // Grafite Scuro Neutro #1C1E23
+
+    // Alias neutro al posto del vecchio indaco/viola
+    static let indigo = slate
 
     static let textPrimary = Color(red: 0.110, green: 0.110, blue: 0.118)    // #1C1C1E
     static let textSecondary = Color(red: 0.388, green: 0.388, blue: 0.400)  // #636366
@@ -45,104 +48,94 @@ enum AppleTheme {
     }
 }
 
-// MARK: - Emblema scolpito DirectSwitch in stile Apple / Passa a iOS / CloudSave
+// MARK: - Emblema DirectSwitch identico al 100% all'icona AppIcon-1024.png
 
 struct DirectSwitchAppleEmblem: View {
-    var size: CGFloat = 56
+    var size: CGFloat = 86
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+            RoundedRectangle(cornerRadius: size * 0.235, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.169, green: 0.651, blue: 1.000),
-                            Color(red: 0.000, green: 0.400, blue: 0.961),
-                            Color(red: 0.071, green: 0.169, blue: 0.533)
+                            Color(red: 0.071, green: 0.518, blue: 1.000), // #1284FF
+                            Color(red: 0.000, green: 0.345, blue: 0.839), // #0058D6
+                            Color(red: 0.000, green: 0.541, blue: 0.659)  // #008AA8
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
                 .frame(width: size, height: size)
-                .shadow(color: AppleTheme.blue.opacity(0.24), radius: 8, x: 0, y: 4)
+                .shadow(color: AppleTheme.blue.opacity(0.22), radius: 10, x: 0, y: 5)
 
             Canvas { context, canvasSize in
                 let w = canvasSize.width
                 let h = canvasSize.height
 
-                // Telefono posteriore glassmorphic (in alto a destra)
-                var backLayer = context
-                backLayer.opacity = 0.38
-                let backPhone = RoundedRectangle(cornerRadius: w * 0.09, style: .continuous)
-                    .path(in: CGRect(x: w * 0.44, y: h * 0.16, width: w * 0.34, height: h * 0.52))
-                backLayer.fill(backPhone, with: .color(.white))
+                // 1. Telefono posteriore glassmorphic (in alto a destra, identico a AppIcon-1024.png)
+                let backRect = CGRect(x: w * 0.439, y: h * 0.151, width: w * 0.312, height: h * 0.478)
+                let backPath = RoundedRectangle(cornerRadius: w * 0.073, style: .continuous).path(in: backRect)
+                context.fill(backPath, with: .color(Color.white.opacity(0.37)))
+                context.stroke(backPath, with: .color(Color.white.opacity(0.47)), lineWidth: max(1.0, w * 0.012))
 
-                // Telefono principale scolpito bianco-perla (in basso a sinistra)
+                // 2. Telefono principale bianco-perla scolpito (in basso a sinistra)
+                let frontRect = CGRect(x: w * 0.244, y: h * 0.244, width: w * 0.337, height: h * 0.518)
+                let frontPath = RoundedRectangle(cornerRadius: w * 0.080, style: .continuous).path(in: frontRect)
+
                 context.drawLayer { layer in
                     var sub = layer
                     sub.addFilter(
                         .shadow(
-                            color: Color(red: 0.02, green: 0.07, blue: 0.27).opacity(0.28),
-                            radius: w * 0.045,
+                            color: Color(red: 0.03, green: 0.09, blue: 0.23).opacity(0.28),
+                            radius: w * 0.042,
                             x: 0,
-                            y: h * 0.028
+                            y: h * 0.025
                         )
                     )
-                    let frontRect = CGRect(x: w * 0.22, y: h * 0.30, width: w * 0.36, height: h * 0.54)
-                    let frontPath = RoundedRectangle(cornerRadius: w * 0.095, style: .continuous).path(in: frontRect)
                     sub.fill(
                         frontPath,
                         with: .linearGradient(
                             Gradient(colors: [
                                 Color.white,
-                                Color(red: 0.902, green: 0.945, blue: 1.000)
+                                Color(red: 0.910, green: 0.949, blue: 0.988)
                             ]),
-                            startPoint: CGPoint(x: w * 0.40, y: h * 0.30),
-                            endPoint: CGPoint(x: w * 0.40, y: h * 0.84)
+                            startPoint: CGPoint(x: frontRect.midX, y: frontRect.minY),
+                            endPoint: CGPoint(x: frontRect.midX, y: frontRect.maxY)
                         )
                     )
                 }
 
-                // Tacca altoparlante sottile sul telefono frontale
-                let notchRect = CGRect(x: w * 0.35, y: h * 0.345, width: w * 0.10, height: h * 0.022)
+                // 3. Tacca speaker superiore
+                let pillRect = CGRect(x: w * 0.371, y: h * 0.282, width: w * 0.083, height: h * 0.0185)
                 context.fill(
-                    Capsule().path(in: notchRect),
-                    with: .color(Color(red: 0.000, green: 0.400, blue: 0.961).opacity(0.32))
+                    Capsule().path(in: pillRect),
+                    with: .color(Color(red: 0.000, green: 0.384, blue: 0.839).opacity(0.26))
                 )
+
+                // 4. Doppia freccia orizzontale (Blu destra + Teal sinistra) identica a AppIcon-1024.png
+                let strokeW = max(1.8, w * 0.0265)
+                let style = StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round)
+
+                var rightArrow = Path()
+                rightArrow.move(to: CGPoint(x: w * 0.332, y: h * 0.466))
+                rightArrow.addLine(to: CGPoint(x: w * 0.493, y: h * 0.466))
+                rightArrow.move(to: CGPoint(x: w * 0.449, y: h * 0.422))
+                rightArrow.addLine(to: CGPoint(x: w * 0.495, y: h * 0.466))
+                rightArrow.addLine(to: CGPoint(x: w * 0.449, y: h * 0.510))
+                context.stroke(rightArrow, with: .color(Color(red: 0.000, green: 0.439, blue: 0.941)), style: style)
+
+                var leftArrow = Path()
+                leftArrow.move(to: CGPoint(x: w * 0.493, y: h * 0.564))
+                leftArrow.addLine(to: CGPoint(x: w * 0.332, y: h * 0.564))
+                leftArrow.move(to: CGPoint(x: w * 0.376, y: h * 0.520))
+                leftArrow.addLine(to: CGPoint(x: w * 0.330, y: h * 0.564))
+                leftArrow.addLine(to: CGPoint(x: w * 0.376, y: h * 0.608))
+                context.stroke(leftArrow, with: .color(Color(red: 0.000, green: 0.541, blue: 0.659)), style: style)
             }
             .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
-
-            // Frecce bidirezionali Apple Blue al centro dello schermo frontale (identiche all'AppIcon)
-            Image(systemName: "arrow.left.arrow.right")
-                .font(.system(size: size * 0.21, weight: .bold))
-                .foregroundColor(AppleTheme.blue)
-                .offset(x: -size * 0.10, y: size * 0.09)
-        }
-    }
-}
-
-struct GoogleGlyphIcon: View {
-    var size: CGFloat = 19
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color.white)
-                .frame(width: size + 4, height: size + 4)
-            Text("G")
-                .font(.system(size: size * 0.82, weight: .bold, design: .rounded))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.26, green: 0.52, blue: 0.96),
-                            Color(red: 0.20, green: 0.66, blue: 0.33)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.235, style: .continuous))
         }
     }
 }
@@ -158,7 +151,7 @@ struct AppleSettingsIcon: View {
                 .fill(color)
                 .frame(width: size, height: size)
             Image(systemName: systemName)
-                .font(.system(size: size * 0.47, weight: .semibold))
+                .font(.system(size: size * 0.46, weight: .semibold))
                 .foregroundColor(.white)
         }
     }
@@ -187,7 +180,7 @@ extension View {
     }
 }
 
-// MARK: - Barra superiore Apple HIG (identica a CloudSave)
+// MARK: - Barra superiore Apple HIG (senza icona ingannevole a sinistra nella Home + dicitura italiana chiara)
 
 struct AppleTopNavigationBar: View {
     let title: String
@@ -216,24 +209,26 @@ struct AppleTopNavigationBar: View {
                             .foregroundColor(AppleTheme.blue)
                         }
                         .buttonStyle(.plain)
-                    } else {
-                        DirectSwitchAppleEmblem(size: 28)
                     }
 
                     Spacer()
 
                     Button(action: onTapPassBadge) {
-                        HStack(spacing: 4) {
-                            Image(systemName: isProUnlocked ? "checkmark.seal.fill" : "arrow.triangle.2.circlepath")
+                        HStack(spacing: 5) {
+                            Image(systemName: isProUnlocked ? "checkmark.seal.fill" : "arrow.left.arrow.right")
                                 .font(.system(size: 11, weight: .semibold))
-                            Text(isProUnlocked ? "Pro" : "Cross-OS")
+                            Text(isProUnlocked ? "Tutto sbloccato" : "iPhone ↔ Android")
                                 .font(.system(size: 12, weight: .semibold))
                         }
-                        .foregroundColor(isProUnlocked ? AppleTheme.green : AppleTheme.blue)
+                        .foregroundColor(isProUnlocked ? AppleTheme.green : AppleTheme.slate)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
-                        .background((isProUnlocked ? AppleTheme.green : AppleTheme.blue).opacity(0.12))
+                        .background(isProUnlocked ? AppleTheme.green.opacity(0.14) : AppleTheme.inputSurface)
                         .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(AppleTheme.cardBorder, lineWidth: isProUnlocked ? 0 : 0.8)
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -249,7 +244,7 @@ struct AppleTopNavigationBar: View {
     }
 }
 
-// MARK: - Pulsante ⓘ informativo (mantiene le schermate pulite senza muri di testo)
+// MARK: - Pulsante ⓘ informativo
 
 struct InfoCircleButton: View {
     let title: String
@@ -319,7 +314,7 @@ struct ApplePrimaryButton: View {
             HStack(spacing: 8) {
                 if let iconName = icon {
                     Image(systemName: iconName)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                 }
                 Text(title)
                     .font(.system(size: 16, weight: .semibold))
@@ -332,6 +327,34 @@ struct ApplePrimaryButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+    }
+}
+
+struct AppleNeutralOutlinedButton: View {
+    let title: String
+    var icon: String = "arrow.left.arrow.right"
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(AppleTheme.slate)
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(AppleTheme.textPrimary)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background(AppleTheme.inputSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(AppleTheme.cardBorder, lineWidth: 1.0)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -361,32 +384,7 @@ struct AppleSecondaryButton: View {
     }
 }
 
-struct GoogleStyleActionButton: View {
-    let title: String
-    var action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                GoogleGlyphIcon(size: 18)
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(AppleTheme.textPrimary)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 46)
-            .background(AppleTheme.cardSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .stroke(AppleTheme.cardBorder, lineWidth: 1.1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Riga categoria pulita in stile Impostazioni Apple / Android Switch / CloudSave
+// MARK: - Riga categoria pulita in stile Impostazioni Apple / Passa a Android
 
 struct CleanCategoryToggleRow: View {
     let icon: String
@@ -421,7 +419,7 @@ struct CleanCategoryToggleRow: View {
     }
 }
 
-// MARK: - Caselle codice a 6 cifre in stile "Passa a iOS" (Display & Input)
+// MARK: - Caselle codice a 6 cifre in stile "Passa a iOS" / "Passa a Android"
 
 struct PassaAiOSCodeBoxesView: View {
     let code: String
@@ -470,7 +468,6 @@ struct PassaAiOSPinInputView: View {
 
     var body: some View {
         ZStack {
-            // Campo numerico invisibile ma pienamente accessibile che guida la tastiera numerica iOS
             TextField("", text: $pin)
                 .keyboardType(.numberPad)
                 .textContentType(.oneTimeCode)

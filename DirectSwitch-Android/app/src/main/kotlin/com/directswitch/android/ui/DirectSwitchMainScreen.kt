@@ -42,10 +42,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -58,6 +57,7 @@ import androidx.compose.material.icons.filled.PhoneIphone
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Sms
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
@@ -126,11 +126,10 @@ import com.directswitch.android.ui.theme.AppleTopNavigationBar
 import com.directswitch.android.ui.theme.CleanCategoryToggleRow
 import com.directswitch.android.ui.theme.DirectSwitchAppleEmblem
 import com.directswitch.android.ui.theme.DirectSwitchCard
+import com.directswitch.android.ui.theme.DirectSwitchNeutralOutlinedButton
 import com.directswitch.android.ui.theme.DirectSwitchPrimaryButton
 import com.directswitch.android.ui.theme.DirectSwitchSecondaryButton
 import com.directswitch.android.ui.theme.DirectSwitchTheme
-import com.directswitch.android.ui.theme.GoogleGlyphIcon
-import com.directswitch.android.ui.theme.GoogleStyleActionButton
 import com.directswitch.android.ui.theme.InfoCircleButton
 import com.directswitch.android.ui.theme.PassaAiOSCodeBoxes
 import com.directswitch.android.ui.theme.QrBitmapGenerator
@@ -690,19 +689,19 @@ private fun AndroidHomeView(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 6.dp),
+            .padding(top = 18.dp, bottom = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        DirectSwitchAppleEmblem(size = 64.dp)
+        DirectSwitchAppleEmblem(size = 88.dp)
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Text(
                 text = "DirectSwitch",
-                fontSize = 26.sp,
+                fontSize = 28.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.textPrimary
             )
@@ -714,12 +713,12 @@ private fun AndroidHomeView(
 
         Text(
             text = "Copia i tuoi dati senza formattare",
-            fontSize = 15.sp,
+            fontSize = 16.sp,
             color = DirectSwitchTheme.textSecondary
         )
     }
 
-    // Card 1: Questo è il Nuovo telefono (Ricevi)
+    // Card 1: Questo è il Nuovo telefono (Ricevi con freccia orizzontale)
     DirectSwitchCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -728,16 +727,16 @@ private fun AndroidHomeView(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                AppleSettingsIcon(icon = Icons.Filled.ArrowDownward, color = DirectSwitchTheme.blue)
+                AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowForward, color = DirectSwitchTheme.blue)
                 Text(
                     text = buildAnnotatedString {
                         append("Questo è il ")
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Nuovo") }
                         append(" telefono")
                     },
-                    fontSize = 16.sp,
+                    fontSize = 17.sp,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
@@ -748,13 +747,13 @@ private fun AndroidHomeView(
         }
 
         DirectSwitchPrimaryButton(
-            text = "Ricevi su questo telefono",
+            text = "Ricevi da vecchio iPhone o Android",
             onClick = onStartReceive,
             containerColor = DirectSwitchTheme.blue
         )
     }
 
-    // Card 2: Questo è il Vecchio telefono (Invia + Opzione Cavo Google)
+    // Card 2: Questo è il Vecchio telefono (frecce orizzontali + scelta chiara iPhone vs Android)
     DirectSwitchCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -763,34 +762,34 @@ private fun AndroidHomeView(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                AppleSettingsIcon(icon = Icons.Filled.ArrowUpward, color = DirectSwitchTheme.indigo)
+                AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.slate)
                 Text(
                     text = buildAnnotatedString {
                         append("Questo è il ")
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Vecchio") }
                         append(" telefono")
                     },
-                    fontSize = 16.sp,
+                    fontSize = 17.sp,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
             InfoCircleButton(
-                title = "Invia al nuovo telefono",
-                message = "• Tocca 'Invia al nuovo telefono' per copiare in Wi-Fi o Hotspot 5GHz verso il nuovo iPhone o Android.\n• Tocca 'Usa Configura / Cavo Google' per sbloccare il trasferimento ufficiale Google su telefoni già avviati."
+                title = "Scegli il telefono di destinazione",
+                message = "• Tocca 'Invia a un nuovo iPhone' se il tuo nuovo telefono è un iPhone.\n• Tocca 'Passa a un nuovo Android' se il tuo nuovo telefono è un Android."
             )
         }
 
         DirectSwitchPrimaryButton(
-            text = "Invia al nuovo telefono",
+            text = "Invia a un nuovo iPhone",
             onClick = onStartSend,
             containerColor = DirectSwitchTheme.charcoal
         )
 
-        GoogleStyleActionButton(
-            text = "Usa Configura / Cavo Google",
-            onClick = onOpenGoogleBridge
+        DirectSwitchNeutralOutlinedButton(
+            text = "Passa a un nuovo Android",
+            onClick = onStartSend
         )
 
         TextButton(
@@ -1648,10 +1647,10 @@ private fun CrossOsProPassSheetContent(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        DirectSwitchAppleEmblem(size = 54.dp)
-        Text("Pass Android ↔ iPhone", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        DirectSwitchAppleEmblem(size = 64.dp)
+        Text("Passaggio iPhone ↔ Android", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
         Text(
-            "Android ↔ Android e Configura Google sono 100% gratuiti. Per il passaggio diretto verso iPhone sblocchi tutto su entrambi i telefoni con un solo acquisto.",
+            "Android ↔ Android è sempre 100% gratuito. Per il passaggio diretto con iPhone sblocchi tutto su entrambi i telefoni con un solo acquisto.",
             fontSize = 14.sp,
             color = DirectSwitchTheme.textSecondary,
             textAlign = TextAlign.Center
@@ -1699,8 +1698,8 @@ private fun GoogleSetupBridgeSheetContent(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            GoogleGlyphIcon(size = 22.dp)
-            Text("Configura / Android Switch Google", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+            AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.slate)
+            Text("Passa a Android / Configura", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
         }
         Text(
             "Avvia lo strumento nativo di Google anche se il nuovo telefono è già configurato:",

@@ -154,7 +154,7 @@ enum iOSLicenseStore {
                     if case .verified(let transaction) = verification {
                         await transaction.finish()
                         isLocalProUnlocked = true
-                        return (true, "Pass Cross-OS App Store verificato e attivato!")
+                        return (true, "Pass iPhone ↔ Android verificato e attivato!")
                     }
                     return (false, "Verifica crittografica ricevuta App Store non riuscita.")
                 case .userCancelled:
@@ -166,14 +166,14 @@ enum iOSLicenseStore {
                 }
             } else if canFallback {
                 isLocalProUnlocked = true
-                return (true, "Pass Cross-OS attivato (Solo DEBUG — Test Locale).")
+                return (true, "Pass iPhone ↔ Android attivato (Solo DEBUG — Test Locale).")
             } else {
                 return (false, "Prodotto non ancora disponibile su App Store.")
             }
         } catch {
             if canFallback {
                 isLocalProUnlocked = true
-                return (true, "Pass Cross-OS attivato (Solo DEBUG — Test Locale).")
+                return (true, "Pass iPhone ↔ Android attivato (Solo DEBUG — Test Locale).")
             }
             return (false, "Errore StoreKit: \(error.localizedDescription)")
         }

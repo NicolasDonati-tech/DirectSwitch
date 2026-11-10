@@ -10,6 +10,7 @@ package com.directswitch.android.ui.theme
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -54,11 +56,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -70,8 +77,7 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 
 /**
- * Tema grafico Apple HIG condiviso con CloudSave (palette perla #F8FAFD, sfumatura #E0E7F1 -> #DAE2EE,
- * icone AppleSettingsIcon, pulsante informativo ⓘ e navigazione superiore pulita).
+ * Tema grafico Apple HIG condiviso con CloudSave (base perla #F8FAFD + colori neutri senza viola).
  */
 object DirectSwitchTheme {
     val canvasTop = Color(0xFFE0E7F1)
@@ -86,14 +92,15 @@ object DirectSwitchTheme {
     val hairline = Color(0xFFC7D0DE)
 
     val blue = Color(0xFF007AFF)
+    val teal = Color(0xFF008AA8)
     val green = Color(0xFF34C759)
     val orange = Color(0xFFFF9500)
     val red = Color(0xFFFF3B30)
-    val indigo = Color(0xFF5856D6)
-    val teal = Color(0xFF30B0C7)
-    val charcoal = Color(0xFF1C1C1E)
+    val slate = Color(0xFF374151)
+    val charcoal = Color(0xFF1C1E23)
 
-    // Alias di retrocompatibilità interna
+    // Alias neutro senza viola
+    val indigo = slate
     val tealPrimary = blue
     val blueAccent = blue
     val greenSuccess = green
@@ -113,60 +120,83 @@ object DirectSwitchTheme {
 }
 
 @Composable
-fun DirectSwitchAppleEmblem(size: Dp = 56.dp) {
-    val radius = size * 0.24f
+fun DirectSwitchAppleEmblem(size: Dp = 88.dp) {
+    val radius = size * 0.235f
     Box(
         modifier = Modifier
             .size(size)
             .shadow(
-                elevation = 6.dp,
+                elevation = 8.dp,
                 shape = RoundedCornerShape(radius),
-                ambientColor = DirectSwitchTheme.blue.copy(alpha = 0.28f),
-                spotColor = DirectSwitchTheme.blue.copy(alpha = 0.28f)
+                ambientColor = DirectSwitchTheme.blue.copy(alpha = 0.24f),
+                spotColor = DirectSwitchTheme.blue.copy(alpha = 0.24f)
             )
             .clip(RoundedCornerShape(radius))
             .background(
                 Brush.linearGradient(
                     colors = listOf(
-                        Color(0xFF2BA6FF),
-                        Color(0xFF0066F5),
-                        Color(0xFF122B88)
-                    )
-                )
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = Icons.Filled.SwapHoriz,
-            contentDescription = "DirectSwitch",
-            tint = Color.White,
-            modifier = Modifier.size(size * 0.54f)
-        )
-    }
-}
-
-@Composable
-fun GoogleGlyphIcon(size: Dp = 19.dp) {
-    Box(
-        modifier = Modifier
-            .size(size + 4.dp)
-            .clip(CircleShape)
-            .background(Color.White),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = "G",
-            style = TextStyle(
-                fontSize = (size.value * 0.82f).sp,
-                fontWeight = FontWeight.Bold,
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        Color(0xFF4285F4),
-                        Color(0xFF34A853)
+                        Color(0xFF1284FF),
+                        Color(0xFF0058D6),
+                        Color(0xFF008AA8)
                     )
                 )
             )
-        )
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = this.size.width
+            val h = this.size.height
+
+            // 1. Telefono posteriore glassmorphic
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.37f),
+                topLeft = Offset(w * 0.439f, h * 0.151f),
+                size = Size(w * 0.312f, h * 0.478f),
+                cornerRadius = CornerRadius(w * 0.073f, w * 0.073f)
+            )
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.47f),
+                topLeft = Offset(w * 0.439f, h * 0.151f),
+                size = Size(w * 0.312f, h * 0.478f),
+                cornerRadius = CornerRadius(w * 0.073f, w * 0.073f),
+                style = Stroke(width = w * 0.012f)
+            )
+
+            // 2. Telefono frontale bianco-perla
+            drawRoundRect(
+                color = Color.White,
+                topLeft = Offset(w * 0.244f, h * 0.244f),
+                size = Size(w * 0.337f, h * 0.518f),
+                cornerRadius = CornerRadius(w * 0.080f, w * 0.080f)
+            )
+
+            // 3. Tacca speaker
+            drawRoundRect(
+                color = Color(0xFF0062D6).copy(alpha = 0.26f),
+                topLeft = Offset(w * 0.371f, h * 0.282f),
+                size = Size(w * 0.083f, h * 0.0185f),
+                cornerRadius = CornerRadius(w * 0.01f, w * 0.01f)
+            )
+
+            // 4. Doppia freccia orizzontale (Blu -> destra, Teal <- sinistra)
+            val stroke = Stroke(width = w * 0.0265f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            val rightPath = Path().apply {
+                moveTo(w * 0.332f, h * 0.466f)
+                lineTo(w * 0.493f, h * 0.466f)
+                moveTo(w * 0.449f, h * 0.422f)
+                lineTo(w * 0.495f, h * 0.466f)
+                lineTo(w * 0.449f, h * 0.510f)
+            }
+            drawPath(rightPath, color = Color(0xFF0070F0), style = stroke)
+
+            val leftPath = Path().apply {
+                moveTo(w * 0.493f, h * 0.564f)
+                lineTo(w * 0.332f, h * 0.564f)
+                moveTo(w * 0.376f, h * 0.520f)
+                lineTo(w * 0.330f, h * 0.564f)
+                lineTo(w * 0.376f, h * 0.608f)
+            }
+            drawPath(leftPath, color = Color(0xFF008AA8), style = stroke)
+        }
     }
 }
 
@@ -248,13 +278,14 @@ fun AppleTopNavigationBar(
                         )
                     }
                 } else {
-                    DirectSwitchAppleEmblem(size = 28.dp)
+                    Spacer(modifier = Modifier.width(4.dp))
                 }
 
                 Surface(
                     onClick = onTapPassBadge,
                     shape = RoundedCornerShape(20.dp),
-                    color = (if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.blue).copy(alpha = 0.12f)
+                    color = if (isProUnlocked) DirectSwitchTheme.green.copy(alpha = 0.14f) else DirectSwitchTheme.inputSurface,
+                    border = if (isProUnlocked) null else BorderStroke(0.8.dp, DirectSwitchTheme.cardBorder)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -264,14 +295,14 @@ fun AppleTopNavigationBar(
                         Icon(
                             imageVector = if (isProUnlocked) Icons.Filled.Verified else Icons.Filled.SwapHoriz,
                             contentDescription = null,
-                            tint = if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.blue,
+                            tint = if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.slate,
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = if (isProUnlocked) "Pro" else "Cross-OS",
+                            text = if (isProUnlocked) "Tutto sbloccato" else "iPhone ↔ Android",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.blue
+                            color = if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.slate
                         )
                     }
                 }
@@ -436,6 +467,42 @@ fun DirectSwitchPrimaryButton(
 }
 
 @Composable
+fun DirectSwitchNeutralOutlinedButton(
+    text: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp),
+        shape = RoundedCornerShape(13.dp),
+        color = DirectSwitchTheme.inputSurface,
+        border = BorderStroke(1.0.dp, DirectSwitchTheme.cardBorder)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Filled.SwapHoriz,
+                contentDescription = null,
+                tint = DirectSwitchTheme.slate,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = DirectSwitchTheme.textPrimary
+            )
+        }
+    }
+}
+
+@Composable
 fun DirectSwitchSecondaryButton(
     text: String,
     onClick: () -> Unit,
@@ -456,37 +523,6 @@ fun DirectSwitchSecondaryButton(
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = tint
-            )
-        }
-    }
-}
-
-@Composable
-fun GoogleStyleActionButton(
-    text: String,
-    onClick: () -> Unit
-) {
-    Surface(
-        onClick = onClick,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(46.dp),
-        shape = RoundedCornerShape(13.dp),
-        color = DirectSwitchTheme.cardSurface,
-        border = BorderStroke(1.1.dp, DirectSwitchTheme.cardBorder)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            GoogleGlyphIcon(size = 18.dp)
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.textPrimary
             )
         }
     }
