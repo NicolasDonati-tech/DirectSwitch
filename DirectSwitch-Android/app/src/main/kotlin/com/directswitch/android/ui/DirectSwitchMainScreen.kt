@@ -12,6 +12,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.view.ViewGroup
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -22,6 +23,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,45 +33,53 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PhoneIphone
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sms
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,17 +91,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.directswitch.android.DirectSwitchLog
-import com.directswitch.android.R
 import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.DeviceDataAnalyzer
 import com.directswitch.android.migrators.DirectSwitchBillingManager
@@ -110,10 +121,18 @@ import com.directswitch.android.transport.DirectSwitchTransferServer
 import com.directswitch.android.transport.LiveTransferProgress
 import com.directswitch.android.transport.LocalNetworkAddresses
 import com.directswitch.android.transport.LocalOnlyHotspotController
+import com.directswitch.android.ui.theme.AppleSettingsIcon
+import com.directswitch.android.ui.theme.AppleTopNavigationBar
+import com.directswitch.android.ui.theme.CleanCategoryToggleRow
+import com.directswitch.android.ui.theme.DirectSwitchAppleEmblem
 import com.directswitch.android.ui.theme.DirectSwitchCard
 import com.directswitch.android.ui.theme.DirectSwitchPrimaryButton
 import com.directswitch.android.ui.theme.DirectSwitchSecondaryButton
 import com.directswitch.android.ui.theme.DirectSwitchTheme
+import com.directswitch.android.ui.theme.GoogleGlyphIcon
+import com.directswitch.android.ui.theme.GoogleStyleActionButton
+import com.directswitch.android.ui.theme.InfoCircleButton
+import com.directswitch.android.ui.theme.PassaAiOSCodeBoxes
 import com.directswitch.android.ui.theme.QrBitmapGenerator
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
@@ -129,12 +148,13 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-private enum class WizardMode {
-    ROLE_SELECTION,
-    RECEIVER_QR_HOST,
-    SENDER_SCAN_AND_PICK,
-    LIVE_TRANSFER_DASHBOARD,
-    CROSS_OS_PRO_SHEET
+private enum class WizardStep {
+    HOME,
+    RECEIVER_WAIT_CODE,
+    SENDER_CONNECT,
+    SENDER_SELECT_CATEGORIES,
+    TRANSFER_PROGRESS,
+    QUICK_PORTAL
 }
 
 private data class CategorySelectionState(
@@ -147,14 +167,7 @@ private data class CategorySelectionState(
     val whatsAppVault: Boolean = true
 )
 
-private data class CategoryToggleSpec(
-    val icon: ImageVector,
-    val title: String,
-    val subtitle: String,
-    val checked: Boolean,
-    val onToggle: (Boolean) -> Unit
-)
-
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DirectSwitchMainScreen(
     externalVaultNote: String? = null,
@@ -163,7 +176,7 @@ fun DirectSwitchMainScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var mode by remember { mutableStateOf(WizardMode.ROLE_SELECTION) }
+    var step by remember { mutableStateOf(WizardStep.HOME) }
     var scanSummary by remember { mutableStateOf<LocalDeviceScanSummary?>(null) }
     var isProUnlocked by remember {
         mutableStateOf(
@@ -179,28 +192,32 @@ fun DirectSwitchMainScreen(
     val autoDiscovery = remember { DirectSwitchAutoDiscovery(context) }
     val discoveredDevices by autoDiscovery.discoveredDevices.collectAsState()
     val activePairingPin by server.activePairingPin.collectAsState()
-
-    var googleBridgeNote by remember { mutableStateOf<String?>(null) }
-    var bootstrapPortalUrl by remember { mutableStateOf<String?>(null) }
-    var bootstrapWifiQrString by remember { mutableStateOf<String?>(null) }
-    var vaultStatusNote by remember { mutableStateOf<String?>(null) }
+    val serverProgress by server.progress.collectAsState()
+    val clientProgress by client.progress.collectAsState()
 
     var activeQrPayload by remember { mutableStateOf<QrPairingPayload?>(null) }
-    var hotspotStatusNote by remember { mutableStateOf<String?>(null) }
     var useOffline5GhzHotspot by remember { mutableStateOf(false) }
+    var hotspotStatusNote by remember { mutableStateOf<String?>(null) }
 
     var selectedBeaconForPin by remember { mutableStateOf<DiscoveryBeaconPayload?>(null) }
     var pinInput by remember { mutableStateOf("") }
     var pinErrorNote by remember { mutableStateOf<String?>(null) }
     var isPinPairingBusy by remember { mutableStateOf(false) }
 
-    var scannedReceiverPayload by remember { mutableStateOf<QrPairingPayload?>(null) }
+    var pairedTargetPayload by remember { mutableStateOf<QrPairingPayload?>(null) }
     var manualQrInput by remember { mutableStateOf("") }
-    var manualQrErrorNote by remember { mutableStateOf<String?>(null) }
     var showCameraScanner by remember { mutableStateOf(false) }
+
+    var bootstrapPortalUrl by remember { mutableStateOf<String?>(null) }
+    var bootstrapWifiQrString by remember { mutableStateOf<String?>(null) }
+    var vaultStatusNote by remember { mutableStateOf<String?>(null) }
 
     var categories by remember { mutableStateOf(CategorySelectionState()) }
     var isReceiverFlow by remember { mutableStateOf(false) }
+
+    var showProSheet by remember { mutableStateOf(false) }
+    var showGoogleBridgeSheet by remember { mutableStateOf(false) }
+    var googleBridgeNote by remember { mutableStateOf<String?>(null) }
     var billingStatusNote by remember { mutableStateOf<String?>(null) }
     var pendingPermissionContinuation by remember { mutableStateOf<(() -> Unit)?>(null) }
 
@@ -210,9 +227,6 @@ fun DirectSwitchMainScreen(
             billingStatusNote = message
         }
     }
-
-    val serverProgress by server.progress.collectAsState()
-    val clientProgress by client.progress.collectAsState()
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -234,11 +248,7 @@ fun DirectSwitchMainScreen(
                     DocumentsAndWhatsAppScanner.importSharedUrisIntoVault(context, uris)
                 }
                 scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
-                vaultStatusNote = if (added > 0) {
-                    "$added file aggiunti al Vault DirectSwitch."
-                } else {
-                    "Nessun file valido selezionato."
-                }
+                vaultStatusNote = if (added > 0) "$added file pronti per la copia" else null
             }
         }
     }
@@ -279,6 +289,47 @@ fun DirectSwitchMainScreen(
         }
     }
 
+    fun resetAndGoHome() {
+        showCameraScanner = false
+        autoDiscovery.stopAdvertising()
+        autoDiscovery.stopScanning()
+        server.stop()
+        hotspotController.stopHotspot()
+        useOffline5GhzHotspot = false
+        hotspotStatusNote = null
+        activeQrPayload = null
+        pairedTargetPayload = null
+        selectedBeaconForPin = null
+        pinInput = ""
+        pinErrorNote = null
+        bootstrapPortalUrl = null
+        bootstrapWifiQrString = null
+        step = WizardStep.HOME
+    }
+
+    fun handleBack() {
+        when (step) {
+            WizardStep.HOME -> Unit
+            WizardStep.RECEIVER_WAIT_CODE, WizardStep.QUICK_PORTAL, WizardStep.TRANSFER_PROGRESS -> resetAndGoHome()
+            WizardStep.SENDER_CONNECT -> {
+                showCameraScanner = false
+                autoDiscovery.stopScanning()
+                step = WizardStep.HOME
+            }
+            WizardStep.SENDER_SELECT_CATEGORIES -> {
+                pairedTargetPayload = null
+                pinInput = ""
+                pinErrorNote = null
+                autoDiscovery.startScanningForNewDevices()
+                step = WizardStep.SENDER_CONNECT
+            }
+        }
+    }
+
+    BackHandler(enabled = step != WizardStep.HOME) {
+        handleBack()
+    }
+
     LaunchedEffect(Unit) {
         billingManager.connectAndRestorePurchases()
         scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
@@ -288,18 +339,18 @@ fun DirectSwitchMainScreen(
         if (externalVaultTrigger > 0 && !externalVaultNote.isNullOrBlank()) {
             vaultStatusNote = externalVaultNote
             scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
-            if (mode == WizardMode.ROLE_SELECTION) {
+            if (step == WizardStep.HOME) {
                 isReceiverFlow = false
                 autoDiscovery.startScanningForNewDevices()
-                mode = WizardMode.SENDER_SCAN_AND_PICK
+                step = WizardStep.SENDER_CONNECT
             }
         }
     }
 
     LaunchedEffect(serverProgress.peerDeviceName) {
-        if (mode == WizardMode.RECEIVER_QR_HOST && serverProgress.peerDeviceName.isNotEmpty()) {
+        if (step == WizardStep.RECEIVER_WAIT_CODE && serverProgress.peerDeviceName.isNotEmpty()) {
             isReceiverFlow = true
-            mode = WizardMode.LIVE_TRANSFER_DASHBOARD
+            step = WizardStep.TRANSFER_PROGRESS
         }
     }
 
@@ -313,149 +364,119 @@ fun DirectSwitchMainScreen(
         }
     }
 
-    Box(
+    val topTitle = when (step) {
+        WizardStep.HOME -> "DirectSwitch"
+        WizardStep.RECEIVER_WAIT_CODE -> "Ricevi dati"
+        WizardStep.SENDER_CONNECT -> "Collega telefono"
+        WizardStep.SENDER_SELECT_CATEGORIES -> "Cosa copiare"
+        WizardStep.TRANSFER_PROGRESS -> {
+            val done = if (isReceiverFlow) serverProgress.isCompleted else clientProgress.isCompleted
+            if (done) "Completato" else "Copia dei dati"
+        }
+        WizardStep.QUICK_PORTAL -> "QR Rapido"
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(DirectSwitchTheme.backgroundBrush)
-            .statusBarsPadding()
+            .navigationBarsPadding()
     ) {
+        AppleTopNavigationBar(
+            title = topTitle,
+            showBackButton = step != WizardStep.HOME,
+            isProUnlocked = isProUnlocked,
+            onBack = { handleBack() },
+            onTapPassBadge = { showProSheet = true }
+        )
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = DirectSwitchTheme.tealPrimary
+            if (!vaultStatusNote.isNullOrBlank() && step != WizardStep.TRANSFER_PROGRESS) {
+                DirectSwitchCard(padding = 12.dp, spacing = 6.dp) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = DirectSwitchTheme.green)
+                            Text(vaultStatusNote ?: "", fontSize = 13.sp, color = DirectSwitchTheme.textPrimary)
+                        }
                         Icon(
-                            imageVector = Icons.Default.SwapHoriz,
-                            contentDescription = null,
-                            tint = Color.White,
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Chiudi",
+                            tint = DirectSwitchTheme.textMuted,
                             modifier = Modifier
-                                .padding(8.dp)
-                                .size(24.dp)
+                                .size(18.dp)
+                                .clickable { vaultStatusNote = null }
                         )
                     }
-                    Column {
-                        Text(
-                            text = stringResource(R.string.app_name),
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DirectSwitchTheme.textPrimary
-                        )
-                        Text(
-                            text = stringResource(R.string.app_subtitle),
-                            fontSize = 12.sp,
-                            color = DirectSwitchTheme.textSecondary
-                        )
-                    }
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = if (isProUnlocked) {
-                        DirectSwitchTheme.tealPrimary.copy(alpha = 0.15f)
-                    } else {
-                        DirectSwitchTheme.amberPro.copy(alpha = 0.16f)
-                    },
-                    modifier = Modifier.clickable { mode = WizardMode.CROSS_OS_PRO_SHEET }
-                ) {
-                    Text(
-                        text = if (isProUnlocked) {
-                            stringResource(R.string.pro_active_badge)
-                        } else {
-                            stringResource(R.string.ios_bridge_badge)
-                        },
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isProUnlocked) {
-                            DirectSwitchTheme.tealPrimary
-                        } else {
-                            DirectSwitchTheme.amberPro
-                        },
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
                 }
             }
 
-            when (mode) {
-                WizardMode.ROLE_SELECTION -> {
-                    val bridgeCapabilities = remember(googleBridgeNote, useOffline5GhzHotspot) {
-                        GoogleSetupBridge.inspectDeviceCapabilities(context)
-                    }
-                    RoleSelectionStep(
-                        summary = scanSummary,
-                        isProUnlocked = isProUnlocked,
-                        bridgeCapabilities = bridgeCapabilities,
-                        stabilizeWifiHotspot = useOffline5GhzHotspot,
-                        hotspotNote = hotspotStatusNote,
-                        googleBridgeNote = googleBridgeNote,
-                        onToggleStabilizeWifi = { enabled ->
-                            if (enabled) {
-                                requestPermissionsThen {
-                                    useOffline5GhzHotspot = true
-                                    hotspotController.startHotspot { ssid, pass, err ->
-                                        if (err != null) {
-                                            useOffline5GhzHotspot = false
-                                            hotspotStatusNote = err
-                                        } else {
-                                            hotspotStatusNote = "Rete locale 5GHz attiva ($ssid • Pass: $pass)"
-                                        }
-                                    }
-                                }
-                            } else {
-                                useOffline5GhzHotspot = false
-                                hotspotController.stopHotspot()
-                                hotspotStatusNote = null
-                            }
-                        },
-                        onGrantPermissions = { requestPermissionsThen() },
-                        onSelectSender = {
-                            requestPermissionsThen {
-                                isReceiverFlow = false
-                                autoDiscovery.startScanningForNewDevices()
-                                mode = WizardMode.SENDER_SCAN_AND_PICK
-                            }
-                        },
-                        onSelectReceiver = {
+            when (step) {
+                WizardStep.HOME -> {
+                    AndroidHomeView(
+                        onStartReceive = {
                             requestPermissionsThen {
                                 isReceiverFlow = true
                                 val payload = server.startReceiverSession()
                                 activeQrPayload = payload
                                 autoDiscovery.startAdvertisingReceiver(payload)
-                                mode = WizardMode.RECEIVER_QR_HOST
+                                step = WizardStep.RECEIVER_WAIT_CODE
                             }
                         },
-                        onLaunchGoogleOldPhone = {
-                            val (_, msg) = GoogleSetupBridge.launchOldPhoneGoogleNearbySetup(context)
-                            googleBridgeNote = msg
+                        onStartSend = {
+                            requestPermissionsThen {
+                                isReceiverFlow = false
+                                pairedTargetPayload = null
+                                selectedBeaconForPin = null
+                                pinInput = ""
+                                pinErrorNote = null
+                                autoDiscovery.startScanningForNewDevices()
+                                step = WizardStep.SENDER_CONNECT
+                            }
                         },
-                        onLaunchGoogleNewPhone = {
-                            val (_, msg) = GoogleSetupBridge.launchNewPhonePostSetupRestore(context)
-                            googleBridgeNote = msg
+                        onOpenGoogleBridge = {
+                            googleBridgeNote = null
+                            showGoogleBridgeSheet = true
                         },
-                        onLaunchGoogleIphoneToAndroid = {
-                            val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(context)
-                            googleBridgeNote = msg
-                        },
-                        onOpenProSheet = { mode = WizardMode.CROSS_OS_PRO_SHEET }
+                        onOpenQuickPortal = {
+                            requestPermissionsThen {
+                                if (LocalNetworkAddresses.listPrivateIpv4Addresses().isNotEmpty()) {
+                                    bootstrapWifiQrString = null
+                                    bootstrapPortalUrl = server.startBootstrapPortalSession()
+                                    step = WizardStep.QUICK_PORTAL
+                                } else {
+                                    hotspotController.startHotspot { ssid, pass, _ ->
+                                        if (!ssid.isNullOrBlank() && !pass.isNullOrBlank()) {
+                                            val escSsid = ssid.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
+                                            val escPass = pass.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
+                                            bootstrapWifiQrString = "WIFI:T:WPA;S:$escSsid;P:$escPass;;"
+                                        } else {
+                                            bootstrapWifiQrString = null
+                                        }
+                                        bootstrapPortalUrl = server.startBootstrapPortalSession()
+                                        step = WizardStep.QUICK_PORTAL
+                                    }
+                                }
+                            }
+                        }
                     )
                 }
 
-                WizardMode.RECEIVER_QR_HOST -> {
-                    ReceiverQrHostStep(
+                WizardStep.RECEIVER_WAIT_CODE -> {
+                    ReceiverPairingWizardView(
                         qrPayload = activeQrPayload,
                         pairingPin = activePairingPin,
                         useHotspot = useOffline5GhzHotspot,
@@ -468,7 +489,7 @@ fun DirectSwitchMainScreen(
                                         useOffline5GhzHotspot = false
                                         hotspotStatusNote = err
                                     } else {
-                                        hotspotStatusNote = "Hotspot 5GHz attivo: $ssid"
+                                        hotspotStatusNote = "Rete 5GHz pronta: $ssid"
                                     }
                                     val payload = server.startReceiverSession(ssid, pass)
                                     activeQrPayload = payload
@@ -482,225 +503,224 @@ fun DirectSwitchMainScreen(
                                 autoDiscovery.startAdvertisingReceiver(payload)
                             }
                         },
-                        onBack = {
-                            autoDiscovery.stopAdvertising()
-                            server.stop()
-                            hotspotController.stopHotspot()
-                            mode = WizardMode.ROLE_SELECTION
-                        }
+                        onCancel = { resetAndGoHome() }
                     )
                 }
 
-                WizardMode.SENDER_SCAN_AND_PICK -> {
-                    SenderScanAndPickStep(
-                        summary = scanSummary,
+                WizardStep.SENDER_CONNECT -> {
+                    SenderConnectWizardView(
                         discoveredDevices = discoveredDevices,
                         selectedBeacon = selectedBeaconForPin,
                         pinInput = pinInput,
-                        pinErrorNote = pinErrorNote,
                         isPinPairingBusy = isPinPairingBusy,
-                        scannedPayload = scannedReceiverPayload,
-                        bootstrapPortalUrl = bootstrapPortalUrl,
-                        bootstrapWifiQrString = bootstrapWifiQrString,
-                        vaultStatusNote = vaultStatusNote,
-                        manualQrInput = manualQrInput,
-                        manualQrErrorNote = manualQrErrorNote,
+                        errorNote = pinErrorNote,
                         showCameraScanner = showCameraScanner,
-                        isLocalPro = isProUnlocked,
-                        categories = categories,
-                        onSelectDiscoveredBeacon = { beacon ->
+                        manualQrInput = manualQrInput,
+                        onSelectBeacon = { beacon ->
                             selectedBeaconForPin = beacon
-                            pinInput = ""
                             pinErrorNote = null
                             showCameraScanner = false
                         },
-                        onPinInputChange = { raw ->
-                            pinInput = raw.filter { it.isDigit() }.take(6)
+                        onPinChange = { raw ->
+                            val clean = raw.filter { it.isDigit() }.take(6)
+                            pinInput = clean
                             pinErrorNote = null
                         },
-                        onConfirmPinPairing = {
-                            val beacon = selectedBeaconForPin ?: return@SenderScanAndPickStep
+                        onConfirmPin = {
+                            val beacon = selectedBeaconForPin ?: return@SenderConnectWizardView
+                            if (pinInput.length != 6 || isPinPairingBusy) return@SenderConnectWizardView
                             isPinPairingBusy = true
                             pinErrorNote = null
                             scope.launch {
                                 val res = client.pairWithBeaconUsingPin(beacon, pinInput)
                                 isPinPairingBusy = false
-                                res.onSuccess { pairedPayload ->
-                                    scannedReceiverPayload = pairedPayload
-                                    selectedBeaconForPin = null
+                                res.onSuccess { paired ->
+                                    autoDiscovery.stopScanning()
+                                    pairedTargetPayload = paired
+                                    step = WizardStep.SENDER_SELECT_CATEGORIES
                                 }.onFailure { err ->
-                                    pinErrorNote = err.localizedMessage ?: "PIN errato o scaduto"
+                                    pinErrorNote = err.localizedMessage ?: "Codice errato o scaduto."
                                 }
                             }
-                        },
-                        onToggleBootstrapPortal = {
-                            if (bootstrapPortalUrl == null) {
-                                if (LocalNetworkAddresses.listPrivateIpv4Addresses().isNotEmpty()) {
-                                    bootstrapWifiQrString = null
-                                    bootstrapPortalUrl = server.startBootstrapPortalSession()
-                                } else {
-                                    // Nessuna Wi-Fi presente: attiva in automatico l'Hotspot 5GHz Offline sul vecchio telefono
-                                    hotspotController.startHotspot { ssid, pass, _ ->
-                                        if (!ssid.isNullOrBlank() && !pass.isNullOrBlank()) {
-                                            val escSsid = ssid.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
-                                            val escPass = pass.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
-                                            bootstrapWifiQrString = "WIFI:T:WPA;S:$escSsid;P:$escPass;;"
-                                        } else {
-                                            bootstrapWifiQrString = null
-                                        }
-                                        bootstrapPortalUrl = server.startBootstrapPortalSession()
-                                    }
-                                }
-                            } else {
-                                server.stop()
-                                if (bootstrapWifiQrString != null) {
-                                    hotspotController.stopHotspot()
-                                }
-                                bootstrapWifiQrString = null
-                                bootstrapPortalUrl = null
-                            }
-                        },
-                        onPickDocumentsOrWhatsApp = {
-                            documentPickerLauncher.launch(arrayOf("*/*"))
                         },
                         onToggleCamera = { showCameraScanner = !showCameraScanner },
-                        onQrDetected = { raw ->
-                            runCatching { QrPairingPayload.fromJson(raw) }.onSuccess {
-                                scannedReceiverPayload = it
-                                selectedBeaconForPin = null
-                                manualQrErrorNote = null
-                                showCameraScanner = false
-                            }
+                        onQrScanned = { raw ->
+                            runCatching { QrPairingPayload.fromJson(raw) }
+                                .onSuccess { paired ->
+                                    showCameraScanner = false
+                                    autoDiscovery.stopScanning()
+                                    pinErrorNote = null
+                                    pairedTargetPayload = paired
+                                    step = WizardStep.SENDER_SELECT_CATEGORIES
+                                }
+                                .onFailure {
+                                    pinErrorNote = "Codice QR non riconosciuto."
+                                }
                         },
                         onManualInputChange = {
                             manualQrInput = it
-                            manualQrErrorNote = null
+                            pinErrorNote = null
                         },
-                        onApplyManualQr = {
+                        onApplyManualCode = {
                             runCatching { QrPairingPayload.fromJson(manualQrInput) }
-                                .onSuccess {
-                                    scannedReceiverPayload = it
-                                    manualQrErrorNote = null
+                                .onSuccess { paired ->
+                                    autoDiscovery.stopScanning()
+                                    pinErrorNote = null
+                                    pairedTargetPayload = paired
+                                    step = WizardStep.SENDER_SELECT_CATEGORIES
                                 }
                                 .onFailure {
-                                    manualQrErrorNote = "Formato codice QR non valido."
+                                    pinErrorNote = "Codice manuale non valido."
                                 }
-                        },
-                        onUpdateCategories = { categories = it },
-                        onOpenProUnlock = { mode = WizardMode.CROSS_OS_PRO_SHEET },
-                        onStartTransfer = {
-                            val target = scannedReceiverPayload ?: return@SenderScanAndPickStep
-                            autoDiscovery.stopScanning()
-                            if (bootstrapPortalUrl != null) {
-                                server.stop()
-                                if (bootstrapWifiQrString != null) {
-                                    hotspotController.stopHotspot()
-                                }
-                                bootstrapWifiQrString = null
-                                bootstrapPortalUrl = null
-                            }
-                            isReceiverFlow = false
-                            mode = WizardMode.LIVE_TRANSFER_DASHBOARD
-                            scope.launch {
-                                client.executeTransfer(
-                                    qrPayload = target,
-                                    includeContacts = categories.contacts,
-                                    includePhotos = categories.photos,
-                                    includeVideos = categories.videos,
-                                    includeCalendars = categories.calendars,
-                                    includeSms = categories.sms,
-                                    includeDocuments = categories.documents,
-                                    includeWhatsAppVault = categories.whatsAppVault
-                                )
-                            }
-                        },
-                        onBack = {
-                            autoDiscovery.stopScanning()
-                            if (bootstrapPortalUrl != null) {
-                                server.stop()
-                                if (bootstrapWifiQrString != null) {
-                                    hotspotController.stopHotspot()
-                                }
-                                bootstrapWifiQrString = null
-                                bootstrapPortalUrl = null
-                            }
-                            mode = WizardMode.ROLE_SELECTION
                         }
                     )
                 }
 
-                WizardMode.LIVE_TRANSFER_DASHBOARD -> {
-                    LiveTransferDashboardStep(
+                WizardStep.SENDER_SELECT_CATEGORIES -> {
+                    val target = pairedTargetPayload
+                    if (target != null) {
+                        SenderCategoriesWizardView(
+                            pairedPayload = target,
+                            summary = scanSummary,
+                            isLocalPro = isProUnlocked,
+                            categories = categories,
+                            onUpdateCategories = { categories = it },
+                            onPickDocumentsOrWhatsApp = { documentPickerLauncher.launch(arrayOf("*/*")) },
+                            onOpenProSheet = { showProSheet = true },
+                            onChangeDevice = {
+                                pairedTargetPayload = null
+                                pinInput = ""
+                                autoDiscovery.startScanningForNewDevices()
+                                step = WizardStep.SENDER_CONNECT
+                            },
+                            onStartTransfer = {
+                                isReceiverFlow = false
+                                vaultStatusNote = null
+                                step = WizardStep.TRANSFER_PROGRESS
+                                scope.launch {
+                                    client.executeTransfer(
+                                        qrPayload = target,
+                                        includeContacts = categories.contacts,
+                                        includePhotos = categories.photos,
+                                        includeVideos = categories.videos,
+                                        includeCalendars = categories.calendars,
+                                        includeSms = categories.sms,
+                                        includeDocuments = categories.documents,
+                                        includeWhatsAppVault = categories.whatsAppVault
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
+
+                WizardStep.TRANSFER_PROGRESS -> {
+                    TransferProgressWizardView(
                         progress = if (isReceiverFlow) serverProgress else clientProgress,
                         isReceiver = isReceiverFlow,
-                        onFinishAndBack = {
-                            server.stop()
-                            hotspotController.stopHotspot()
-                            mode = WizardMode.ROLE_SELECTION
-                        }
+                        onFinish = { resetAndGoHome() }
                     )
                 }
 
-                WizardMode.CROSS_OS_PRO_SHEET -> {
-                    CrossOsProPassSheet(
-                        isUnlocked = isProUnlocked,
-                        hasCloudSave = hasCloudSaveInstalled,
-                        billingNote = billingStatusNote,
-                        onPurchasePass = {
-                            billingManager.launchCrossOsPassPurchase(context.findHostActivity())
-                        },
-                        onRestorePurchases = {
-                            billingManager.restoreExistingPurchases(userInitiated = true)
-                        },
-                        onClose = { mode = WizardMode.ROLE_SELECTION }
+                WizardStep.QUICK_PORTAL -> {
+                    QuickPortalWizardView(
+                        wifiQrString = bootstrapWifiQrString,
+                        portalUrl = bootstrapPortalUrl,
+                        onClose = { resetAndGoHome() }
                     )
                 }
             }
         }
     }
+
+    if (showProSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showProSheet = false },
+            sheetState = sheetState,
+            containerColor = DirectSwitchTheme.canvasMid
+        ) {
+            CrossOsProPassSheetContent(
+                isUnlocked = isProUnlocked,
+                hasCloudSave = hasCloudSaveInstalled,
+                billingNote = billingStatusNote,
+                onPurchasePass = { billingManager.launchCrossOsPassPurchase(context.findHostActivity()) },
+                onRestorePurchases = { billingManager.restoreExistingPurchases(userInitiated = true) },
+                onClose = { showProSheet = false }
+            )
+        }
+    }
+
+    if (showGoogleBridgeSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showGoogleBridgeSheet = false },
+            sheetState = sheetState,
+            containerColor = DirectSwitchTheme.canvasMid
+        ) {
+            GoogleSetupBridgeSheetContent(
+                note = googleBridgeNote,
+                onLaunchNewAndroidRestore = {
+                    val (_, msg) = GoogleSetupBridge.launchNewPhonePostSetupRestore(context)
+                    googleBridgeNote = msg
+                },
+                onLaunchIphoneToAndroidCable = {
+                    val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(context)
+                    googleBridgeNote = msg
+                },
+                onLaunchOldAndroidSend = {
+                    val (_, msg) = GoogleSetupBridge.launchOldPhoneGoogleNearbySetup(context)
+                    googleBridgeNote = msg
+                },
+                onClose = { showGoogleBridgeSheet = false }
+            )
+        }
+    }
 }
 
+// MARK: - 1. Home pulita (stile "Passa a iOS" / "Android Switch" + grafica CloudSave)
+
 @Composable
-private fun RoleSelectionStep(
-    summary: LocalDeviceScanSummary?,
-    isProUnlocked: Boolean,
-    bridgeCapabilities: GoogleSetupBridge.BridgeAvailability,
-    stabilizeWifiHotspot: Boolean,
-    hotspotNote: String?,
-    googleBridgeNote: String?,
-    onToggleStabilizeWifi: (Boolean) -> Unit,
-    onGrantPermissions: () -> Unit,
-    onSelectSender: () -> Unit,
-    onSelectReceiver: () -> Unit,
-    onLaunchGoogleOldPhone: () -> Unit,
-    onLaunchGoogleNewPhone: () -> Unit,
-    onLaunchGoogleIphoneToAndroid: () -> Unit,
-    onOpenProSheet: () -> Unit
+private fun AndroidHomeView(
+    onStartReceive: () -> Unit,
+    onStartSend: () -> Unit,
+    onOpenGoogleBridge: () -> Unit,
+    onOpenQuickPortal: () -> Unit
 ) {
-    DirectSwitchCard(selected = true) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.PhoneAndroid, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
-            Column {
-                Text(
-                    text = "Sblocca 'Configura' Nativo di Google",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 17.sp,
-                    color = DirectSwitchTheme.textPrimary
-                )
-                Text(
-                    text = "Quando il nuovo telefono è già configurato o la Wi-Fi è assente/instabile",
-                    fontSize = 12.sp,
-                    color = DirectSwitchTheme.tealPrimary,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        DirectSwitchAppleEmblem(size = 64.dp)
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "DirectSwitch",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                color = DirectSwitchTheme.textPrimary
+            )
+            InfoCircleButton(
+                title = "Come funziona DirectSwitch",
+                message = "DirectSwitch copia rubrica, foto, video 4K, calendari, SMS, documenti e chat WhatsApp direttamente tra due telefoni già configurati (Android o iPhone), senza formattare e senza passare dal cloud."
+            )
         }
+
         Text(
-            text = "Se il telefono nuovo è già avviato o la Wi-Fi cade, Google nasconde 'Configura dispositivo'. DirectSwitch stabilizza la rete e richiama il trasferimento ufficiale Google (anche da iPhone a Android):",
-            fontSize = 12.sp,
+            text = "Copia i tuoi dati senza formattare",
+            fontSize = 15.sp,
             color = DirectSwitchTheme.textSecondary
         )
+    }
 
+    // Card 1: Questo è il Nuovo telefono (Ricevi)
+    DirectSwitchCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -708,178 +728,105 @@ private fun RoleSelectionStep(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.weight(1f)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(Icons.Default.WifiTethering, contentDescription = null, tint = DirectSwitchTheme.blueAccent)
-                Column {
-                    Text(
-                        text = "Stabilizza Wi-Fi (Hotspot 5GHz Locale)",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = DirectSwitchTheme.textPrimary
-                    )
-                    Text(
-                        text = "Attivalo se non c'è Wi-Fi o se la rete cade durante Configura",
-                        fontSize = 11.sp,
-                        color = DirectSwitchTheme.textSecondary
-                    )
-                }
-            }
-            Switch(
-                checked = stabilizeWifiHotspot,
-                onCheckedChange = onToggleStabilizeWifi,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = DirectSwitchTheme.tealPrimary
+                AppleSettingsIcon(icon = Icons.Filled.ArrowDownward, color = DirectSwitchTheme.blue)
+                Text(
+                    text = buildAnnotatedString {
+                        append("Questo è il ")
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Nuovo") }
+                        append(" telefono")
+                    },
+                    fontSize = 16.sp,
+                    color = DirectSwitchTheme.textPrimary
                 )
+            }
+            InfoCircleButton(
+                title = "Ricevi su questo Android",
+                message = "Mostra un codice a 6 cifre (come 'Passa a iOS') o un codice QR per ricevere i dati dal tuo vecchio Android o iPhone senza cancellare ciò che hai già sul telefono."
             )
-        }
-        if (!hotspotNote.isNullOrBlank()) {
-            Text(
-                text = hotspotNote,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = DirectSwitchTheme.tealPrimary
-            )
-        }
-
-        val gmsStatus = if (bridgeCapabilities.hasGooglePlayServicesD2d) "Play Services D2D Pronti" else "D2D assente"
-        val restoreStatus = if (bridgeCapabilities.hasAndroidSwitchRestoreTool) "Android Switch Installato" else "Restore OEM"
-        val usbStatus = if (bridgeCapabilities.isUsbCableDeviceAttached) {
-            " • Cavo USB Attivo (${bridgeCapabilities.attachedUsbProductName ?: "Connesso"})"
-        } else {
-            ""
-        }
-        Text(
-            text = "Stato moduli nativi: $gmsStatus • $restoreStatus$usbStatus",
-            fontSize = 11.sp,
-            color = DirectSwitchTheme.textMuted
-        )
-
-        DirectSwitchPrimaryButton(
-            text = "1. Vecchio Android: Sblocca 'Configura Dispositivo' (Invia)",
-            onClick = onLaunchGoogleOldPhone
-        )
-        DirectSwitchPrimaryButton(
-            text = "2. Nuovo Android Già Avviato: Sblocca 'Copia Dati' (Ricevi)",
-            onClick = onLaunchGoogleNewPhone,
-            containerColor = DirectSwitchTheme.blueAccent
-        )
-        DirectSwitchSecondaryButton(
-            text = "3. Da iPhone → a Questo Android (Usa Configura / Android Switch Google)",
-            onClick = onLaunchGoogleIphoneToAndroid
-        )
-
-        if (!googleBridgeNote.isNullOrBlank()) {
-            Text(
-                text = googleBridgeNote,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.tealPrimary
-            )
-        }
-    }
-
-    DirectSwitchCard {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Icon(Icons.Default.Security, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
-            Text(
-                text = "Motore Diretto DirectSwitch (Verso iPhone & Fallback Universale)",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
-        Text(
-            text = "Poiché Configura di Google non invia verso iPhone (e alcuni produttori bloccano il ripristino post-avvio), usa il motore diretto 5GHz di DirectSwitch per trasferire e unire Rubrica, Foto/Video 4K, SMS, Documenti e Calendari senza doppioni:",
-            fontSize = 12.sp,
-            color = DirectSwitchTheme.textSecondary
-        )
-        if (summary != null) {
-            val freeGb = summary.freeStorageBytes / (1024.0 * 1024.0 * 1024.0)
-            Text(
-                text = String.format(
-                    Locale.ITALY,
-                    "Spazio libero rilevato: %.1f GB • %d contatti • %d foto • %d video",
-                    freeGb,
-                    summary.contactsCount,
-                    summary.photosCount,
-                    summary.videosCount
-                ),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
-        TextButton(onClick = onGrantPermissions) {
-            Text("Autorizza lettura Contatti, Galleria, SMS e Calendario", color = DirectSwitchTheme.blueAccent)
         }
 
         DirectSwitchPrimaryButton(
-            text = "Invia con DirectSwitch (Verso iPhone o Android)",
-            onClick = onSelectSender
-        )
-        DirectSwitchSecondaryButton(
-            text = "Ricevi con DirectSwitch su Questo Telefono",
-            onClick = onSelectReceiver
+            text = "Ricevi su questo telefono",
+            onClick = onStartReceive,
+            containerColor = DirectSwitchTheme.blue
         )
     }
 
+    // Card 2: Questo è il Vecchio telefono (Invia + Opzione Cavo Google)
     DirectSwitchCard {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.PhoneAndroid, contentDescription = null, tint = DirectSwitchTheme.greenSuccess)
-            Text(
-                text = "Sblocco Configura Google & Android ↔ Android: 100% Gratuito",
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
-        Text(
-            text = "Lo sblocco di Configura (incluso iPhone → Android nativo Google) e il passaggio Android ↔ Android sono sempre gratuiti.",
-            fontSize = 12.sp,
-            color = DirectSwitchTheme.textSecondary
-        )
-        HorizontalDivider(color = DirectSwitchTheme.cardBorder)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.ArrowUpward, color = DirectSwitchTheme.indigo)
                 Text(
-                    text = if (isProUnlocked) "Ponte Diretto Android ↔ iPhone: Sbloccato" else "Passaggio Diretto verso iPhone (Pro)",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
+                    text = buildAnnotatedString {
+                        append("Questo è il ")
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Vecchio") }
+                        append(" telefono")
+                    },
+                    fontSize = 16.sp,
                     color = DirectSwitchTheme.textPrimary
                 )
-                Text(
-                    text = "Necessario quando invii da Android verso un iPhone già configurato (dove Configura di Google non esiste). Sblocco valido per entrambi i telefoni.",
-                    fontSize = 12.sp,
-                    color = DirectSwitchTheme.textSecondary
-                )
             }
-            TextButton(onClick = onOpenProSheet) {
-                Text(if (isProUnlocked) "Attivo" else "Scopri", fontWeight = FontWeight.Bold)
-            }
+            InfoCircleButton(
+                title = "Invia al nuovo telefono",
+                message = "• Tocca 'Invia al nuovo telefono' per copiare in Wi-Fi o Hotspot 5GHz verso il nuovo iPhone o Android.\n• Tocca 'Usa Configura / Cavo Google' per sbloccare il trasferimento ufficiale Google su telefoni già avviati."
+            )
+        }
+
+        DirectSwitchPrimaryButton(
+            text = "Invia al nuovo telefono",
+            onClick = onStartSend,
+            containerColor = DirectSwitchTheme.charcoal
+        )
+
+        GoogleStyleActionButton(
+            text = "Usa Configura / Cavo Google",
+            onClick = onOpenGoogleBridge
+        )
+
+        TextButton(
+            onClick = onOpenQuickPortal,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                imageVector = Icons.Filled.QrCode2,
+                contentDescription = null,
+                tint = DirectSwitchTheme.blue,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.size(6.dp))
+            Text(
+                text = "Solo Rubrica o App via QR (senza internet)",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = DirectSwitchTheme.blue
+            )
         }
     }
 }
 
+// MARK: - 2A. Passo 1 Ricevente (stile "Passa a iOS": codice a 6 cifre + QR + Hotspot 5GHz)
+
 @Composable
-private fun ReceiverQrHostStep(
+private fun ReceiverPairingWizardView(
     qrPayload: QrPairingPayload?,
     pairingPin: String,
     useHotspot: Boolean,
     hotspotNote: String?,
     onToggleHotspot: (Boolean) -> Unit,
-    onBack: () -> Unit
+    onCancel: () -> Unit
 ) {
     val context = LocalContext.current
+    var selectedTab by remember { mutableIntStateOf(0) }
     var isDefaultSms by remember { mutableStateOf(SmsSystemScanner.isDefaultSmsApp(context)) }
     val smsRoleLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -887,63 +834,429 @@ private fun ReceiverQrHostStep(
         isDefaultSms = SmsSystemScanner.isDefaultSmsApp(context)
     }
 
-    DirectSwitchCard(selected = true) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.QrCode2, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
-            Text(
-                text = "Pronto a Ricevere (Senza Formattare)",
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
         Text(
-            text = "Apri DirectSwitch sul vecchio Android o iPhone, tocca 'Invia Dati' e inquadra questo QR (oppure seleziona il telefono rilevato e inserisci il PIN a 6 cifre):",
+            text = "Passo 1 di 2",
             fontSize = 13.sp,
-            color = DirectSwitchTheme.textSecondary
+            fontWeight = FontWeight.SemiBold,
+            color = DirectSwitchTheme.blue
         )
+        InfoCircleButton(
+            title = "Come collegare i telefoni",
+            message = "Apri DirectSwitch sul vecchio telefono, tocca 'Invia al nuovo telefono' e digita il codice a 6 cifre mostrato qui sotto, oppure passa a 'Codice QR' per inquadrarlo (anche senza rete Wi-Fi attivando l'Hotspot 5GHz)."
+        )
+    }
 
-        if (qrPayload != null) {
-            val compactJson = remember(qrPayload) { qrPayload.toCompactJson() }
-            val qrBitmap = remember(compactJson) { QrBitmapGenerator.generate(compactJson, 620) }
-            if (qrBitmap != null) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = if (selectedTab == 0) "Inserisci il codice monouso" else "Inquadra il codice QR",
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = DirectSwitchTheme.textPrimary,
+            textAlign = TextAlign.Center
+        )
+        Text(
+            text = "Apri DirectSwitch sul vecchio telefono e tocca Invia",
+            fontSize = 14.sp,
+            color = DirectSwitchTheme.textSecondary,
+            textAlign = TextAlign.Center
+        )
+    }
+
+    DirectSwitchCard {
+        // Selettore segmentato in stile iOS
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(DirectSwitchTheme.inputSurface)
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            listOf("Codice a 6 cifre", "Codice QR").forEachIndexed { idx, label ->
+                val active = selectedTab == idx
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) Color.White else Color.Transparent)
+                        .clickable { selectedTab = idx }
+                        .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        bitmap = qrBitmap.asImageBitmap(),
-                        contentDescription = "QR Pairing DirectSwitch",
-                        modifier = Modifier
-                            .size(230.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color.White)
-                            .padding(10.dp)
+                    Text(
+                        text = label,
+                        fontSize = 13.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        color = DirectSwitchTheme.textPrimary
                     )
                 }
             }
-            if (pairingPin.length == 6) {
-                val formattedPin = "${pairingPin.substring(0, 3)} ${pairingPin.substring(3, 6)}"
-                Text(
-                    text = "PIN Auto-Discovery: $formattedPin",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = DirectSwitchTheme.tealPrimary,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center
-                )
+        }
+
+        if (selectedTab == 0) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                PassaAiOSCodeBoxes(code = pairingPin)
+                if (qrPayload != null) {
+                    Text(
+                        text = "Visibile come ${qrPayload.receiverName}",
+                        fontSize = 13.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                }
             }
-            Text(
-                text = "Canali IP locali: ${qrPayload.ips.joinToString(", ")} : ${qrPayload.port}",
-                fontSize = 12.sp,
-                color = DirectSwitchTheme.textMuted,
+        } else if (qrPayload != null) {
+            val compactJson = remember(qrPayload) { qrPayload.toCompactJson() }
+            val qrBitmap = remember(compactJson) { QrBitmapGenerator.generate(compactJson, 620) }
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (qrBitmap != null) {
+                    Image(
+                        bitmap = qrBitmap.asImageBitmap(),
+                        contentDescription = "QR DirectSwitch",
+                        modifier = Modifier
+                            .size(210.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.White)
+                            .border(0.8.dp, DirectSwitchTheme.cardBorder, RoundedCornerShape(16.dp))
+                            .padding(10.dp)
+                    )
+                }
+                if (pairingPin.length == 6) {
+                    Text(
+                        text = "Codice: $pairingPin",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.blue
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider(color = DirectSwitchTheme.hairline)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = DirectSwitchTheme.blue
+            )
+            Spacer(modifier = Modifier.size(10.dp))
+            Text(
+                text = "In attesa dell'altro telefono...",
+                fontSize = 14.sp,
+                color = DirectSwitchTheme.textSecondary
+            )
+        }
+    }
+
+    // Opzioni rapide pulite (Hotspot 5GHz senza router + SMS)
+    DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.WifiTethering, color = DirectSwitchTheme.teal)
+                Column {
+                    Text("Hotspot diretto 5GHz", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                    Text(hotspotNote ?: "Usa senza rete Wi-Fi di casa", fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
+                }
+            }
+            Switch(
+                checked = useHotspot,
+                onCheckedChange = onToggleHotspot,
+                colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = DirectSwitchTheme.green)
             )
         }
 
+        if (!isDefaultSms) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        SmsSystemScanner.createDefaultSmsRoleIntent(context)?.let { smsRoleLauncher.launch(it) }
+                    }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AppleSettingsIcon(icon = Icons.Filled.Sms, color = DirectSwitchTheme.green)
+                    Column {
+                        Text("Salva SMS nell'app Messaggi", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                        Text("Tocca per abilitare l'importazione nativa", fontSize = 12.sp, color = DirectSwitchTheme.blue)
+                    }
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.textMuted)
+            }
+        }
+    }
+
+    DirectSwitchSecondaryButton(
+        text = "Annulla",
+        onClick = onCancel,
+        tint = DirectSwitchTheme.textSecondary
+    )
+}
+
+// MARK: - 2B. Passo 1 Mittente: Collega il nuovo telefono
+
+@Composable
+private fun SenderConnectWizardView(
+    discoveredDevices: List<DiscoveryBeaconPayload>,
+    selectedBeacon: DiscoveryBeaconPayload?,
+    pinInput: String,
+    isPinPairingBusy: Boolean,
+    errorNote: String?,
+    showCameraScanner: Boolean,
+    manualQrInput: String,
+    onSelectBeacon: (DiscoveryBeaconPayload) -> Unit,
+    onPinChange: (String) -> Unit,
+    onConfirmPin: () -> Unit,
+    onToggleCamera: () -> Unit,
+    onQrScanned: (String) -> Unit,
+    onManualInputChange: (String) -> Unit,
+    onApplyManualCode: () -> Unit
+) {
+    var showManualInput by remember { mutableStateOf(false) }
+
+    LaunchedEffect(discoveredDevices.size) {
+        if (selectedBeacon == null && discoveredDevices.isNotEmpty()) {
+            onSelectBeacon(discoveredDevices.first())
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text("Passo 1 di 3", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+        InfoCircleButton(
+            title = "Come collegare il nuovo telefono",
+            message = "Sul nuovo iPhone o Android apri DirectSwitch e tocca 'Ricevi'. Selezionalo qui sotto e inserisci il codice a 6 cifre, oppure usa 'Inquadra codice QR'."
+        )
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text("Collega il nuovo telefono", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        Text("Seleziona il telefono rilevato o inquadra il codice QR", fontSize = 14.sp, color = DirectSwitchTheme.textSecondary)
+    }
+
+    DirectSwitchCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Telefoni vicini", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            if (discoveredDevices.isEmpty()) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = DirectSwitchTheme.blue)
+            } else {
+                Text("${discoveredDevices.size} trovato", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.green)
+            }
+        }
+
+        if (discoveredDevices.isEmpty()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.Wifi, color = DirectSwitchTheme.blue)
+                Column {
+                    Text("Ricerca sulla rete Wi-Fi...", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                    Text("Assicurati che 'Ricevi' sia aperto sull'altro telefono", fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
+                }
+            }
+        } else {
+            for (beacon in discoveredDevices) {
+                val isSelected = selectedBeacon?.sessionId == beacon.sessionId
+                Surface(
+                    onClick = { onSelectBeacon(beacon) },
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isSelected) DirectSwitchTheme.cardSelected else DirectSwitchTheme.inputSurface.copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            AppleSettingsIcon(
+                                icon = if (beacon.receiverPlatform == DevicePlatform.IOS) Icons.Filled.PhoneIphone else Icons.Filled.PhoneAndroid,
+                                color = if (isSelected) DirectSwitchTheme.blue else DirectSwitchTheme.indigo
+                            )
+                            Column {
+                                Text(beacon.receiverName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                                Text(
+                                    if (beacon.receiverPlatform == DevicePlatform.IOS) "iPhone pronto a ricevere" else "Android pronto a ricevere",
+                                    fontSize = 12.sp,
+                                    color = DirectSwitchTheme.textSecondary
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = if (isSelected) Icons.Filled.CheckCircle else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = if (isSelected) DirectSwitchTheme.blue else DirectSwitchTheme.textMuted
+                        )
+                    }
+                }
+            }
+        }
+
+        if (selectedBeacon != null) {
+            HorizontalDivider(color = DirectSwitchTheme.hairline)
+            Text(
+                text = "Inserisci il codice a 6 cifre mostrato su ${selectedBeacon.receiverName}",
+                fontSize = 13.sp,
+                color = DirectSwitchTheme.textSecondary,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+            OutlinedTextField(
+                value = pinInput,
+                onValueChange = onPinChange,
+                placeholder = { Text("Codice a 6 cifre") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp)
+            )
+            DirectSwitchPrimaryButton(
+                text = if (isPinPairingBusy) "Collegamento in corso..." else "Continua",
+                onClick = onConfirmPin,
+                enabled = pinInput.length == 6 && !isPinPairingBusy
+            )
+        }
+    }
+
+    DirectSwitchCard {
+        Text("Oppure usa la fotocamera", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+        DirectSwitchSecondaryButton(
+            text = if (showCameraScanner) "Chiudi fotocamera" else "Inquadra codice QR",
+            onClick = onToggleCamera
+        )
+        if (showCameraScanner) {
+            QrCameraPreviewBox(onQrScanned = onQrScanned)
+        }
+        TextButton(
+            onClick = { showManualInput = !showManualInput },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = if (showManualInput) "Nascondi inserimento manuale" else "Incolla codice di collegamento",
+                fontSize = 13.sp,
+                color = DirectSwitchTheme.textSecondary
+            )
+        }
+        if (showManualInput) {
+            OutlinedTextField(
+                value = manualQrInput,
+                onValueChange = onManualInputChange,
+                placeholder = { Text("Incolla qui il codice") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp)
+            )
+            if (manualQrInput.isNotBlank()) {
+                DirectSwitchPrimaryButton(text = "Collega", onClick = onApplyManualCode)
+            }
+        }
+    }
+
+    if (!errorNote.isNullOrBlank()) {
+        DirectSwitchCard(padding = 14.dp) {
+            Text(errorNote, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
+        }
+    }
+}
+
+// MARK: - 3B. Passo 2 Mittente: Scegli cosa copiare (stile "Android Switch" + "CloudSave")
+
+@Composable
+private fun SenderCategoriesWizardView(
+    pairedPayload: QrPairingPayload,
+    summary: LocalDeviceScanSummary?,
+    isLocalPro: Boolean,
+    categories: CategorySelectionState,
+    onUpdateCategories: (CategorySelectionState) -> Unit,
+    onPickDocumentsOrWhatsApp: () -> Unit,
+    onOpenProSheet: () -> Unit,
+    onChangeDevice: () -> Unit,
+    onStartTransfer: () -> Unit
+) {
+    val allSelected = categories.contacts && categories.photos && categories.videos &&
+        categories.calendars && categories.sms && categories.documents && categories.whatsAppVault
+    val anySelected = categories.contacts || categories.photos || categories.videos ||
+        categories.calendars || categories.sms || categories.documents || categories.whatsAppVault
+
+    val isCrossOs = pairedPayload.receiverPlatform == DevicePlatform.IOS
+    val isFullUnlocked = !isCrossOs || isLocalPro || pairedPayload.receiverHasPro
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text("Passo 2 di 3", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+        Text(
+            text = if (allSelected) "Deseleziona" else "Seleziona tutto",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = DirectSwitchTheme.blue,
+            modifier = Modifier.clickable {
+                val next = !allSelected
+                onUpdateCategories(
+                    CategorySelectionState(next, next, next, next, next, next, next)
+                )
+            }
+        )
+    }
+
+    DirectSwitchCard(selected = true, padding = 14.dp, spacing = 10.dp) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -951,395 +1264,141 @@ private fun ReceiverQrHostStep(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Icon(Icons.Default.WifiTethering, contentDescription = null, tint = DirectSwitchTheme.blueAccent)
+                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = DirectSwitchTheme.green, modifier = Modifier.size(28.dp))
                 Column {
-                    Text("Hotspot Diretto 5GHz (Senza Router)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                    Text("L'iPhone si aggancia da solo inquadrando il QR", fontSize = 11.sp, color = DirectSwitchTheme.textSecondary)
-                }
-            }
-            Switch(
-                checked = useHotspot,
-                onCheckedChange = onToggleHotspot,
-                colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = DirectSwitchTheme.tealPrimary)
-            )
-        }
-
-        if (!hotspotNote.isNullOrBlank()) {
-            Text(text = hotspotNote, fontSize = 12.sp, color = DirectSwitchTheme.tealPrimary, fontWeight = FontWeight.Medium)
-        }
-
-        HorizontalDivider(color = DirectSwitchTheme.cardBorder)
-        if (!isDefaultSms) {
-            TextButton(
-                onClick = {
-                    SmsSystemScanner.createDefaultSmsRoleIntent(context)?.let { smsRoleLauncher.launch(it) }
-                }
-            ) {
-                Text(
-                    "Vuoi inserire gli SMS direttamente nell'app Messaggi? Abilita Ruolo SMS temporaneo",
-                    fontSize = 12.sp,
-                    color = DirectSwitchTheme.blueAccent
-                )
-            }
-        } else {
-            Text(
-                text = "Ruolo SMS attivo: gli SMS ricevuti verranno scritti direttamente nell'app Messaggi di sistema (potrai ripristinare l'app predefinita a fine trasferimento).",
-                fontSize = 12.sp,
-                color = DirectSwitchTheme.greenSuccess
-            )
-        }
-    }
-
-    DirectSwitchSecondaryButton(text = stringResource(R.string.back_button), onClick = onBack)
-}
-
-@Composable
-private fun SenderScanAndPickStep(
-    summary: LocalDeviceScanSummary?,
-    discoveredDevices: List<DiscoveryBeaconPayload>,
-    selectedBeacon: DiscoveryBeaconPayload?,
-    pinInput: String,
-    pinErrorNote: String?,
-    isPinPairingBusy: Boolean,
-    scannedPayload: QrPairingPayload?,
-    bootstrapPortalUrl: String?,
-    bootstrapWifiQrString: String?,
-    vaultStatusNote: String?,
-    manualQrInput: String,
-    manualQrErrorNote: String?,
-    showCameraScanner: Boolean,
-    isLocalPro: Boolean,
-    categories: CategorySelectionState,
-    onSelectDiscoveredBeacon: (DiscoveryBeaconPayload) -> Unit,
-    onPinInputChange: (String) -> Unit,
-    onConfirmPinPairing: () -> Unit,
-    onToggleBootstrapPortal: () -> Unit,
-    onPickDocumentsOrWhatsApp: () -> Unit,
-    onToggleCamera: () -> Unit,
-    onQrDetected: (String) -> Unit,
-    onManualInputChange: (String) -> Unit,
-    onApplyManualQr: () -> Unit,
-    onUpdateCategories: (CategorySelectionState) -> Unit,
-    onOpenProUnlock: () -> Unit,
-    onStartTransfer: () -> Unit,
-    onBack: () -> Unit
-) {
-    DirectSwitchCard(selected = discoveredDevices.isNotEmpty() || scannedPayload != null) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.WifiTethering, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
-            Text(
-                text = when {
-                    scannedPayload != null -> "Collegato in modo cifrato a ${scannedPayload.receiverName}"
-                    discoveredDevices.isNotEmpty() -> "Dispositivo Nuovo Rilevato sulla Rete Locale!"
-                    else -> "Ricerca automatica del nuovo telefono nelle vicinanze..."
-                },
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
-
-        if (scannedPayload == null && discoveredDevices.isNotEmpty()) {
-            for (found in discoveredDevices) {
-                DirectSwitchPrimaryButton(
-                    text = "Collega a ${found.receiverName} (${found.receiverPlatform})",
-                    onClick = { onSelectDiscoveredBeacon(found) }
-                )
-            }
-            if (selectedBeacon != null) {
-                OutlinedTextField(
-                    value = pinInput,
-                    onValueChange = onPinInputChange,
-                    label = { Text("Inserisci PIN a 6 cifre mostrato su ${selectedBeacon.receiverName}") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                if (!pinErrorNote.isNullOrBlank()) {
-                    Text(pinErrorNote, fontSize = 12.sp, color = DirectSwitchTheme.dangerRed, fontWeight = FontWeight.SemiBold)
-                }
-                DirectSwitchPrimaryButton(
-                    text = if (isPinPairingBusy) "Verifica PIN crittografico..." else "Conferma PIN e Accoppia",
-                    onClick = onConfirmPinPairing,
-                    enabled = pinInput.length == 6 && !isPinPairingBusy,
-                    containerColor = DirectSwitchTheme.blueAccent
-                )
-            }
-        } else if (scannedPayload == null) {
-            Text(
-                text = "Se hai aperto 'Ricevi' sul nuovo Android o iPhone sotto la stessa Wi-Fi, comparirà qui da solo in 2 secondi.",
-                fontSize = 12.sp,
-                color = DirectSwitchTheme.textSecondary
-            )
-        }
-    }
-
-    if (scannedPayload == null) {
-        DirectSwitchCard {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Default.QrCode2, contentDescription = null, tint = DirectSwitchTheme.blueAccent)
-                Text(
-                    text = "Non hai ancora l'app sul Telefono Nuovo?",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    color = DirectSwitchTheme.textPrimary
-                )
-            }
-            Text(
-                text = "Inquadra questo QR protetto con la normale Fotocamera del telefono nuovo: scaricherà l'app guidata via Wi-Fi locale (zero internet) o importerà subito la Rubrica su iPhone!",
-                fontSize = 12.sp,
-                color = DirectSwitchTheme.textSecondary
-            )
-            DirectSwitchSecondaryButton(
-                text = if (bootstrapPortalUrl == null) "Mostra QR di Installazione Guidata per il Nuovo Telefono" else "Nascondi QR di Installazione Guidata",
-                onClick = onToggleBootstrapPortal
-            )
-            if (bootstrapPortalUrl != null) {
-                if (bootstrapWifiQrString != null) {
+                    Text("Collegato a ${pairedPayload.receiverName}", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
                     Text(
-                        text = "Passo 1 (Senza Wi-Fi): inquadra con la Fotocamera del telefono nuovo per agganciare l'Hotspot 5GHz Offline",
+                        text = if (!isCrossOs) "Android ↔ Android • 100% Gratuito"
+                        else if (isFullUnlocked) "Pass Cross-OS attivo • Copia completa"
+                        else "Modalità anteprima • Rubrica + 25 foto",
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = DirectSwitchTheme.tealPrimary,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center
-                    )
-                    val wifiQr = remember(bootstrapWifiQrString) { QrBitmapGenerator.generate(bootstrapWifiQrString, 520) }
-                    if (wifiQr != null) {
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Image(
-                                bitmap = wifiQr.asImageBitmap(),
-                                contentDescription = "QR Hotspot Offline",
-                                modifier = Modifier
-                                    .size(190.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(Color.White)
-                                    .padding(8.dp)
-                            )
-                        }
-                    }
-                    Text(
-                        text = "Passo 2: inquadra per scaricare DirectSwitch (.APK) o la Rubrica senza internet",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = DirectSwitchTheme.blueAccent,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center
+                        color = if (isFullUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.orange
                     )
                 }
-                val bootQr = remember(bootstrapPortalUrl) { QrBitmapGenerator.generate(bootstrapPortalUrl, 560) }
-                if (bootQr != null) {
-                    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Image(
-                            bitmap = bootQr.asImageBitmap(),
-                            contentDescription = "QR Bootstrap Nuovo Telefono",
-                            modifier = Modifier
-                                .size(210.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(Color.White)
-                                .padding(8.dp)
-                        )
-                    }
-                }
-                Text(
-                    text = "Sessione protetta da token monouso attiva sulla rete locale",
-                    fontSize = 12.sp,
-                    color = DirectSwitchTheme.blueAccent,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center
-                )
             }
-        }
-    }
-
-    DirectSwitchCard(selected = scannedPayload != null) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
             Text(
-                text = if (scannedPayload == null) "Oppure Inquadra il QR del Ricevente" else "Sessione attiva con ${scannedPayload.receiverName}",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
-
-        if (scannedPayload == null) {
-            DirectSwitchPrimaryButton(
-                text = if (showCameraScanner) "Chiudi Fotocamera" else "Inquadra Codice QR del Ricevente",
-                onClick = onToggleCamera
-            )
-            if (showCameraScanner) {
-                QrCameraPreviewBox(onQrScanned = onQrDetected)
-            }
-            OutlinedTextField(
-                value = manualQrInput,
-                onValueChange = onManualInputChange,
-                label = { Text("Oppure incolla stringa QR di test") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            if (!manualQrErrorNote.isNullOrBlank()) {
-                Text(manualQrErrorNote, fontSize = 12.sp, color = DirectSwitchTheme.dangerRed)
-            }
-            if (manualQrInput.isNotBlank()) {
-                TextButton(onClick = onApplyManualQr) {
-                    Text("Collega manualmente")
-                }
-            }
-        } else {
-            val isCrossOs = scannedPayload.receiverPlatform == DevicePlatform.IOS
-            val sessionUnlocked = !isCrossOs || isLocalPro || scannedPayload.receiverHasPro
-            Text(
-                text = if (!isCrossOs) {
-                    "Modalità Android → Android rilevata: Trasferimento 100% Gratuito Illimitato!"
-                } else if (sessionUnlocked) {
-                    "Ponte Android → iPhone Pro Sbloccato (Single-Side Unlock attivo)!"
-                } else {
-                    "Modalità Prova Android → iPhone: Contatti completi + 25 foto gratis. Sblocca Pro per trasferire tutti i GB."
-                },
+                text = "Cambia",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = if (sessionUnlocked) DirectSwitchTheme.greenSuccess else DirectSwitchTheme.amberPro
+                color = DirectSwitchTheme.blue,
+                modifier = Modifier.clickable(onClick = onChangeDevice)
             )
-            if (isCrossOs && !sessionUnlocked) {
-                TextButton(onClick = onOpenProUnlock) {
-                    Text("Sblocca Pass Completo Android ↔ iPhone")
+        }
+
+        if (isCrossOs && !isFullUnlocked) {
+            Surface(
+                onClick = onOpenProSheet,
+                shape = RoundedCornerShape(10.dp),
+                color = DirectSwitchTheme.blue.copy(alpha = 0.10f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Sblocca copia illimitata verso iPhone", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.blue)
                 }
             }
         }
     }
 
-    val toggleSpecs = listOf(
-        CategoryToggleSpec(
-            icon = Icons.Default.Contacts,
-            title = "Rubrica Contatti (Smart Merge E.164)",
-            subtitle = "${summary?.contactsCount ?: 0} contatti trovati",
+    Text("Scegli cosa copiare", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+
+    DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.Contacts,
+            iconColor = DirectSwitchTheme.blue,
+            title = "Rubrica contatti",
+            subtitle = summary?.let { "${it.contactsCount} contatti" },
             checked = categories.contacts,
-            onToggle = { onUpdateCategories(categories.copy(contacts = it)) }
-        ),
-        CategoryToggleSpec(
-            icon = Icons.Default.Image,
-            title = "Foto & Album Originali (EXIF + GPS)",
-            subtitle = "${summary?.photosCount ?: 0} foto (${formatMb(summary?.photosBytes ?: 0L)})",
-            checked = categories.photos,
-            onToggle = { onUpdateCategories(categories.copy(photos = it)) }
-        ),
-        CategoryToggleSpec(
-            icon = Icons.Default.Videocam,
-            title = "Video HD / 4K Streaming Cifrato",
-            subtitle = "${summary?.videosCount ?: 0} video (${formatMb(summary?.videosBytes ?: 0L)})",
-            checked = categories.videos,
-            onToggle = { onUpdateCategories(categories.copy(videos = it)) }
-        ),
-        CategoryToggleSpec(
-            icon = Icons.Default.CalendarMonth,
-            title = "Calendari ed Eventi",
-            subtitle = "${summary?.calendarEventsCount ?: 0} eventi",
-            checked = categories.calendars,
-            onToggle = { onUpdateCategories(categories.copy(calendars = it)) }
-        ),
-        CategoryToggleSpec(
-            icon = Icons.Default.Sms,
-            title = "SMS & Messaggi di Sistema",
-            subtitle = "${summary?.smsCount ?: 0} messaggi rilevati",
-            checked = categories.sms,
-            onToggle = { onUpdateCategories(categories.copy(sms = it)) }
-        ),
-        CategoryToggleSpec(
-            icon = Icons.Default.Description,
-            title = "Documenti, PDF & File",
-            subtitle = "${summary?.documentsCount ?: 0} documenti pronti",
-            checked = categories.documents,
-            onToggle = { onUpdateCategories(categories.copy(documents = it)) }
-        ),
-        CategoryToggleSpec(
-            icon = Icons.AutoMirrored.Filled.Chat,
-            title = "Vault Archivio Chat WhatsApp (.zip)",
-            subtitle = "${summary?.whatsappArchivesCount ?: 0} esportazioni WhatsApp pronte",
-            checked = categories.whatsAppVault,
-            onToggle = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
+            onCheckedChange = { onUpdateCategories(categories.copy(contacts = it)) }
         )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.Image,
+            iconColor = DirectSwitchTheme.orange,
+            title = "Foto e Album",
+            subtitle = summary?.let { "${it.photosCount} foto • ${formatMb(it.photosBytes)}" },
+            checked = categories.photos,
+            onCheckedChange = { onUpdateCategories(categories.copy(photos = it)) }
+        )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.Videocam,
+            iconColor = DirectSwitchTheme.red,
+            title = "Video originali",
+            subtitle = summary?.let { "${it.videosCount} video • ${formatMb(it.videosBytes)}" },
+            checked = categories.videos,
+            onCheckedChange = { onUpdateCategories(categories.copy(videos = it)) }
+        )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.CalendarMonth,
+            iconColor = DirectSwitchTheme.indigo,
+            title = "Calendari",
+            subtitle = summary?.let { "${it.calendarEventsCount} eventi" },
+            checked = categories.calendars,
+            onCheckedChange = { onUpdateCategories(categories.copy(calendars = it)) }
+        )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.Sms,
+            iconColor = DirectSwitchTheme.green,
+            title = "Messaggi SMS",
+            subtitle = summary?.let { "${it.smsCount} messaggi" },
+            checked = categories.sms,
+            onCheckedChange = { onUpdateCategories(categories.copy(sms = it)) }
+        )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.Description,
+            iconColor = DirectSwitchTheme.teal,
+            title = "Documenti e File",
+            subtitle = summary?.let { "${it.documentsCount} documenti" },
+            checked = categories.documents,
+            onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
+        )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.AutoMirrored.Filled.Chat,
+            iconColor = DirectSwitchTheme.green,
+            title = "Chat WhatsApp",
+            subtitle = summary?.let { "${it.whatsappArchivesCount} archivi .zip" },
+            checked = categories.whatsAppVault,
+            onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
+        )
+    }
+
+    DirectSwitchSecondaryButton(
+        text = "Aggiungi altri file o .zip WhatsApp",
+        onClick = onPickDocumentsOrWhatsApp
     )
 
-    DirectSwitchCard {
-        Text(
-            text = "Passo 2: Scegli cosa unire sul nuovo telefono (Zero Duplicati)",
-            fontWeight = FontWeight.Bold,
-            fontSize = 15.sp,
-            color = DirectSwitchTheme.textPrimary
-        )
-
-        for (spec in toggleSpecs) {
-            CategoryCheckRow(
-                icon = spec.icon,
-                title = spec.title,
-                subtitle = spec.subtitle,
-                checked = spec.checked,
-                onCheckedChange = spec.onToggle
-            )
-        }
-
-        DirectSwitchSecondaryButton(
-            text = stringResource(R.string.add_docs_or_whatsapp_button),
-            onClick = onPickDocumentsOrWhatsApp
-        )
-        if (!vaultStatusNote.isNullOrBlank()) {
-            Text(vaultStatusNote, fontSize = 12.sp, color = DirectSwitchTheme.tealPrimary, fontWeight = FontWeight.SemiBold)
-        }
-
-        DirectSwitchPrimaryButton(
-            text = stringResource(R.string.start_encrypted_transfer),
-            onClick = onStartTransfer,
-            enabled = scannedPayload != null
-        )
-    }
-
-    DirectSwitchSecondaryButton(text = stringResource(R.string.back_button), onClick = onBack)
+    DirectSwitchPrimaryButton(
+        text = "Copia i dati",
+        onClick = onStartTransfer,
+        enabled = anySelected
+    )
 }
 
-@Composable
-private fun CategoryCheckRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.weight(1f)
-        ) {
-            Icon(icon, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
-            Column {
-                Text(title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = DirectSwitchTheme.textPrimary)
-                Text(subtitle, fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
-            }
-        }
-        Checkbox(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = CheckboxDefaults.colors(checkedColor = DirectSwitchTheme.tealPrimary)
-        )
-    }
-}
+// MARK: - 4. Avanzamento & Completamento (stile "Passa a iOS" / "Android Switch")
 
 @Composable
-private fun LiveTransferDashboardStep(
+private fun TransferProgressWizardView(
     progress: LiveTransferProgress,
     isReceiver: Boolean,
-    onFinishAndBack: () -> Unit
+    onFinish: () -> Unit
 ) {
     val context = LocalContext.current
     var stillDefaultSms by remember(progress.isCompleted, progress.errorMessage) {
@@ -1351,32 +1410,71 @@ private fun LiveTransferDashboardStep(
         stillDefaultSms = SmsSystemScanner.isDefaultSmsApp(context)
     }
 
-    DirectSwitchCard(selected = true) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(
-                imageVector = if (progress.isCompleted) Icons.Default.CheckCircle else Icons.Default.SwapHoriz,
-                contentDescription = null,
-                tint = if (progress.isCompleted) DirectSwitchTheme.greenSuccess else DirectSwitchTheme.tealPrimary,
-                modifier = Modifier.size(30.dp)
+    val ratio = when {
+        progress.isCompleted -> 1f
+        progress.totalBytes > 0L -> (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0.02f, 1f)
+        progress.totalItems > 0 -> (progress.completedItems.toFloat() / progress.totalItems.toFloat()).coerceIn(0.02f, 1f)
+        else -> 0.06f
+    }
+    val pct = (ratio * 100f).toInt()
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (progress.isCompleted) {
+            Box(
+                modifier = Modifier
+                    .size(66.dp)
+                    .clip(CircleShape)
+                    .background(DirectSwitchTheme.green.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = DirectSwitchTheme.green, modifier = Modifier.size(40.dp))
+            }
+            Text("Trasferimento completato", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+            Text(
+                text = if (isReceiver) "I tuoi dati sono pronti su questo telefono" else "Tutti i dati selezionati sono stati copiati",
+                fontSize = 14.sp,
+                color = DirectSwitchTheme.textSecondary,
+                textAlign = TextAlign.Center
             )
-            Column {
+        } else {
+            DirectSwitchAppleEmblem(size = 60.dp)
+            Text(
+                text = if (isReceiver) "Copia su questo telefono..." else "Copia dei dati in corso...",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = DirectSwitchTheme.textPrimary
+            )
+            Text("Tieni entrambi i telefoni vicini fino al termine", fontSize = 14.sp, color = DirectSwitchTheme.textSecondary)
+        }
+    }
+
+    DirectSwitchCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "$pct%",
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (progress.isCompleted) DirectSwitchTheme.green else DirectSwitchTheme.textPrimary
+            )
+            if (!progress.isCompleted && progress.speedMegabytesPerSec > 0.05) {
                 Text(
-                    text = if (isReceiver) "Ricezione Diretta in Corso" else "Invio Diretto in Corso",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    color = DirectSwitchTheme.textPrimary
-                )
-                Text(
-                    text = progress.phaseLabel,
+                    text = String.format(Locale.ITALY, "%.1f MB/s", progress.speedMegabytesPerSec),
                     fontSize = 13.sp,
-                    color = DirectSwitchTheme.textSecondary
+                    fontWeight = FontWeight.SemiBold,
+                    color = DirectSwitchTheme.blue
                 )
             }
         }
-
-        val ratio = if (progress.totalBytes > 0L) {
-            (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0f, 1f)
-        } else if (progress.isCompleted) 1f else 0f
 
         LinearProgressIndicator(
             progress = { ratio },
@@ -1384,7 +1482,8 @@ private fun LiveTransferDashboardStep(
                 .fillMaxWidth()
                 .height(10.dp)
                 .clip(RoundedCornerShape(6.dp)),
-            color = DirectSwitchTheme.tealPrimary
+            color = if (progress.isCompleted) DirectSwitchTheme.green else DirectSwitchTheme.blue,
+            trackColor = DirectSwitchTheme.inputSurface
         )
 
         Row(
@@ -1392,87 +1491,148 @@ private fun LiveTransferDashboardStep(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = String.format(Locale.ITALY, "Velocità: %.1f MB/s", progress.speedMegabytesPerSec),
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                color = DirectSwitchTheme.tealPrimary
-            )
-            Text(
-                text = "${progress.completedItems} / ${progress.totalItems} file (${formatMb(progress.transferredBytes)})",
+                text = progress.currentFileName.ifEmpty { progress.phaseLabel },
                 fontSize = 13.sp,
-                color = DirectSwitchTheme.textPrimary
+                color = DirectSwitchTheme.textSecondary,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
             )
-        }
-
-        if (progress.currentFileName.isNotEmpty()) {
-            Text(
-                text = "Elemento: ${progress.currentFileName}",
-                fontSize = 12.sp,
-                color = DirectSwitchTheme.textMuted
-            )
-        }
-
-        HorizontalDivider(color = DirectSwitchTheme.cardBorder)
-
-        Text(
-            text = "Contatti uniti: ${progress.mergedContacts} • Calendari: ${progress.importedCalendars} • SMS: ${progress.importedSms} • Duplicati evitati: ${progress.skippedDuplicates}",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = DirectSwitchTheme.textPrimary
-        )
-
-        if (progress.licenseTier != null) {
-            val tierText = when (progress.licenseTier) {
-                SessionLicenseTier.INTRA_OS_FREE -> "Sessione Intra-OS Gratuita Illimitata"
-                SessionLicenseTier.CROSS_OS_PRO_UNLOCKED -> "Sessione Cross-OS Pro Sbloccata"
-                SessionLicenseTier.CROSS_OS_PREVIEW -> "Sessione Prova Cross-OS (Contatti + 25 Foto)"
+            if (progress.totalBytes > 0L) {
+                Text(
+                    text = "${formatMb(progress.transferredBytes)} / ${formatMb(progress.totalBytes)}",
+                    fontSize = 12.sp,
+                    color = DirectSwitchTheme.textSecondary
+                )
             }
-            Text(text = tierText, fontSize = 12.sp, color = DirectSwitchTheme.blueAccent)
         }
+    }
 
-        if (progress.errorMessage != null) {
-            Text(
-                text = progress.errorMessage,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.dangerRed
-            )
-        }
-
-        Text(
-            text = "Documenti, esportazioni WhatsApp e archivio SMS sono salvati nella cartella pubblica Download/DirectSwitch.",
-            fontSize = 11.sp,
-            color = DirectSwitchTheme.textMuted
+    DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
+        SummaryItemRow(Icons.Filled.Contacts, DirectSwitchTheme.blue, "Contatti uniti", "${progress.mergedContacts}")
+        HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+        SummaryItemRow(
+            Icons.Filled.Image,
+            DirectSwitchTheme.orange,
+            "Foto, Video e File",
+            if (progress.totalItems > 0) "${progress.completedItems} / ${progress.totalItems}" else "${progress.completedItems}"
         )
+        HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+        SummaryItemRow(Icons.Filled.CalendarMonth, DirectSwitchTheme.indigo, "Calendari importati", "${progress.importedCalendars}")
+        if (progress.importedSms > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.Sms, DirectSwitchTheme.green, "Messaggi salvati", "${progress.importedSms}")
+        }
+        if (progress.skippedDuplicates > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.CheckCircle, DirectSwitchTheme.teal, "Doppioni ignorati", "${progress.skippedDuplicates}")
+        }
+    }
+
+    if (progress.errorMessage != null) {
+        DirectSwitchCard(padding = 14.dp) {
+            Text(progress.errorMessage, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
+        }
     }
 
     if (isReceiver && stillDefaultSms && (progress.isCompleted || progress.errorMessage != null)) {
-        DirectSwitchCard {
-            Text(
-                text = stringResource(R.string.restore_default_sms_prompt),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.amberPro
-            )
-            DirectSwitchPrimaryButton(
-                text = stringResource(R.string.restore_default_sms_button),
+        DirectSwitchCard(padding = 14.dp) {
+            Text("Ripristina la tua app Messaggi predefinita", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            DirectSwitchSecondaryButton(
+                text = "Ripristina app Messaggi",
                 onClick = {
-                    runCatching {
-                        restoreSmsLauncher.launch(SmsSystemScanner.createRestorePreviousSmsAppIntent(context))
-                    }
-                },
-                containerColor = DirectSwitchTheme.blueAccent
+                    runCatching { restoreSmsLauncher.launch(SmsSystemScanner.createRestorePreviousSmsAppIntent(context)) }
+                }
             )
         }
     }
 
     if (progress.isCompleted || progress.errorMessage != null) {
-        DirectSwitchPrimaryButton(text = "Torna alla Schermata Principale", onClick = onFinishAndBack)
+        DirectSwitchPrimaryButton(
+            text = if (progress.isCompleted) "Fine" else "Torna alla Home",
+            onClick = onFinish
+        )
     }
 }
 
 @Composable
-private fun CrossOsProPassSheet(
+private fun SummaryItemRow(icon: ImageVector, color: Color, title: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            AppleSettingsIcon(icon = icon, color = color)
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+        }
+        Text(value, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textSecondary)
+    }
+}
+
+// MARK: - Portale QR Rapido (Rubrica .vcf / APK senza internet)
+
+@Composable
+private fun QuickPortalWizardView(
+    wifiQrString: String?,
+    portalUrl: String?,
+    onClose: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text("Inquadra con la Fotocamera", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        Text("Scarica subito la Rubrica su iPhone o l'app DirectSwitch senza internet", fontSize = 14.sp, color = DirectSwitchTheme.textSecondary, textAlign = TextAlign.Center)
+    }
+
+    DirectSwitchCard {
+        if (wifiQrString != null) {
+            Text("1. Inquadra per collegarti all'Hotspot 5GHz", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+            val wifiBmp = remember(wifiQrString) { QrBitmapGenerator.generate(wifiQrString, 520) }
+            if (wifiBmp != null) {
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Image(
+                        bitmap = wifiBmp.asImageBitmap(),
+                        contentDescription = "QR Wi-Fi",
+                        modifier = Modifier
+                            .size(185.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White)
+                            .padding(8.dp)
+                    )
+                }
+            }
+            Text("2. Poi inquadra per aprire il portale", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+        }
+
+        if (portalUrl != null) {
+            val portalBmp = remember(portalUrl) { QrBitmapGenerator.generate(portalUrl, 580) }
+            if (portalBmp != null) {
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Image(
+                        bitmap = portalBmp.asImageBitmap(),
+                        contentDescription = "QR Portale",
+                        modifier = Modifier
+                            .size(210.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.White)
+                            .padding(10.dp)
+                    )
+                }
+            }
+        }
+    }
+
+    DirectSwitchPrimaryButton(text = "Chiudi", onClick = onClose)
+}
+
+// MARK: - Bottom Sheet Pass Cross-OS & Google Setup Bridge
+
+@Composable
+private fun CrossOsProPassSheetContent(
     isUnlocked: Boolean,
     hasCloudSave: Boolean,
     billingNote: String?,
@@ -1480,62 +1640,89 @@ private fun CrossOsProPassSheet(
     onRestorePurchases: () -> Unit,
     onClose: () -> Unit
 ) {
-    DirectSwitchCard(selected = true) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.LockOpen, contentDescription = null, tint = DirectSwitchTheme.tealPrimary)
-            Text(
-                text = "DirectSwitch Pass Cross-OS (Android ↔ iPhone)",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = DirectSwitchTheme.textPrimary
-            )
-        }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(DirectSwitchTheme.backgroundBrush)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        DirectSwitchAppleEmblem(size = 54.dp)
+        Text("Pass Android ↔ iPhone", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
         Text(
-            text = "• Lo sblocco di Configura di Google (incluso iPhone → Android) e Android ↔ Android sono SEMPRE gratuiti al 100%.\n" +
-                "• Per inviare da Android verso un iPhone già configurato tramite il motore DirectSwitch ti basta sbloccare il Pass su UN SOLO telefono (Single-Side Unlock).\n" +
-                "• Hai già CloudSave Pro? Lo sblocco sarà incluso gratuitamente con account verificato.",
-            fontSize = 13.sp,
-            color = DirectSwitchTheme.textSecondary
+            "Android ↔ Android e Configura Google sono 100% gratuiti. Per il passaggio diretto verso iPhone sblocchi tutto su entrambi i telefoni con un solo acquisto.",
+            fontSize = 14.sp,
+            color = DirectSwitchTheme.textSecondary,
+            textAlign = TextAlign.Center
         )
 
         if (hasCloudSave && !isUnlocked) {
-            Text(
-                text = "App CloudSave rilevata sul dispositivo.",
-                fontSize = 12.sp,
-                color = DirectSwitchTheme.blueAccent
-            )
+            Text("App CloudSave rilevata sul dispositivo", fontSize = 12.sp, color = DirectSwitchTheme.blue)
         }
-
         if (!billingNote.isNullOrBlank()) {
-            Text(
-                text = billingNote,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.tealPrimary
-            )
+            Text(billingNote, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.blue)
         }
 
-        if (isUnlocked) {
-            Text(
-                text = "Pass Cross-OS Pro attivo su questo dispositivo!",
-                fontWeight = FontWeight.Bold,
-                color = DirectSwitchTheme.greenSuccess,
-                fontSize = 14.sp
-            )
-        } else {
-            DirectSwitchPrimaryButton(
-                text = "Acquista Pass Cross-OS Una Tantum (9,99 €)",
-                onClick = onPurchasePass
-            )
+        DirectSwitchPrimaryButton(
+            text = if (isUnlocked) "Pass già attivo" else "Sblocca Pass Una Tantum (9,99 €)",
+            onClick = onPurchasePass,
+            enabled = !isUnlocked,
+            containerColor = if (isUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.blue
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             TextButton(onClick = onRestorePurchases) {
-                Text("Ripristina Acquisti Google Play", color = DirectSwitchTheme.blueAccent)
+                Text("Ripristina acquisti", color = DirectSwitchTheme.blue, fontWeight = FontWeight.SemiBold)
+            }
+            TextButton(onClick = onClose) {
+                Text("Chiudi", color = DirectSwitchTheme.textSecondary, fontWeight = FontWeight.SemiBold)
             }
         }
-
-        Spacer(modifier = Modifier.height(4.dp))
-        DirectSwitchSecondaryButton(text = stringResource(R.string.close_button), onClick = onClose)
+        Spacer(modifier = Modifier.height(8.dp))
     }
 }
+
+@Composable
+private fun GoogleSetupBridgeSheetContent(
+    note: String?,
+    onLaunchNewAndroidRestore: () -> Unit,
+    onLaunchIphoneToAndroidCable: () -> Unit,
+    onLaunchOldAndroidSend: () -> Unit,
+    onClose: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(DirectSwitchTheme.backgroundBrush)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            GoogleGlyphIcon(size = 22.dp)
+            Text("Configura / Android Switch Google", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        }
+        Text(
+            "Avvia lo strumento nativo di Google anche se il nuovo telefono è già configurato:",
+            fontSize = 14.sp,
+            color = DirectSwitchTheme.textSecondary
+        )
+        DirectSwitchPrimaryButton(text = "Ricevi da iPhone con cavo USB", onClick = onLaunchIphoneToAndroidCable)
+        DirectSwitchSecondaryButton(text = "Ricevi su questo Android già avviato", onClick = onLaunchNewAndroidRestore)
+        DirectSwitchSecondaryButton(text = "Invia da questo vecchio Android", onClick = onLaunchOldAndroidSend)
+
+        if (!note.isNullOrBlank()) {
+            Text(note, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.blue)
+        }
+
+        TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+            Text("Chiudi", color = DirectSwitchTheme.textSecondary, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+// MARK: - Scanner QR CameraX
 
 @Composable
 private fun QrCameraPreviewBox(onQrScanned: (String) -> Unit) {
@@ -1602,10 +1789,6 @@ private val qrDecodeHints = mapOf(
     DecodeHintType.CHARACTER_SET to "UTF-8"
 )
 
-/**
- * Decodifica il piano Y (`YUV_420_888`) rispettando `rowStride` e `pixelStride` di qualsiasi sensore Camera2,
- * evitando distorsioni diagonali e ignorando silenziosamente `ReaderException` sui frame privi di QR.
- */
 private fun decodeQrFromFrame(imageProxy: ImageProxy, onQrScanned: (String) -> Unit) {
     try {
         val plane = imageProxy.planes.firstOrNull() ?: return
@@ -1658,7 +1841,7 @@ private fun decodeQrFromFrame(imageProxy: ImageProxy, onQrScanned: (String) -> U
             onQrScanned(result.text)
         }
     } catch (_: ReaderException) {
-        // Normale su tutti i frame in cui non è ancora inquadrato un codice QR: nessun log.
+        // Normale sui frame privi di codice QR
     } catch (t: Throwable) {
         DirectSwitchLog.warn("Errore imprevisto analisi frame fotocamera", t)
     } finally {

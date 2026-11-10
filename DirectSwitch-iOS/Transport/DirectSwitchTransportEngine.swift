@@ -62,6 +62,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var importedCalendars: Int = 0
     @Published var importedSms: Int = 0
     @Published var skippedDuplicates: Int = 0
+    @Published var gatedPreviewCount: Int = 0
+    @Published var isSessionConnected: Bool = false
+    @Published var isTransferring: Bool = false
+    @Published var currentItemName: String = ""
     @Published var isCompleted: Bool = false
     @Published var errorMessage: String? = nil
     @Published var activePairingPin: String = ""
@@ -125,15 +129,22 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         handshakeAuthenticated = false
         manifestItems.removeAll()
         completedItemIds.removeAll()
+        peerName = ""
+        licenseTier = nil
         completedItems = 0
         totalItems = 0
         transferredBytesCount = 0
         totalBytesCount = 0
+        speedMegabytesPerSec = 0.0
         mergedContacts = 0
         importedCalendars = 0
         importedSms = 0
         skippedDuplicates = 0
+        gatedPreviewCount = 0
         transferredBytes = 0
+        isSessionConnected = false
+        isTransferring = false
+        currentItemName = ""
         isCompleted = false
         errorMessage = nil
 
@@ -226,6 +237,30 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         bootstrapSecretToken = nil
         bootstrapPortalUrl = nil
         handshakeAuthenticated = false
+    }
+
+    func resetSession() {
+        stopReceiverServer()
+        stopUdpAutoDiscovery()
+        peerName = ""
+        licenseTier = nil
+        completedItems = 0
+        totalItems = 0
+        transferredBytesCount = 0
+        totalBytesCount = 0
+        speedMegabytesPerSec = 0.0
+        mergedContacts = 0
+        importedCalendars = 0
+        importedSms = 0
+        skippedDuplicates = 0
+        gatedPreviewCount = 0
+        transferredBytes = 0
+        isSessionConnected = false
+        isTransferring = false
+        currentItemName = ""
+        isCompleted = false
+        errorMessage = nil
+        statusLabel = "Pronto al trasferimento diretto"
     }
 
     private nonisolated static func isAllowedPeerEndpoint(_ endpoint: Network.NWEndpoint) -> Bool {
@@ -535,6 +570,13 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             transferStartDate = Date()
             let enough = req.totalEstimatedBytes < max(0, free - 200 * 1024 * 1024)
             handshakeAuthenticated = enough
+            if enough {
+                isSessionConnected = true
+                isTransferring = true
+                errorMessage = nil
+            } else {
+                errorMessage = "Spazio su iPhone insufficiente per completare il trasferimento."
+            }
             statusLabel = enough
                 ? "Connesso in modo sicuro a \(req.senderName)!"
                 : "Spazio su iPhone insufficiente per completare il trasferimento."
@@ -604,6 +646,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             importedCalendars = insCal
             importedSms = insSms
             skippedDuplicates = totalSkipped
+            gatedPreviewCount = gated
 
             let resp = ManifestResponse(
                 acceptedItemIds: acceptedItems.map(\.id),
@@ -662,6 +705,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             completedItemIds.insert(itemId)
             completedItems += 1
+            currentItemName = item.fileName
             transferredBytes += plainBytes
             transferredBytesCount = transferredBytes
             let elapsed = max(0.25, Date().timeIntervalSince(transferStartDate))
@@ -678,6 +722,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     return
                 }
             }
+            isTransferring = false
+            currentItemName = ""
             isCompleted = true
             statusLabel = "Trasferimento su iPhone completato!"
             let elapsedMs = Int64(max(1.0, Date().timeIntervalSince(transferStartDate) * 1000.0))
@@ -789,15 +835,32 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         includePhotos: Bool = true,
         includeVideos: Bool = true,
         includeCalendars: Bool,
+        includeDocuments: Bool = true,
+        includeWhatsAppVault: Bool = true,
         pickedDocuments: [(ManifestItem, URL)] = []
     ) async {
         do {
             errorMessage = nil
             isCompleted = false
+            isSessionConnected = true
+            isTransferring = true
+            currentItemName = ""
+            peerName = qrPayload.receiverName
+            completedItems = 0
+            totalItems = 0
             transferredBytesCount = 0
             totalBytesCount = 0
+            speedMegabytesPerSec = 0.0
+            mergedContacts = 0
+            importedCalendars = 0
+            importedSms = 0
+            skippedDuplicates = 0
+            gatedPreviewCount = 0
             UIApplication.shared.isIdleTimerDisabled = true
-            defer { UIApplication.shared.isIdleTimerDisabled = false }
+            defer {
+                isTransferring = false
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
 
             let hotspotFallbackHint = await joinAndroidHotspotIfPresent(payload: qrPayload)
             statusLabel = "Ricerca canale diretto verso \(qrPayload.receiverName)..."
@@ -819,7 +882,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 includePhotos: includePhotos,
                 includeVideos: includeVideos
             )
-            let allItems = scannedAssets.map(\.0) + pickedDocuments.map(\.0)
+            let filteredPickedDocs = pickedDocuments.filter { pair in
+                switch pair.0.category {
+                case .WHATSAPP_VAULT: return includeWhatsAppVault
+                case .DOCUMENTS: return includeDocuments
+                default: return includeDocuments
+                }
+            }
+            let allItems = scannedAssets.map(\.0) + filteredPickedDocs.map(\.0)
             let estimatedBytes = allItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
 
             let hsReq = HandshakeRequest(
@@ -856,10 +926,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             importedCalendars = mfResp.calendarsImportedCount
             importedSms = mfResp.smsImportedCount
             skippedDuplicates = mfResp.skippedDuplicateCount
+            gatedPreviewCount = mfResp.gatedByCrossOsPreviewCount
 
             let acceptedSet = Set(mfResp.acceptedItemIds)
             let assetsToUpload = scannedAssets.filter { acceptedSet.contains($0.0.id) }
-            let docsToUpload = pickedDocuments.filter { acceptedSet.contains($0.0.id) }
+            let docsToUpload = filteredPickedDocs.filter { acceptedSet.contains($0.0.id) }
 
             totalItems = assetsToUpload.count + docsToUpload.count
             totalBytesCount = assetsToUpload.reduce(Int64(0)) { $0 + $1.0.sizeBytes }
@@ -870,6 +941,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             // 1. Upload streaming Foto & Video 4K (esportati e cifrati su file temporanei a blocchi da 4 MiB)
             for (item, phAsset) in assetsToUpload {
+                currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
                 guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(phAsset) else { continue }
                 let sentBytes = try await encryptAndStreamFileItem(
@@ -888,11 +960,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             // 2. Upload streaming Documenti & Archivi WhatsApp selezionati dall'utente o ricevuti da Share Sheet
             for (item, docURL) in docsToUpload {
+                currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
                 let sentBytes = try await encryptAndStreamFileItem(
                     item: item,
                     plainFileURL: docURL,
-                    deletePlainAfter: true,
+                    deletePlainAfter: false,
                     baseUrl: baseUrl,
                     key: key
                 )
@@ -914,6 +987,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 importedSms = report.importedSmsCount
                 skippedDuplicates = report.skippedDuplicatesCount
             }
+            for (_, docURL) in docsToUpload {
+                try? FileManager.default.removeItem(at: docURL)
+            }
+            currentItemName = ""
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
             isCompleted = true
         } catch {

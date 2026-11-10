@@ -21,6 +21,7 @@ DirectSwitch-iOS/*.xcodeproj/
 DirectSwitch-iOS/build_output/
 DirectSwitch-iOS/Payload/
 
-# OS
+# OS & Logs
 .DS_Store
 Thumbs.db
+*.log

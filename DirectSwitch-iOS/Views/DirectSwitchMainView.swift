@@ -7,629 +7,232 @@
 //
 
 import SwiftUI
-import AVFoundation
-import CoreImage.CIFilterBuiltins
 import UniformTypeIdentifiers
 import UIKit
 
+private enum DirectSwitchWizardStep: Equatable {
+    case home
+    case receiveWaitCode
+    case sendConnect
+    case sendSelectCategories
+    case transferProgress
+    case quickContactsPortal
+}
+
 struct DirectSwitchMainView: View {
     @StateObject private var transport = DirectSwitchTransportViewModel()
-    @State private var activeQr: QrPairingPayload? = nil
-    @State private var showSenderSheet: Bool = false
-    @State private var showCameraScanner: Bool = false
-    @State private var showDocumentImporter: Bool = false
-    @State private var senderQrInput: String = ""
-    @State private var selectedBeaconForPin: DiscoveryBeaconPayload? = nil
+
+    @State private var activeStep: DirectSwitchWizardStep = .home
+    @State private var isReceiverMode: Bool = false
+
+    // Stato accoppiamento Ricevente / Mittente
+    @State private var receiverQrPayload: QrPairingPayload? = nil
+    @State private var pairedTargetPayload: QrPairingPayload? = nil
+    @State private var selectedBeacon: DiscoveryBeaconPayload? = nil
     @State private var pinCodeInput: String = ""
-    @State private var senderValidationNote: String? = nil
-    @State private var sharedVaultBanner: String? = nil
-    @State private var pickedDocuments: [(ManifestItem, URL)] = []
-    @State private var scanSummary: iOSLocalDeviceScanSummary? = nil
-    @State private var isScanningDevice: Bool = false
+    @State private var manualCodeInput: String = ""
+    @State private var showCameraScanner: Bool = false
+    @State private var isPairingBusy: Bool = false
+    @State private var pairingErrorNote: String? = nil
+
+    // Categorie di trasferimento (stile Android Switch / CloudSave)
     @State private var includeContacts: Bool = true
     @State private var includePhotos: Bool = true
     @State private var includeVideos: Bool = true
     @State private var includeCalendars: Bool = true
+    @State private var includeDocuments: Bool = true
+    @State private var includeWhatsApp: Bool = true
+
+    // File e archivi WhatsApp allegati
+    @State private var showDocumentImporter: Bool = false
+    @State private var pickedDocuments: [(ManifestItem, URL)] = []
+    @State private var sharedVaultToast: String? = nil
+
+    // Scansione locale e StoreKit Pass Cross-OS
+    @State private var scanSummary: iOSLocalDeviceScanSummary? = nil
+    @State private var isScanningDevice: Bool = false
     @State private var isProUnlocked: Bool = iOSLicenseStore.isLocalProUnlocked
     @State private var showProSheet: Bool = false
+    @State private var showAndroidCableSheet: Bool = false
     @State private var billingNote: String? = nil
 
-    private let tealPrimary = Color(red: 0.0, green: 0.56, blue: 0.48)
-    private let blueAccent = Color(red: 0.0, green: 0.48, blue: 1.0)
+    private var topBarTitle: String {
+        switch activeStep {
+        case .home:
+            return "DirectSwitch"
+        case .receiveWaitCode:
+            return "Ricevi dati"
+        case .sendConnect:
+            return "Collega telefono"
+        case .sendSelectCategories:
+            return "Cosa copiare"
+        case .transferProgress:
+            return transport.isCompleted ? "Completato" : "Copia dei dati"
+        case .quickContactsPortal:
+            return "Rubrica rapida"
+        }
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.87, green: 0.92, blue: 0.94),
-                        Color(red: 0.91, green: 0.94, blue: 0.96),
-                        Color(red: 0.84, green: 0.89, blue: 0.93)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
+                AppleTheme.backgroundGradient
+                    .ignoresSafeArea()
 
-                ScrollView {
-                    VStack(spacing: 16) {
-                        headerCard
-
-                        if let banner = sharedVaultBanner {
-                            vaultImportBanner(text: banner)
-                        }
-
-                        deviceStorageSummaryCard
-
-                        if let qr = activeQr {
-                            receiverQrCard(qr: qr)
-                        } else if let portalUrl = transport.bootstrapPortalUrl {
-                            bootstrapPortalQrCard(url: portalUrl)
-                        } else {
-                            roleCards
-                        }
-
-                        pricingTierCard
-                    }
-                    .padding(18)
-                }
-            }
-            .task {
-                isProUnlocked = await iOSLicenseStore.restoreStoreKitEntitlements()
-                let staged = pickedDocuments.map(\.0)
-                scanSummary = await Task.detached(priority: .utility) {
-                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged)
-                }.value
-            }
-            .onOpenURL { incomingURL in
-                handleIncomingURL(incomingURL)
-            }
-            .sheet(isPresented: $showProSheet) {
-                proUnlockSheet
-            }
-            .sheet(isPresented: $showSenderSheet, onDismiss: {
-                showCameraScanner = false
-                transport.stopUdpAutoDiscovery()
-            }) {
-                senderTransferSheet
-            }
-        }
-    }
-
-    private func handleIncomingURL(_ incomingURL: URL) {
-        if incomingURL.isFileURL {
-            if let imported = iOSDocumentsSandboxBridge.importIncomingOpenURL(incomingURL) {
-                pickedDocuments.append(imported)
-                sharedVaultBanner = "Aggiunto '\(imported.0.fileName)' al Vault DirectSwitch e pronto per l'invio cifrato!"
-                scanSummary = iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: pickedDocuments.map(\.0))
-                transport.startUdpAutoDiscovery()
-                showSenderSheet = true
-            }
-            return
-        }
-        if let comps = URLComponents(url: incomingURL, resolvingAgainstBaseURL: false),
-           let qrParam = comps.queryItems?.first(where: { $0.name == "qr" })?.value,
-           !qrParam.isEmpty {
-            senderQrInput = qrParam
-            senderValidationNote = "Codice sessione acquisito dal collegamento rapido."
-            transport.startUdpAutoDiscovery()
-            showSenderSheet = true
-        }
-    }
-
-    private var headerCard: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("DirectSwitch")
-                    .font(.system(size: 24, weight: .bold))
-                Text("Trasferimento diretto senza formattare l'iPhone")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-            }
-            Spacer()
-            Button(action: { showProSheet = true }) {
-                Text(isProUnlocked ? "PRO ATTIVO" : "Android Bridge")
-                    .font(.system(size: 11, weight: .bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background((isProUnlocked ? tealPrimary : .orange).opacity(0.16))
-                    .foregroundColor(isProUnlocked ? tealPrimary : .orange)
-                    .clipShape(Capsule())
-            }
-        }
-    }
-
-    private func vaultImportBanner(text: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark.seal.fill")
-                .foregroundColor(tealPrimary)
-            Text(text)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.primary)
-            Spacer()
-            Button(action: { sharedVaultBanner = nil }) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding(12)
-        .background(Color.white.opacity(0.95))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var deviceStorageSummaryCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("Stato Memoria & Dati iPhone", systemImage: "internaldrive")
-                    .font(.system(size: 14, weight: .bold))
-                Spacer()
-                if let summary = scanSummary, summary.totalStorageBytes > 0 {
-                    Text("\(formatBytes(summary.freeStorageBytes)) liberi su \(formatBytes(summary.totalStorageBytes))")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(tealPrimary)
-                }
-            }
-
-            if let summary = scanSummary, summary.totalStorageBytes > 0 {
-                let used = max(0, summary.totalStorageBytes - summary.freeStorageBytes)
-                ProgressView(value: Double(used), total: Double(max(1, summary.totalStorageBytes)))
-                    .tint(blueAccent)
-
-                if summary.hasFullPermissions || summary.contactsCount > 0 || summary.photosCount > 0 || !pickedDocuments.isEmpty {
-                    Text("Contatti: \(summary.contactsCount) • Foto: \(summary.photosCount) • Video: \(summary.videosCount) • Calendari: \(summary.calendarEventsCount) • Vault: \(pickedDocuments.count)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            if !(scanSummary?.hasFullPermissions ?? false) {
-                Button(action: {
-                    isScanningDevice = true
-                    let staged = pickedDocuments.map(\.0)
-                    Task {
-                        scanSummary = await iOSDeviceDataAnalyzer.requestPermissionsAndScanAll(stagedItems: staged)
-                        isScanningDevice = false
-                    }
-                }) {
-                    Text(isScanningDevice ? "Analisi contenuti in corso..." : "Analizza Contenuti di Questo iPhone (Contatti, Foto, Video)")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(tealPrimary.opacity(0.12))
-                        .foregroundColor(tealPrimary)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-                .disabled(isScanningDevice)
-            }
-        }
-        .padding(14)
-        .background(Color.white.opacity(0.93))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-    }
-
-    private var roleCards: some View {
-        VStack(spacing: 14) {
-            // Card 1: Passaggio iPhone -> Android con Configura / Android Switch Nativo di Google
-            VStack(alignment: .leading, spacing: 10) {
-                Label("Passa a un Nuovo Android (Configura Google)", systemImage: "cable.connector.horizontal")
-                    .font(.system(size: 16, weight: .bold))
-                Text("Se il tuo nuovo telefono è un Android già configurato, apri DirectSwitch sull'Android e premi '3. Da iPhone → a Questo Android': potrai collegare il cavo USB-C/Lightning o usare Android Switch ufficiale.")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-
-                Button(action: {
-                    if let url = URL(string: "https://apps.apple.com/app/switch-to-android/id1611395432") {
-                        UIApplication.shared.open(url)
-                    }
-                }) {
-                    Text("Apri 'Android Switch' di Google su iPhone (Opzionale)")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(blueAccent.opacity(0.12))
-                        .foregroundColor(blueAccent)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-            }
-            .padding(16)
-            .background(Color.white.opacity(0.94))
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-
-            // Card 2: Nuovo iPhone (Ricevi da Android o iPhone)
-            VStack(alignment: .leading, spacing: 10) {
-                Label("Questo è il Nuovo iPhone (Ricevi)", systemImage: "qrcode")
-                    .font(.system(size: 17, weight: .bold))
-                Text("Mostra il codice QR e il PIN a 6 cifre per ricevere Contatti (Smart Merge senza doppioni), Foto HEIC/JPG, Video 4K, Album, SMS, Documenti e Calendari dal vecchio Android o iPhone già configurato.")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-
-                Button(action: {
-                    activeQr = transport.startReceiverServer()
-                }) {
-                    Text("Ricevi Dati su Questo iPhone")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(blueAccent)
-                        .foregroundColor(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-            }
-            .padding(16)
-            .background(Color.white.opacity(0.92))
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-
-            // Card 3: Vecchio iPhone (Invia con Motore Diretto DirectSwitch + Portale Rubrica QR)
-            VStack(alignment: .leading, spacing: 10) {
-                Label("Questo è il Vecchio iPhone (Invia Diretto)", systemImage: "arrow.up.doc.fill")
-                    .font(.system(size: 17, weight: .bold))
-                Text("Invia Contatti, Foto con Album reali, Video 4K, Calendari, Documenti e Chat WhatsApp (.zip anche da 'Esporta chat → DirectSwitch') in Wi-Fi locale senza passare da iCloud.")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-
-                Button(action: {
-                    senderValidationNote = nil
-                    selectedBeaconForPin = nil
-                    pinCodeInput = ""
-                    transport.startUdpAutoDiscovery()
-                    showSenderSheet = true
-                }) {
-                    Text("Invia Dati da Questo iPhone")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(tealPrimary)
-                        .foregroundColor(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-
-                Button(action: {
-                    Task {
-                        _ = await transport.startBootstrapPortalSession()
-                    }
-                }) {
-                    Label("Portale QR Rapido Rubrica (.vcf senza App)", systemImage: "person.crop.circle.badge.checkmark")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .background(tealPrimary.opacity(0.12))
-                        .foregroundColor(tealPrimary)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-            }
-            .padding(16)
-            .background(Color.white.opacity(0.92))
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-
-            liveSessionStatusCard
-        }
-    }
-
-    private var liveSessionStatusCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Stato Sessione", systemImage: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 15, weight: .semibold))
-                Spacer()
-                if transport.isCompleted {
-                    Text("COMPLETATO")
-                        .font(.system(size: 10, weight: .heavy))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(tealPrimary.opacity(0.16))
-                        .foregroundColor(tealPrimary)
-                        .clipShape(Capsule())
-                }
-            }
-
-            Text(transport.statusLabel)
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-
-            if transport.totalItems > 0 {
-                ProgressView(
-                    value: Double(min(transport.completedItems, transport.totalItems)),
-                    total: Double(max(1, transport.totalItems))
-                )
-                .tint(tealPrimary)
-            }
-
-            if transport.totalItems > 0 || transport.mergedContacts > 0 || transport.importedSms > 0 || transport.skippedDuplicates > 0 {
-                Text(String(format: "Velocità: %.1f MB/s • File: %d/%d (%@) • Contatti: %d • Duplicati evitati: %d",
-                            transport.speedMegabytesPerSec,
-                            transport.completedItems,
-                            transport.totalItems,
-                            formatBytes(transport.transferredBytesCount),
-                            transport.mergedContacts,
-                            transport.skippedDuplicates))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(tealPrimary)
-            }
-
-            if transport.importedSms > 0 || (transport.isCompleted && transport.completedItems > 0) {
-                Text("Documenti, Archivi WhatsApp e SMS sono consultabili nell'app File → Su iPhone → DirectSwitch.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
-
-            if let err = transport.errorMessage {
-                Text(err)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.red)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(Color.white.opacity(0.92))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-    }
-
-    private func receiverQrCard(qr: QrPairingPayload) -> some View {
-        VStack(spacing: 12) {
-            Text("Inquadra dal Vecchio Android o iPhone")
-                .font(.system(size: 17, weight: .bold))
-
-            if let img = generateQrImage(from: qr.toCompactJson()) {
-                Image(uiImage: img)
-                    .interpolation(.none)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 220, height: 220)
-                    .padding(12)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-            }
-
-            if !transport.activePairingPin.isEmpty {
-                VStack(spacing: 2) {
-                    Text("PIN Auto-Discovery (senza fotocamera)")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Text(transport.activePairingPin)
-                        .font(.system(size: 24, weight: .heavy, design: .monospaced))
-                        .kerning(4)
-                        .foregroundColor(blueAccent)
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-                .background(blueAccent.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-
-            Text(transport.statusLabel)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(tealPrimary)
-                .multilineTextAlignment(.center)
-
-            if transport.totalItems > 0 {
-                ProgressView(
-                    value: Double(min(transport.completedItems, transport.totalItems)),
-                    total: Double(max(1, transport.totalItems))
-                )
-                .tint(tealPrimary)
-            }
-
-            if transport.totalItems > 0 || transport.mergedContacts > 0 || transport.importedSms > 0 {
-                Text("Contatti uniti: \(transport.mergedContacts) • Calendari: \(transport.importedCalendars) • SMS: \(transport.importedSms) • File: \(transport.completedItems)/\(transport.totalItems) (\(formatBytes(transport.transferredBytesCount)))")
-                    .font(.system(size: 13))
-                    .multilineTextAlignment(.center)
-            }
-
-            if let err = transport.errorMessage {
-                Text(err)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.red)
-                    .multilineTextAlignment(.center)
-            }
-
-            Button("Chiudi Sessione QR") {
-                transport.stopReceiverServer()
-                activeQr = nil
-            }
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(blueAccent)
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity)
-        .background(Color.white.opacity(0.95))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-    }
-
-    private func bootstrapPortalQrCard(url: String) -> some View {
-        VStack(spacing: 12) {
-            Text("Portale Rubrica Rapida (.vcf)")
-                .font(.system(size: 17, weight: .bold))
-            Text("Inquadra questo QR con la fotocamera del nuovo telefono connesso alla stessa Wi-Fi per importare subito l'intera Rubrica.")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-
-            if let img = generateQrImage(from: url) {
-                Image(uiImage: img)
-                    .interpolation(.none)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 210, height: 210)
-                    .padding(12)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-            }
-
-            Text(url)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-
-            Button("Chiudi Portale Rubrica") {
-                transport.stopReceiverServer()
-            }
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(blueAccent)
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity)
-        .background(Color.white.opacity(0.95))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-    }
-
-    private var senderTransferSheet: some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                Text("Invia Dati al Nuovo Telefono")
-                    .font(.system(size: 20, weight: .bold))
-
-                if !transport.discoveredBeacons.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Dispositivo Rilevato Automaticamente in Wi-Fi:")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(tealPrimary)
-                        ForEach(transport.discoveredBeacons, id: \.sessionId) { found in
-                            Button(action: {
-                                selectedBeaconForPin = found
-                                senderValidationNote = nil
-                                showCameraScanner = false
-                            }) {
-                                Text("Collega a \(found.receiverName) (\(found.receiverPlatform.rawValue)) con PIN")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(tealPrimary)
-                                    .foregroundColor(.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                            }
-                        }
-                    }
-                }
-
-                if let beacon = selectedBeaconForPin {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Inserisci il PIN a 6 cifre mostrato su \(beacon.receiverName):")
-                            .font(.system(size: 13, weight: .semibold))
-                        HStack(spacing: 8) {
-                            TextField("PIN 6 cifre", text: $pinCodeInput)
-                                .keyboardType(.numberPad)
-                                .textFieldStyle(.roundedBorder)
-                            Button("Conferma PIN") {
-                                Task {
-                                    do {
-                                        let paired = try await transport.pairWithBeaconUsingPin(beacon: beacon, pin: pinCodeInput)
-                                        senderQrInput = paired.toCompactJson()
-                                        selectedBeaconForPin = nil
-                                        senderValidationNote = "Accoppiato in modo sicuro con \(paired.receiverName)!"
-                                    } catch {
-                                        senderValidationNote = error.localizedDescription
-                                    }
-                                }
-                            }
-                            .font(.system(size: 13, weight: .bold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(blueAccent)
-                            .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                        }
-                    }
-                    .padding(12)
-                    .background(blueAccent.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-
-                Button(action: { showCameraScanner.toggle() }) {
-                    Label(showCameraScanner ? "Chiudi Fotocamera QR" : "Inquadra QR con la Fotocamera", systemImage: "camera.viewfinder")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(blueAccent.opacity(0.14))
-                        .foregroundColor(blueAccent)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-
-                if showCameraScanner {
-                    QrCameraScannerView { scannedCode in
-                        senderQrInput = scannedCode
-                        senderValidationNote = "Codice QR acquisito correttamente."
-                        showCameraScanner = false
-                    }
-                    .frame(height: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-
-                TextField("Oppure incolla codice QR del ricevente", text: $senderQrInput)
-                    .textFieldStyle(.roundedBorder)
-
-                if let note = senderValidationNote {
-                    Text(note)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(senderQrInput.isEmpty ? .red : tealPrimary)
-                }
-
-                Toggle("Rubrica Contatti (Smart Merge)", isOn: $includeContacts)
-                Toggle("Foto & Album Utente (HEIC/EXIF + GPS)", isOn: $includePhotos)
-                Toggle("Video HD / 4K Originali", isOn: $includeVideos)
-                Toggle("Calendari ed Eventi", isOn: $includeCalendars)
-
-                Button(action: { showDocumentImporter = true }) {
-                    Label(
-                        pickedDocuments.isEmpty
-                            ? "Aggiungi Documenti o Archivio WhatsApp (.zip)"
-                            : "File nel Vault pronti all'invio: \(pickedDocuments.count) (Tocca per aggiungere)",
-                        systemImage: "folder.badge.plus"
+                VStack(spacing: 0) {
+                    AppleTopNavigationBar(
+                        title: topBarTitle,
+                        showBackButton: activeStep != .home,
+                        isProUnlocked: isProUnlocked,
+                        onBack: handleBackNavigation,
+                        onTapPassBadge: { showProSheet = true }
                     )
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(tealPrimary.opacity(0.12))
-                    .foregroundColor(tealPrimary)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
 
-                if !pickedDocuments.isEmpty {
-                    HStack {
-                        Text(pickedDocuments.map { $0.0.fileName }.joined(separator: ", "))
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
-                        Spacer()
-                        Button("Svuota") {
-                            pickedDocuments.removeAll()
-                            iOSDocumentsSandboxBridge.clearStagedVault()
+                    if let toast = sharedVaultToast, activeStep != .transferProgress {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(AppleTheme.green)
+                            Text(toast)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(AppleTheme.textPrimary)
+                                .lineLimit(2)
+                            Spacer()
+                            Button(action: { sharedVaultToast = nil }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(AppleTheme.textTertiary)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.red)
-                    }
-                }
-
-                Button(action: {
-                    guard let qr = try? QrPairingPayload.fromJson(senderQrInput) else {
-                        senderValidationNote = "Inquadra prima il codice QR del nuovo telefono oppure inserisci il PIN Auto-Discovery."
-                        return
-                    }
-                    let docsSnapshot = pickedDocuments
-                    pickedDocuments.removeAll()
-                    sharedVaultBanner = nil
-                    showSenderSheet = false
-                    Task {
-                        await transport.executeSenderTransfer(
-                            qrPayload: qr,
-                            includeContacts: includeContacts,
-                            includePhotos: includePhotos,
-                            includeVideos: includeVideos,
-                            includeCalendars: includeCalendars,
-                            pickedDocuments: docsSnapshot
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(AppleTheme.cardSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(AppleTheme.cardBorder, lineWidth: 0.8)
                         )
+                        .padding(.horizontal, 16)
+                        .padding(.top, 10)
                     }
-                }) {
-                    Text("Avvia Trasferimento Cifrato")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(tealPrimary)
-                        .foregroundColor(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
+
+                    Group {
+                        switch activeStep {
+                        case .home:
+                            DirectSwitchHomeView(
+                                onStartReceive: startReceiveWizard,
+                                onStartSend: startSendWizard,
+                                onOpenAndroidCableGuide: { showAndroidCableSheet = true },
+                                onStartQuickContactsPortal: startQuickContactsPortal
+                            )
+
+                        case .receiveWaitCode:
+                            if let qr = receiverQrPayload {
+                                ReceivePairingStepView(
+                                    qrPayload: qr,
+                                    pairingPin: transport.activePairingPin,
+                                    errorMessage: transport.errorMessage,
+                                    onCancel: {
+                                        transport.resetSession()
+                                        receiverQrPayload = nil
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            activeStep = .home
+                                        }
+                                    }
+                                )
+                            }
+
+                        case .sendConnect:
+                            SendConnectStepView(
+                                discoveredBeacons: transport.discoveredBeacons,
+                                selectedBeacon: $selectedBeacon,
+                                pinInput: $pinCodeInput,
+                                showCameraScanner: $showCameraScanner,
+                                manualCodeInput: $manualCodeInput,
+                                isPairingBusy: isPairingBusy,
+                                errorNote: pairingErrorNote,
+                                onConfirmPin: confirmPinPairing,
+                                onScannedQrCode: handleScannedQrString,
+                                onApplyManualCode: { handleScannedQrString(manualCodeInput) }
+                            )
+
+                        case .sendSelectCategories:
+                            if let paired = pairedTargetPayload {
+                                SendCategoriesStepView(
+                                    pairedPayload: paired,
+                                    scanSummary: scanSummary,
+                                    isScanningDevice: isScanningDevice,
+                                    isLocalProUnlocked: isProUnlocked,
+                                    pickedDocuments: pickedDocuments,
+                                    includeContacts: $includeContacts,
+                                    includePhotos: $includePhotos,
+                                    includeVideos: $includeVideos,
+                                    includeCalendars: $includeCalendars,
+                                    includeDocuments: $includeDocuments,
+                                    includeWhatsApp: $includeWhatsApp,
+                                    onScanExactCounts: scanExactDeviceCounts,
+                                    onAddFilesOrWhatsApp: { showDocumentImporter = true },
+                                    onClearStagedFiles: {
+                                        pickedDocuments.removeAll()
+                                        iOSDocumentsSandboxBridge.clearStagedVault()
+                                        refreshAuthorizedSummary()
+                                    },
+                                    onOpenProSheet: { showProSheet = true },
+                                    onChangePairedDevice: {
+                                        pairedTargetPayload = nil
+                                        pinCodeInput = ""
+                                        pairingErrorNote = nil
+                                        transport.startUdpAutoDiscovery()
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            activeStep = .sendConnect
+                                        }
+                                    },
+                                    onStartCopy: launchSenderTransfer
+                                )
+                            }
+
+                        case .transferProgress:
+                            DirectSwitchTransferProgressView(
+                                transport: transport,
+                                isReceiverMode: isReceiverMode,
+                                isProUnlocked: isProUnlocked,
+                                onOpenProSheet: { showProSheet = true },
+                                onRetryIfFailed: {
+                                    if !isReceiverMode, let paired = pairedTargetPayload {
+                                        launchSenderTransferWithPayload(paired)
+                                    } else {
+                                        handleBackNavigation()
+                                    }
+                                },
+                                onFinish: finishAndReturnHome
+                            )
+
+                        case .quickContactsPortal:
+                            if let url = transport.bootstrapPortalUrl {
+                                QuickContactsPortalView(
+                                    portalUrl: url,
+                                    onClose: finishAndReturnHome
+                                )
+                            }
+                        }
+                    }
                 }
-                Button("Chiudi") { showSenderSheet = false }
             }
-            .padding(22)
+            .navigationBarHidden(true)
+        }
+        .preferredColorScheme(.light)
+        .task {
+            isProUnlocked = await iOSLicenseStore.restoreStoreKitEntitlements()
+            refreshAuthorizedSummary()
+        }
+        .onChange(of: transport.isSessionConnected) { connected in
+            if connected && activeStep == .receiveWaitCode {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    activeStep = .transferProgress
+                }
+            }
+        }
+        .onOpenURL { incomingURL in
+            handleIncomingURL(incomingURL)
         }
         .fileImporter(
             isPresented: $showDocumentImporter,
@@ -639,192 +242,718 @@ struct DirectSwitchMainView: View {
             if case .success(let urls) = result {
                 let imported = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
                 pickedDocuments.append(contentsOf: imported)
-                scanSummary = iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: pickedDocuments.map(\.0))
+                refreshAuthorizedSummary()
             }
         }
-        .presentationDetents([.large])
-    }
-
-    private var pricingTierCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("iPhone ↔ iPhone: 100% Gratuito Illimitato")
-                .font(.system(size: 14, weight: .bold))
-            Text("Il ponte Android ↔ iPhone include la Rubrica gratuita e si sblocca su UN SOLO telefono (Single-Side Unlock) o con abbonamento CloudSave Pro verificato.")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
+        .sheet(isPresented: $showProSheet) {
+            DirectSwitchProPassSheet(
+                isProUnlocked: $isProUnlocked,
+                billingNote: $billingNote,
+                onClose: { showProSheet = false }
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(Color.white.opacity(0.9))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .sheet(isPresented: $showAndroidCableSheet) {
+            AndroidCableGuideSheet(onClose: { showAndroidCableSheet = false })
+        }
     }
 
-    private var proUnlockSheet: some View {
-        VStack(spacing: 16) {
-            Text("DirectSwitch Pass Cross-OS")
-                .font(.system(size: 20, weight: .bold))
-            Text("Sblocca il trasferimento illimitato Android ↔ iPhone (Foto HEIC/JPG, Video 4K, Album, Calendari, SMS e File). Paghi su un solo telefono e vale per entrambi.")
-                .font(.system(size: 14))
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
+    // MARK: - Azioni di navigazione e flusso guidato
 
-            if let note = billingNote {
+    private func startReceiveWizard() {
+        isReceiverMode = true
+        pairingErrorNote = nil
+        receiverQrPayload = transport.startReceiverServer()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeStep = .receiveWaitCode
+        }
+    }
+
+    private func startSendWizard() {
+        isReceiverMode = false
+        pairedTargetPayload = nil
+        selectedBeacon = nil
+        pinCodeInput = ""
+        manualCodeInput = ""
+        showCameraScanner = false
+        pairingErrorNote = nil
+        transport.startUdpAutoDiscovery()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeStep = .sendConnect
+        }
+    }
+
+    private func startQuickContactsPortal() {
+        Task {
+            if await transport.startBootstrapPortalSession() != nil {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    activeStep = .quickContactsPortal
+                }
+            }
+        }
+    }
+
+    private func confirmPinPairing() {
+        guard let beacon = selectedBeacon else { return }
+        let clean = pinCodeInput.filter { $0.isNumber }
+        guard clean.count == 6, !isPairingBusy else { return }
+        isPairingBusy = true
+        pairingErrorNote = nil
+        Task {
+            do {
+                let paired = try await transport.pairWithBeaconUsingPin(beacon: beacon, pin: clean)
+                isPairingBusy = false
+                transport.stopUdpAutoDiscovery()
+                pairedTargetPayload = paired
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    activeStep = .sendSelectCategories
+                }
+            } catch {
+                isPairingBusy = false
+                pairingErrorNote = error.localizedDescription
+            }
+        }
+    }
+
+    private func handleScannedQrString(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            let parsed = try QrPairingPayload.fromJson(trimmed)
+            showCameraScanner = false
+            pairingErrorNote = nil
+            transport.stopUdpAutoDiscovery()
+            pairedTargetPayload = parsed
+            withAnimation(.easeInOut(duration: 0.22)) {
+                activeStep = .sendSelectCategories
+            }
+        } catch {
+            pairingErrorNote = "Codice QR non riconosciuto. Assicurati di inquadrare il QR mostrato da DirectSwitch sul nuovo telefono."
+        }
+    }
+
+    private func launchSenderTransfer() {
+        guard let paired = pairedTargetPayload else { return }
+        launchSenderTransferWithPayload(paired)
+    }
+
+    private func launchSenderTransferWithPayload(_ paired: QrPairingPayload) {
+        sharedVaultToast = nil
+        isReceiverMode = false
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeStep = .transferProgress
+        }
+        let docsSnapshot = pickedDocuments
+        Task {
+            await transport.executeSenderTransfer(
+                qrPayload: paired,
+                includeContacts: includeContacts,
+                includePhotos: includePhotos,
+                includeVideos: includeVideos,
+                includeCalendars: includeCalendars,
+                includeDocuments: includeDocuments,
+                includeWhatsAppVault: includeWhatsApp,
+                pickedDocuments: docsSnapshot
+            )
+            if transport.isCompleted {
+                pickedDocuments.removeAll()
+                refreshAuthorizedSummary()
+            }
+        }
+    }
+
+    private func scanExactDeviceCounts() {
+        isScanningDevice = true
+        let staged = pickedDocuments.map(\.0)
+        Task {
+            scanSummary = await iOSDeviceDataAnalyzer.requestPermissionsAndScanAll(stagedItems: staged)
+            isScanningDevice = false
+        }
+    }
+
+    private func refreshAuthorizedSummary() {
+        let staged = pickedDocuments.map(\.0)
+        Task {
+            let summary = await Task.detached(priority: .utility) {
+                iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged)
+            }.value
+            scanSummary = summary
+        }
+    }
+
+    private func handleIncomingURL(_ incomingURL: URL) {
+        if incomingURL.isFileURL {
+            if let imported = iOSDocumentsSandboxBridge.importIncomingOpenURL(incomingURL) {
+                pickedDocuments.append(imported)
+                sharedVaultToast = "'\(imported.0.fileName)' pronto per la copia"
+                refreshAuthorizedSummary()
+                if activeStep == .home {
+                    startSendWizard()
+                }
+            }
+            return
+        }
+        if let comps = URLComponents(url: incomingURL, resolvingAgainstBaseURL: false),
+           let qrParam = comps.queryItems?.first(where: { $0.name == "qr" })?.value,
+           !qrParam.isEmpty {
+            isReceiverMode = false
+            handleScannedQrString(qrParam)
+        }
+    }
+
+    private func handleBackNavigation() {
+        switch activeStep {
+        case .home:
+            break
+        case .receiveWaitCode, .quickContactsPortal:
+            finishAndReturnHome()
+        case .sendConnect:
+            showCameraScanner = false
+            transport.stopUdpAutoDiscovery()
+            withAnimation(.easeInOut(duration: 0.2)) {
+                activeStep = .home
+            }
+        case .sendSelectCategories:
+            pairedTargetPayload = nil
+            pinCodeInput = ""
+            pairingErrorNote = nil
+            transport.startUdpAutoDiscovery()
+            withAnimation(.easeInOut(duration: 0.2)) {
+                activeStep = .sendConnect
+            }
+        case .transferProgress:
+            finishAndReturnHome()
+        }
+    }
+
+    private func finishAndReturnHome() {
+        showCameraScanner = false
+        receiverQrPayload = nil
+        pairedTargetPayload = nil
+        selectedBeacon = nil
+        pinCodeInput = ""
+        pairingErrorNote = nil
+        transport.resetSession()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeStep = .home
+        }
+    }
+}
+
+// MARK: - Schermata Home pulita (stile "Passa a iOS" + "CloudSave")
+
+private struct DirectSwitchHomeView: View {
+    var onStartReceive: () -> Void
+    var onStartSend: () -> Void
+    var onOpenAndroidCableGuide: () -> Void
+    var onStartQuickContactsPortal: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                // Hero centrale pulito (identico all'impostazione di CloudSave)
+                VStack(spacing: 10) {
+                    DirectSwitchAppleEmblem(size: 64)
+                        .padding(.top, 14)
+
+                    HStack(spacing: 4) {
+                        Text("DirectSwitch")
+                            .font(.system(size: 26, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        InfoCircleButton(
+                            title: "Come funziona DirectSwitch",
+                            message: "DirectSwitch copia rubrica, foto con album, video originali, calendari, file e chat WhatsApp direttamente tra due telefoni già configurati, senza formattare l'iPhone e senza passare dal cloud."
+                        )
+                    }
+
+                    Text("Copia i tuoi dati senza formattare")
+                        .font(.system(size: 15))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+                .padding(.bottom, 4)
+
+                // Card 1: Questo è il Nuovo iPhone (Ricevi)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        AppleSettingsIcon(systemName: "arrow.down.to.line.compact", color: AppleTheme.blue)
+                        Text("Questo è il **Nuovo** iPhone")
+                            .font(.system(size: 16, weight: .regular))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Spacer()
+                        InfoCircleButton(
+                            title: "Ricevi su questo iPhone",
+                            message: "Mostra un codice monouso a 6 cifre (come 'Passa a iOS') o un codice QR per ricevere i dati dal tuo vecchio iPhone o Android senza cancellare nulla di ciò che hai già sul telefono."
+                        )
+                    }
+
+                    ApplePrimaryButton(
+                        title: "Ricevi su questo iPhone",
+                        icon: "arrow.down.circle.fill",
+                        color: AppleTheme.blue,
+                        action: onStartReceive
+                    )
+                }
+                .appleCard()
+
+                // Card 2: Questo è il Vecchio iPhone (Invia)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        AppleSettingsIcon(systemName: "arrow.up.right.square.fill", color: AppleTheme.indigo)
+                        Text("Questo è il **Vecchio** iPhone")
+                            .font(.system(size: 16, weight: .regular))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Spacer()
+                        InfoCircleButton(
+                            title: "Invia al nuovo telefono",
+                            message: "• Tocca 'Invia al nuovo telefono' per copiare in Wi-Fi diretto verso un nuovo iPhone o Android con DirectSwitch.\n• Tocca 'Passa ad Android con cavo' se vuoi usare il cavo USB-C e l'app ufficiale Google.\n• Tocca 'Solo Rubrica via QR' per passare subito i contatti a qualsiasi telefono senza installare app."
+                        )
+                    }
+
+                    ApplePrimaryButton(
+                        title: "Invia al nuovo telefono",
+                        icon: "arrow.up.circle.fill",
+                        color: AppleTheme.charcoal,
+                        action: onStartSend
+                    )
+
+                    GoogleStyleActionButton(
+                        title: "Passa ad Android con cavo",
+                        action: onOpenAndroidCableGuide
+                    )
+
+                    Button(action: onStartQuickContactsPortal) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "qrcode")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Solo Rubrica via QR (senza app)")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundColor(AppleTheme.blue)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 2)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .appleCard()
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+    }
+}
+
+// MARK: - Schermata Avanzamento & Completamento (stile "Passa a iOS" / "Android Switch")
+
+private struct DirectSwitchTransferProgressView: View {
+    @ObservedObject var transport: DirectSwitchTransportViewModel
+    let isReceiverMode: Bool
+    let isProUnlocked: Bool
+    var onOpenProSheet: () -> Void
+    var onRetryIfFailed: () -> Void
+    var onFinish: () -> Void
+
+    private var progressFraction: Double {
+        if transport.isCompleted { return 1.0 }
+        if transport.totalBytesCount > 0 {
+            return min(1.0, max(0.02, Double(transport.transferredBytesCount) / Double(transport.totalBytesCount)))
+        }
+        if transport.totalItems > 0 {
+            return min(1.0, max(0.02, Double(transport.completedItems) / Double(transport.totalItems)))
+        }
+        return transport.isTransferring ? 0.08 : 0.0
+    }
+
+    private var percentageInt: Int {
+        Int((progressFraction * 100.0).rounded())
+    }
+
+    private var remainingTimeLabel: String? {
+        guard !transport.isCompleted,
+              transport.speedMegabytesPerSec > 0.15,
+              transport.totalBytesCount > transport.transferredBytesCount else {
+            return nil
+        }
+        let remMB = Double(transport.totalBytesCount - transport.transferredBytesCount) / (1024.0 * 1024.0)
+        let remSec = Int((remMB / transport.speedMegabytesPerSec).rounded())
+        if remSec < 60 {
+            return "Meno di un minuto rimanente"
+        }
+        let mins = max(1, remSec / 60)
+        return "Circa \(mins) min rimanenti"
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                // Hero stato stile Passa a iOS
+                VStack(spacing: 10) {
+                    if transport.isCompleted {
+                        ZStack {
+                            Circle()
+                                .fill(AppleTheme.green.opacity(0.16))
+                                .frame(width: 68, height: 68)
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 40, weight: .semibold))
+                                .foregroundColor(AppleTheme.green)
+                        }
+                        .padding(.top, 14)
+
+                        Text("Trasferimento completato")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+
+                        Text(isReceiverMode
+                             ? "I tuoi dati sono pronti su questo iPhone"
+                             : "Tutti i dati selezionati sono stati copiati su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)")
+                            .font(.system(size: 14))
+                            .foregroundColor(AppleTheme.textSecondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                    } else {
+                        DirectSwitchAppleEmblem(size: 62)
+                            .padding(.top, 14)
+
+                        Text(isReceiverMode ? "Copia su questo iPhone..." : "Copia dei dati in corso...")
+                            .font(.system(size: 23, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+
+                        Text("Tieni entrambi i telefoni vicini fino al termine")
+                            .font(.system(size: 14))
+                            .foregroundColor(AppleTheme.textSecondary)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+
+                // Barra di avanzamento Apple pulita
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("\(percentageInt)%")
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
+                            .foregroundColor(transport.isCompleted ? AppleTheme.green : AppleTheme.textPrimary)
+
+                        Spacer()
+
+                        if transport.speedMegabytesPerSec > 0.05 && !transport.isCompleted {
+                            Text(String(format: "%.1f MB/s", transport.speedMegabytesPerSec))
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(AppleTheme.blue)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(AppleTheme.blue.opacity(0.10))
+                                .clipShape(Capsule())
+                        }
+                    }
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(AppleTheme.inputSurface)
+                                .frame(height: 10)
+
+                            Capsule()
+                                .fill(transport.isCompleted ? AppleTheme.green : AppleTheme.blue)
+                                .frame(width: max(12, geo.size.width * progressFraction), height: 10)
+                                .animation(.easeInOut(duration: 0.25), value: progressFraction)
+                        }
+                    }
+                    .frame(height: 10)
+
+                    HStack {
+                        Text(transport.currentItemName.isEmpty ? transport.statusLabel : transport.currentItemName)
+                            .font(.system(size: 13))
+                            .foregroundColor(AppleTheme.textSecondary)
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        if transport.totalBytesCount > 0 {
+                            Text("\(DirectSwitchUIHelpers.formatBytes(transport.transferredBytesCount)) / \(DirectSwitchUIHelpers.formatBytes(transport.totalBytesCount))")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(AppleTheme.textSecondary)
+                        }
+                    }
+
+                    if let eta = remainingTimeLabel {
+                        Text(eta)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                }
+                .appleCard()
+
+                // Riepilogo elementi copiati (stile Impostazioni Apple)
+                VStack(spacing: 0) {
+                    summaryRow(
+                        icon: "person.crop.circle.fill",
+                        color: AppleTheme.blue,
+                        title: "Contatti uniti",
+                        value: "\(transport.mergedContacts)"
+                    )
+                    Divider().padding(.leading, 56)
+                    summaryRow(
+                        icon: "photo.on.rectangle.angled",
+                        color: AppleTheme.orange,
+                        title: "Foto, Video e File",
+                        value: transport.totalItems > 0 ? "\(transport.completedItems) / \(transport.totalItems)" : "\(transport.completedItems)"
+                    )
+                    Divider().padding(.leading, 56)
+                    summaryRow(
+                        icon: "calendar",
+                        color: AppleTheme.indigo,
+                        title: "Calendari importati",
+                        value: "\(transport.importedCalendars)"
+                    )
+
+                    if transport.importedSms > 0 {
+                        Divider().padding(.leading, 56)
+                        summaryRow(
+                            icon: "message.fill",
+                            color: AppleTheme.green,
+                            title: "Messaggi salvati",
+                            value: "\(transport.importedSms)"
+                        )
+                    }
+
+                    if transport.skippedDuplicates > 0 {
+                        Divider().padding(.leading, 56)
+                        summaryRow(
+                            icon: "sparkles",
+                            color: AppleTheme.teal,
+                            title: "Doppioni già presenti ignorati",
+                            value: "\(transport.skippedDuplicates)"
+                        )
+                    }
+                }
+                .appleCard(padding: 0)
+
+                if isReceiverMode && transport.isCompleted && (transport.importedSms > 0 || transport.completedItems > 0) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder.fill")
+                            .foregroundColor(AppleTheme.blue)
+                        Text("Documenti, chat WhatsApp e archivio SMS sono nell'app **File → Su iPhone → DirectSwitch**.")
+                            .font(.system(size: 13))
+                            .foregroundColor(AppleTheme.textSecondary)
+                        Spacer()
+                    }
+                    .appleCard(padding: 14)
+                }
+
+                if transport.gatedPreviewCount > 0 && !isProUnlocked {
+                    Button(action: onOpenProSheet) {
+                        HStack(spacing: 10) {
+                            AppleSettingsIcon(systemName: "lock.open.fill", color: AppleTheme.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(transport.gatedPreviewCount) file oltre l'anteprima gratuita")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                Text("Tocca per sbloccare il Pass Cross-OS e copiarli tutti")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(AppleTheme.textTertiary)
+                        }
+                        .appleCard(padding: 14, selected: true)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if let err = transport.errorMessage, !err.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(AppleTheme.red)
+                            Text(err)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(AppleTheme.red)
+                        }
+                        if !isReceiverMode {
+                            AppleSecondaryButton(
+                                title: "Riprova copia",
+                                icon: "arrow.clockwise",
+                                tint: AppleTheme.blue,
+                                action: onRetryIfFailed
+                            )
+                        }
+                    }
+                    .appleCard(padding: 14)
+                }
+
+                if transport.isCompleted || transport.errorMessage != nil {
+                    ApplePrimaryButton(
+                        title: transport.isCompleted ? "Fine" : "Torna alla Home",
+                        icon: transport.isCompleted ? "checkmark" : nil,
+                        color: AppleTheme.blue,
+                        action: onFinish
+                    )
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+    }
+
+    private func summaryRow(icon: String, color: Color, title: String, value: String) -> some View {
+        HStack(spacing: 12) {
+            AppleSettingsIcon(systemName: icon, color: color)
+            Text(title)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(AppleTheme.textPrimary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundColor(AppleTheme.textSecondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+}
+
+// MARK: - Sheet Pass Cross-OS in stile CloudSave / Apple App Store
+
+private struct DirectSwitchProPassSheet: View {
+    @Binding var isProUnlocked: Bool
+    @Binding var billingNote: String?
+    var onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Spacer()
+                InfoCircleButton(
+                    title: "Sblocco su un solo telefono",
+                    message: "• Il passaggio tra due iPhone (iPhone ↔ iPhone) è sempre 100% gratuito e illimitato.\n• Per il passaggio Android ↔ iPhone, la Rubrica è gratuita e il Pass Una Tantum sblocca foto, video 4K, calendari, messaggi e file su entrambi i telefoni pagando su uno solo."
+                )
+            }
+
+            DirectSwitchAppleEmblem(size: 56)
+
+            VStack(spacing: 6) {
+                Text("Pass Android ↔ iPhone")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Text("Sblocca copia illimitata su entrambi i telefoni")
+                    .font(.system(size: 14))
+                    .foregroundColor(AppleTheme.textSecondary)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                featureLine(icon: "checkmark.circle.fill", text: "iPhone ↔ iPhone sempre 100% gratuito")
+                featureLine(icon: "photo.stack.fill", text: "Foto HEIC/JPG e Video 4K originali con Album")
+                featureLine(icon: "person.2.fill", text: "Un solo acquisto vale per entrambi i telefoni")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .appleCard(padding: 14)
+
+            if let note = billingNote, !note.isEmpty {
                 Text(note)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(tealPrimary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(AppleTheme.blue)
                     .multilineTextAlignment(.center)
             }
 
-            Button(action: {
+            ApplePrimaryButton(
+                title: isProUnlocked ? "Pass già attivo" : "Sblocca Pass Una Tantum (9,99 €)",
+                icon: isProUnlocked ? "checkmark.seal.fill" : "lock.open.fill",
+                color: isProUnlocked ? AppleTheme.green : AppleTheme.blue,
+                isDisabled: isProUnlocked
+            ) {
                 Task {
                     let (ok, msg) = await iOSLicenseStore.purchaseCrossOsPass()
                     billingNote = msg
                     if ok {
                         isProUnlocked = true
-                        showProSheet = false
+                        onClose()
                     }
                 }
-            }) {
-                Text(isProUnlocked ? "Pass Già Attivo" : "Acquista Pass Cross-OS Una Tantum (9,99 €)")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(tealPrimary)
-                    .foregroundColor(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
             }
 
-            Button("Ripristina Acquisti App Store") {
-                Task {
-                    let restored = await iOSLicenseStore.restoreStoreKitEntitlements()
-                    isProUnlocked = restored
-                    billingNote = restored ? "Acquisto App Store ripristinato!" : "Nessun acquisto precedente trovato."
+            HStack(spacing: 18) {
+                Button("Ripristina acquisti") {
+                    Task {
+                        let restored = await iOSLicenseStore.restoreStoreKitEntitlements()
+                        isProUnlocked = restored
+                        billingNote = restored ? "Acquisto ripristinato!" : "Nessun acquisto precedente trovato."
+                    }
                 }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(AppleTheme.blue)
+                .buttonStyle(.plain)
+
+                Text("•")
+                    .foregroundColor(AppleTheme.textTertiary)
+
+                Button("Chiudi", action: onClose)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(AppleTheme.textSecondary)
+                    .buttonStyle(.plain)
             }
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(blueAccent)
-
-            Button("Chiudi") { showProSheet = false }
+            .padding(.top, 2)
         }
-        .padding(24)
-        .presentationDetents([.medium])
+        .padding(20)
+        .background(AppleTheme.backgroundGradient.ignoresSafeArea())
+        .presentationDetents([.height(470), .large])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.light)
     }
 
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useGB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: max(0, bytes))
-    }
-
-    private func generateQrImage(from string: String) -> UIImage? {
-        let context = CIContext()
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(string.utf8)
-        filter.correctionLevel = "M"
-        guard let outputImage = filter.outputImage else { return nil }
-        let scaled = outputImage.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
-        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
-        return UIImage(cgImage: cgImage)
-    }
-}
-
-/// ViewController dedicato per la scansione QR che adatta dinamicamente `previewLayer.frame`
-/// e rilascia l'`AVCaptureSession` alla chiusura dello scanner.
-final class ScannerHostViewController: UIViewController {
-    var session: AVCaptureSession?
-    var previewLayer: AVCaptureVideoPreviewLayer?
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        previewLayer?.frame = view.bounds
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        stopSession()
-    }
-
-    func stopSession() {
-        guard let activeSession = session, activeSession.isRunning else { return }
-        DispatchQueue.global(qos: .utility).async {
-            activeSession.stopRunning()
+    private func featureLine(icon: String, text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(AppleTheme.blue)
+            Text(text)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(AppleTheme.textPrimary)
         }
     }
 }
 
-/// Scanner fotocamera nativo iOS (`AVCaptureSession` + `AVCaptureMetadataOutput`) per codici QR DirectSwitch.
-struct QrCameraScannerView: UIViewControllerRepresentable {
-    var onCodeScanned: (String) -> Void
+// MARK: - Sheet compatto per Passaggio iPhone → Android con cavo / Android Switch
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onCodeScanned: onCodeScanned)
-    }
+private struct AndroidCableGuideSheet: View {
+    var onClose: () -> Void
 
-    func makeUIViewController(context: Context) -> ScannerHostViewController {
-        let vc = ScannerHostViewController()
-        vc.view.backgroundColor = .black
-        let session = AVCaptureSession()
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            return vc
-        }
-        session.addInput(input)
-        let output = AVCaptureMetadataOutput()
-        if session.canAddOutput(output) {
-            session.addOutput(output)
-            output.setMetadataObjectsDelegate(context.coordinator, queue: DispatchQueue.main)
-            if output.availableMetadataObjectTypes.contains(.qr) {
-                output.metadataObjectTypes = [.qr]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                GoogleGlyphIcon(size: 22)
+                Text("Passa ad Android con cavo")
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
             }
-        }
-        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = vc.view.bounds
-        vc.view.layer.addSublayer(previewLayer)
-        vc.session = session
-        vc.previewLayer = previewLayer
-        context.coordinator.session = session
+            .padding(.top, 6)
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            session.startRunning()
-        }
-        return vc
-    }
+            VStack(alignment: .leading, spacing: 10) {
+                Text("1. Sul nuovo Android apri **DirectSwitch** e scegli **Copia con cavo Google**.")
+                Text("2. Collega iPhone e Android con il cavo USB-C / Lightning (oppure apri **Android Switch** qui sotto per la modalità senza cavo).")
+            }
+            .font(.system(size: 14))
+            .foregroundColor(AppleTheme.textSecondary)
+            .appleCard(padding: 14)
 
-    func updateUIViewController(_ uiViewController: ScannerHostViewController, context: Context) {
-        uiViewController.previewLayer?.frame = uiViewController.view.bounds
-    }
-
-    static func dismantleUIViewController(_ uiViewController: ScannerHostViewController, coordinator: Coordinator) {
-        uiViewController.stopSession()
-    }
-
-    final class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
-        let onCodeScanned: (String) -> Void
-        var session: AVCaptureSession?
-        private var didEmit = false
-
-        init(onCodeScanned: @escaping (String) -> Void) {
-            self.onCodeScanned = onCodeScanned
-        }
-
-        func metadataOutput(
-            _ output: AVCaptureMetadataOutput,
-            didOutput metadataObjects: [AVMetadataObject],
-            from connection: AVCaptureConnection
-        ) {
-            guard !didEmit,
-                  let readable = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-                  let val = readable.stringValue else { return }
-            didEmit = true
-            if let activeSession = session, activeSession.isRunning {
-                DispatchQueue.global(qos: .utility).async {
-                    activeSession.stopRunning()
+            ApplePrimaryButton(
+                title: "Apri Android Switch su App Store",
+                icon: "arrow.up.forward.app.fill",
+                color: AppleTheme.blue
+            ) {
+                if let url = URL(string: "https://apps.apple.com/app/switch-to-android/id1611395432") {
+                    UIApplication.shared.open(url)
                 }
             }
-            onCodeScanned(val)
+
+            AppleSecondaryButton(
+                title: "Chiudi",
+                tint: AppleTheme.textSecondary,
+                action: onClose
+            )
         }
+        .padding(20)
+        .background(AppleTheme.backgroundGradient.ignoresSafeArea())
+        .presentationDetents([.height(330), .medium])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.light)
     }
 }
