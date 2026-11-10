@@ -30,72 +30,48 @@ struct SendConnectStepView: View {
     var onConfirmPin: () -> Void
     var onScannedQrCode: (String) -> Void
     var onApplyManualCode: () -> Void
-    var onOpenInstantContactsQr: () -> Void
 
     @State private var showManualField: Bool = false
 
     private var headerTitle: String {
         switch targetDestination {
         case .newIPhone:
-            return "Collega il nuovo iPhone"
+            return "Invia a un nuovo iPhone"
         case .newAndroid:
             return "Passa a un nuovo Android"
-        }
-    }
-
-    private var headerSubtitle: String {
-        switch targetDestination {
-        case .newIPhone:
-            return "Apri DirectSwitch sul nuovo iPhone e tocca **Ricevi**"
-        case .newAndroid:
-            return "Apri DirectSwitch sul nuovo Android e tocca **Ricevi** (anche in Hotspot 5GHz senza Wi-Fi)"
         }
     }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
-                HStack {
-                    Text("Passo 1 di 3")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(AppleTheme.blue)
-                    Spacer()
-                    InfoCircleButton(
-                        title: headerTitle,
-                        message: targetDestination == .newIPhone
-                            ? "Sul nuovo iPhone apri DirectSwitch e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR."
-                            : "Sul nuovo Android apri DirectSwitch e tocca 'Ricevi' (puoi attivare anche l'Hotspot 5GHz diretto sull'Android se non hai una rete Wi-Fi). Inserisci qui il codice a 6 cifre oppure inquadra il QR per agganciare automaticamente il nuovo Android."
-                    )
-                }
-                .padding(.top, 8)
+                VStack(spacing: 12) {
+                    AppleSettingsIcon(systemName: "arrow.right", color: AppleTheme.blue, size: 52)
+                        .padding(.top, 12)
 
-                VStack(spacing: 8) {
-                    ZStack {
-                        Circle()
-                            .fill(AppleTheme.blue.opacity(0.12))
-                            .frame(width: 58, height: 58)
-                        Image(systemName: "arrow.left.arrow.right")
-                            .font(.system(size: 24, weight: .semibold))
-                            .foregroundColor(AppleTheme.blue)
-                    }
-
-                    Text(headerTitle)
-                        .font(.system(size: 23, weight: .bold))
-                        .foregroundColor(AppleTheme.textPrimary)
-
-                    Text(.init(headerSubtitle))
-                        .font(.system(size: 14))
-                        .foregroundColor(AppleTheme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12)
-                }
-
-                // Card 1: Rilevamento automatico + Codice a 6 cifre (stile Passa a iOS / Passa a Android)
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        Text(targetDestination == .newIPhone ? "iPhone rilevati in Wi-Fi" : "Telefoni rilevati in Wi-Fi")
-                            .font(.system(size: 15, weight: .semibold))
+                    HStack(spacing: 6) {
+                        Text(headerTitle)
+                            .font(.system(size: 23, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
+                        InfoCircleButton(
+                            title: headerTitle,
+                            message: targetDestination == .newIPhone
+                                ? "Apri DirectSwitch sul nuovo iPhone e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR."
+                                : "Apri DirectSwitch sul nuovo Android e tocca 'Ricevi' (anche in Hotspot 5GHz diretto senza Wi-Fi). Inserisci qui il codice a 6 cifre oppure inquadra il codice QR."
+                        )
+                    }
+                }
+
+                // Card 1: Rilevamento automatico + Codice a 6 cifre (stile Passa a iOS / Passa a Android, sottotitoli dentro ⓘ)
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 6) {
+                        Text(targetDestination == .newIPhone ? "iPhone rilevati" : "Dispositivi rilevati")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        InfoCircleButton(
+                            title: "Rilevamento automatico",
+                            message: "Assicurati che sull'altro telefono sia aperta la schermata 'Ricevi' di DirectSwitch sulla stessa rete Wi-Fi o Hotspot."
+                        )
                         Spacer()
                         if discoveredBeacons.isEmpty {
                             ProgressView()
@@ -115,14 +91,10 @@ struct SendConnectStepView: View {
                     if discoveredBeacons.isEmpty {
                         HStack(spacing: 12) {
                             AppleSettingsIcon(systemName: "wifi", color: AppleTheme.blue)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(targetDestination == .newIPhone ? "Ricerca del nuovo iPhone..." : "Ricerca del nuovo Android...")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                Text("Assicurati che 'Ricevi' sia aperto sul telefono nuovo")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(AppleTheme.textSecondary)
-                            }
+                            Text(targetDestination == .newIPhone ? "Ricerca del nuovo iPhone..." : "Ricerca del nuovo Android...")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Spacer()
                         }
                         .padding(.vertical, 4)
                     } else {
@@ -140,14 +112,9 @@ struct SendConnectStepView: View {
                                             systemName: beacon.receiverPlatform == .IOS ? "iphone" : "apps.iphone",
                                             color: isSelected ? AppleTheme.blue : AppleTheme.slate
                                         )
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(beacon.receiverName)
-                                                .font(.system(size: 15, weight: .semibold))
-                                                .foregroundColor(AppleTheme.textPrimary)
-                                            Text(beacon.receiverPlatform == .IOS ? "iPhone pronto a ricevere" : "Android pronto a ricevere")
-                                                .font(.system(size: 12))
-                                                .foregroundColor(AppleTheme.textSecondary)
-                                        }
+                                        Text(beacon.receiverName)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(AppleTheme.textPrimary)
                                         Spacer()
                                         Image(systemName: isSelected ? "checkmark.circle.fill" : "chevron.right")
                                             .font(.system(size: isSelected ? 19 : 14, weight: .semibold))
@@ -170,11 +137,15 @@ struct SendConnectStepView: View {
                         Divider()
 
                         VStack(spacing: 12) {
-                            Text("Inserisci il codice a 6 cifre mostrato su **\(activeBeacon.receiverName)**")
-                                .font(.system(size: 14))
-                                .foregroundColor(AppleTheme.textSecondary)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: .infinity)
+                            HStack(spacing: 6) {
+                                Text("Codice a 6 cifre")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                InfoCircleButton(
+                                    title: "Codice a 6 cifre",
+                                    message: "Inserisci il codice monouso a 6 cifre mostrato sullo schermo di \(activeBeacon.receiverName)."
+                                )
+                            }
 
                             PassaAiOSPinInputView(pin: $pinInput) {
                                 if !isPairingBusy {
@@ -202,12 +173,16 @@ struct SendConnectStepView: View {
 
                 // Card 2: Fotocamera QR (inquadra direttamente il QR del nuovo iPhone o Android)
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text(targetDestination == .newAndroid
-                             ? "Oppure inquadra il QR di Android (anche Hotspot 5GHz)"
-                             : "Oppure inquadra il codice QR")
-                            .font(.system(size: 15, weight: .semibold))
+                    HStack(spacing: 6) {
+                        Text("Collega con codice QR")
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
+                        InfoCircleButton(
+                            title: "Collegamento tramite codice QR",
+                            message: targetDestination == .newAndroid
+                                ? "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo Android (funziona anche in Hotspot 5GHz senza rete Wi-Fi di casa)."
+                                : "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo iPhone."
+                        )
                         Spacer()
                     }
 
@@ -274,30 +249,6 @@ struct SendConnectStepView: View {
                     }
                 }
                 .appleCard()
-
-                // Card 3: Passaggio rapido Rubrica tramite QR integrato (senza dover installare nulla sull'altro telefono)
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        AppleSettingsIcon(systemName: "qrcode", color: AppleTheme.teal)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("L'altro telefono non ha ancora l'app?")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                            Text("Passa subito tutta la Rubrica inquadrando un QR")
-                                .font(.system(size: 12))
-                                .foregroundColor(AppleTheme.textSecondary)
-                        }
-                        Spacer()
-                    }
-
-                    AppleSecondaryButton(
-                        title: "Mostra QR Rubrica immediata",
-                        icon: "arrow.right",
-                        tint: AppleTheme.slate,
-                        action: onOpenInstantContactsQr
-                    )
-                }
-                .appleCard(padding: 14)
 
                 if let err = errorNote, !err.isEmpty {
                     HStack(spacing: 10) {
@@ -394,30 +345,30 @@ struct SendCategoriesStepView: View {
                 }
                 .padding(.top, 8)
 
-                // Dispositivo collegato
+                // Dispositivo collegato (sottotitolo dentro ⓘ)
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
                         ZStack {
                             Circle()
                                 .fill(AppleTheme.green.opacity(0.15))
-                                .frame(width: 38, height: 38)
+                                .frame(width: 36, height: 36)
                             Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 20, weight: .semibold))
+                                .font(.system(size: 19, weight: .semibold))
                                 .foregroundColor(AppleTheme.green)
                         }
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Collegato a \(pairedPayload.receiverName)")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                            Text(!isCrossOs
-                                 ? "Passaggio iPhone ↔ iPhone • 100% Gratuito"
-                                 : (isSessionFullUnlocked
-                                    ? "Passaggio iPhone ↔ Android • Completo"
-                                    : "Modalità gratuita • Rubrica + 25 foto/video"))
-                                .font(.system(size: 12))
-                                .foregroundColor(isSessionFullUnlocked ? AppleTheme.green : AppleTheme.orange)
-                        }
+                        Text("Collegato a \(pairedPayload.receiverName)")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+
+                        InfoCircleButton(
+                            title: "Stato collegamento",
+                            message: !isCrossOs
+                                ? "Collegamento diretto iPhone ↔ iPhone attivo. Il trasferimento di tutti i dati è 100% gratuito e illimitato."
+                                : (isSessionFullUnlocked
+                                   ? "Collegamento iPhone ↔ Android con Premium Direct attivo: copia illimitata sbloccata."
+                                   : "Modalità gratuita attiva: include tutta la Rubrica + anteprima multimediale. Attiva Premium Direct per trasferire foto, video e file senza limiti.")
+                        )
 
                         Spacer()
 
@@ -432,19 +383,25 @@ struct SendCategoriesStepView: View {
                     if isCrossOs && !isSessionFullUnlocked {
                         Button(action: onOpenProSheet) {
                             HStack(spacing: 6) {
-                                Image(systemName: "lock.open.fill")
+                                Image(systemName: "crown.fill")
                                     .font(.system(size: 12, weight: .semibold))
-                                Text("Sblocca copia illimitata verso Android")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(AppleTheme.premiumAmber)
+                                Text("Attiva Premium Direct")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundColor(AppleTheme.premiumGold)
                                 Spacer()
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(AppleTheme.premiumGold)
                             }
-                            .foregroundColor(AppleTheme.blue)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
-                            .background(AppleTheme.blue.opacity(0.10))
+                            .background(AppleTheme.premiumSurface)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(AppleTheme.premiumBorder.opacity(0.6), lineWidth: 1.0)
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -452,7 +409,7 @@ struct SendCategoriesStepView: View {
                 .appleCard(padding: 14, selected: true)
 
                 HStack {
-                    Text("Scegli cosa copiare")
+                    Text("Cosa inviare")
                         .font(.system(size: 20, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
                     Spacer()
@@ -467,13 +424,14 @@ struct SendCategoriesStepView: View {
                     }
                 }
 
-                // Lista pulita in stile Impostazioni Apple / Passa a Android (senza viola)
+                // Lista pulita con sottotitoli racchiusi in ⓘ
                 VStack(spacing: 0) {
                     CleanCategoryToggleRow(
                         icon: "person.crop.circle.fill",
                         iconColor: AppleTheme.blue,
                         title: "Rubrica contatti",
                         countBadge: badgeForCount(scanSummary?.contactsCount, unit: "contatti"),
+                        infoMessage: "Trasferisce tutti i contatti con numeri di telefono, email e note unendo eventuali duplicati.",
                         isOn: $includeContacts
                     )
 
@@ -484,6 +442,7 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.orange,
                         title: "Foto e Album",
                         countBadge: badgeForMedia(count: scanSummary?.photosCount, bytes: scanSummary?.photosBytes, unit: "foto"),
+                        infoMessage: "Copia tutte le foto nella qualità originale preservando data di scatto, posizione GPS e album.",
                         isOn: $includePhotos
                     )
 
@@ -494,6 +453,7 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.red,
                         title: "Video originali",
                         countBadge: badgeForMedia(count: scanSummary?.videosCount, bytes: scanSummary?.videosBytes, unit: "video"),
+                        infoMessage: "Copia tutti i video in risoluzione originale (inclusi 4K 60fps) senza compressione.",
                         isOn: $includeVideos
                     )
 
@@ -504,6 +464,7 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.slate,
                         title: "Calendari",
                         countBadge: badgeForCount(scanSummary?.calendarEventsCount, unit: "eventi"),
+                        infoMessage: "Importa tutti gli appuntamenti, promemoria ed eventi del calendario.",
                         isOn: $includeCalendars
                     )
 
@@ -514,6 +475,7 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.teal,
                         title: "Documenti e File",
                         countBadge: docsCount > 0 ? "\(docsCount) file selezionati" : "Da app File",
+                        infoMessage: "Trasferisce i documenti, PDF e cartelle selezionati dall'app File di iPhone.",
                         isOn: $includeDocuments
                     )
 
@@ -523,7 +485,8 @@ struct SendCategoriesStepView: View {
                         icon: "bubble.left.and.bubble.right.fill",
                         iconColor: AppleTheme.green,
                         title: "Chat WhatsApp",
-                        countBadge: whatsAppCount > 0 ? "\(whatsAppCount) archivi .zip pronti" : "Esporta chat (.zip)",
+                        countBadge: whatsAppCount > 0 ? "\(whatsAppCount) archivi .zip pronti" : "Archivi esportati (.zip)",
+                        infoMessage: "Trasferisce gli archivi .zip delle chat esportate da WhatsApp (con foto, vocali e cronologia messaggi).",
                         isOn: $includeWhatsApp
                     )
                 }

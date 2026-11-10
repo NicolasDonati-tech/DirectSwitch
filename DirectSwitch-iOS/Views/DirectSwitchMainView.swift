@@ -16,7 +16,6 @@ private enum DirectSwitchWizardStep: Equatable {
     case sendConnect
     case sendSelectCategories
     case transferProgress
-    case quickContactsPortal
 }
 
 struct DirectSwitchMainView: View {
@@ -61,15 +60,13 @@ struct DirectSwitchMainView: View {
         case .home:
             return "DirectSwitch"
         case .receiveWaitCode:
-            return "Ricevi dati"
+            return "Ricevi"
         case .sendConnect:
-            return sendTargetDestination == .newIPhone ? "Nuovo iPhone" : "Passa a Android"
+            return "Invia"
         case .sendSelectCategories:
-            return "Cosa copiare"
+            return "Cosa inviare"
         case .transferProgress:
-            return transport.isCompleted ? "Completato" : "Copia dei dati"
-        case .quickContactsPortal:
-            return "Rubrica rapida"
+            return transport.isCompleted ? "Completato" : "Trasferimento"
         }
     }
 
@@ -152,8 +149,7 @@ struct DirectSwitchMainView: View {
                                 errorNote: pairingErrorNote,
                                 onConfirmPin: confirmPinPairing,
                                 onScannedQrCode: handleScannedQrString,
-                                onApplyManualCode: { handleScannedQrString(manualCodeInput) },
-                                onOpenInstantContactsQr: startQuickContactsPortal
+                                onApplyManualCode: { handleScannedQrString(manualCodeInput) }
                             )
 
                         case .sendSelectCategories:
@@ -206,14 +202,6 @@ struct DirectSwitchMainView: View {
                                 },
                                 onFinish: finishAndReturnHome
                             )
-
-                        case .quickContactsPortal:
-                            if let url = transport.bootstrapPortalUrl {
-                                QuickContactsPortalView(
-                                    portalUrl: url,
-                                    onClose: finishAndReturnHome
-                                )
-                            }
                         }
                     }
                 }
@@ -278,18 +266,6 @@ struct DirectSwitchMainView: View {
         transport.startUdpAutoDiscovery()
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .sendConnect
-        }
-    }
-
-    private func startQuickContactsPortal() {
-        showCameraScanner = false
-        transport.stopUdpAutoDiscovery()
-        Task {
-            if await transport.startBootstrapPortalSession() != nil {
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    activeStep = .quickContactsPortal
-                }
-            }
         }
     }
 
@@ -405,7 +381,7 @@ struct DirectSwitchMainView: View {
         switch activeStep {
         case .home:
             break
-        case .receiveWaitCode, .quickContactsPortal:
+        case .receiveWaitCode:
             finishAndReturnHome()
         case .sendConnect:
             showCameraScanner = false
@@ -440,7 +416,7 @@ struct DirectSwitchMainView: View {
     }
 }
 
-// MARK: - Schermata Home pulita (icona ingrandita, spaziatura ampia, frecce orizzontali, zero app esterne)
+// MARK: - Schermata Home pulita (solo Invia sopra e Ricevi sotto, sottotitoli dentro ⓘ)
 
 private struct DirectSwitchHomeView: View {
     var onStartReceive: () -> Void
@@ -450,76 +426,72 @@ private struct DirectSwitchHomeView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                // Hero centrale con icona ingrandita (88pt) e respiro aumentato tra titolo, sottotitolo e card
+                // Hero centrale con icona ingrandita (88pt) e sottotitolo racchiuso nel pulsante ⓘ
                 VStack(spacing: 12) {
                     DirectSwitchAppleEmblem(size: 88)
-                        .padding(.top, 20)
+                        .padding(.top, 22)
                         .padding(.bottom, 4)
 
-                    HStack(spacing: 5) {
+                    HStack(spacing: 6) {
                         Text("DirectSwitch")
-                            .font(.system(size: 28, weight: .bold))
+                            .font(.system(size: 29, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
-                            title: "Come funziona DirectSwitch",
-                            message: "DirectSwitch trasferisce rubrica, foto con album, video originali, calendari, file e chat WhatsApp direttamente tra due telefoni già configurati (iPhone o Android), senza formattare e senza passare dal cloud."
+                            title: "DirectSwitch",
+                            message: "Copia i tuoi dati senza formattare: trasferisce rubrica, foto con album, video originali, calendari, file e chat WhatsApp direttamente tra due telefoni già configurati, senza passare dal cloud."
                         )
                     }
-
-                    Text("Copia i tuoi dati senza formattare")
-                        .font(.system(size: 16))
-                        .foregroundColor(AppleTheme.textSecondary)
                 }
-                .padding(.bottom, 12)
+                .padding(.bottom, 10)
 
-                // Card 1: Questo è il Nuovo iPhone (Ricevi con freccia orizzontale)
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 12) {
-                        AppleSettingsIcon(systemName: "arrow.right.to.line", color: AppleTheme.blue)
-                        Text("Questo è il **Nuovo** iPhone")
-                            .font(.system(size: 17, weight: .regular))
-                            .foregroundColor(AppleTheme.textPrimary)
-                        Spacer()
-                        InfoCircleButton(
-                            title: "Ricevi su questo iPhone",
-                            message: "Mostra il codice a 6 cifre (come 'Passa a iOS') o il codice QR per ricevere i dati dal tuo vecchio iPhone o Android senza cancellare nulla di ciò che hai già sul telefono."
-                        )
-                    }
-
-                    ApplePrimaryButton(
-                        title: "Ricevi da vecchio iPhone o Android",
-                        icon: "arrow.right",
-                        color: AppleTheme.blue,
-                        action: onStartReceive
-                    )
-                }
-                .appleCard()
-
-                // Card 2: Questo è il Vecchio iPhone (Invia con frecce orizzontali e distinzione chiara iPhone vs Android)
+                // Sezione 1 (SOPRA): Invia (freccia verso destra ->, sottotitolo dentro ⓘ)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
-                        AppleSettingsIcon(systemName: "arrow.left.arrow.right", color: AppleTheme.slate)
-                        Text("Questo è il **Vecchio** iPhone")
-                            .font(.system(size: 17, weight: .regular))
+                        AppleSettingsIcon(systemName: "arrow.right", color: AppleTheme.blue)
+                        Text("Invia")
+                            .font(.system(size: 19, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
                         Spacer()
                         InfoCircleButton(
-                            title: "Scegli il telefono di destinazione",
-                            message: "• Tocca 'Invia a un nuovo iPhone' se il tuo telefono nuovo è un iPhone (passaggio 100% gratuito).\n• Tocca 'Passa a un nuovo Android' se il tuo telefono nuovo è un Android: il trasferimento si apre direttamente qui dentro DirectSwitch senza dover scaricare altre app."
+                            title: "Invia",
+                            message: "Invia i dati da questo telefono verso il telefono di destinazione:\n• 'Invia a un nuovo iPhone' per trasferire verso un altro iPhone (100% gratuito).\n• 'Passa a un nuovo Android' per trasferire direttamente verso un telefono Android qui dentro l'app."
                         )
                     }
 
                     ApplePrimaryButton(
                         title: "Invia a un nuovo iPhone",
                         icon: "arrow.right",
-                        color: AppleTheme.charcoal,
+                        color: AppleTheme.blue,
                         action: onStartSendToIPhone
                     )
 
                     AppleNeutralOutlinedButton(
                         title: "Passa a un nuovo Android",
-                        icon: "arrow.left.arrow.right",
+                        icon: "arrow.right",
                         action: onStartSendToAndroid
+                    )
+                }
+                .appleCard()
+
+                // Sezione 2 (SOTTO): Ricevi (SOLTANTO la freccia verso sinistra <-, sottotitolo dentro ⓘ)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        AppleSettingsIcon(systemName: "arrow.left", color: AppleTheme.teal)
+                        Text("Ricevi")
+                            .font(.system(size: 19, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Spacer()
+                        InfoCircleButton(
+                            title: "Ricevi",
+                            message: "Mostra il codice monouso a 6 cifre (come 'Passa a iOS') o il codice QR per ricevere i dati dal tuo altro iPhone o Android senza cancellare nulla."
+                        )
+                    }
+
+                    ApplePrimaryButton(
+                        title: "Ricevi",
+                        icon: "arrow.left",
+                        color: AppleTheme.teal,
+                        action: onStartReceive
                     )
                 }
                 .appleCard()
@@ -796,7 +768,7 @@ private struct DirectSwitchTransferProgressView: View {
     }
 }
 
-// MARK: - Sheet Passaggio Completo iPhone <-> Android
+// MARK: - Sheet Premium Direct
 
 private struct DirectSwitchProPassSheet: View {
     @Binding var isProUnlocked: Bool
@@ -805,29 +777,26 @@ private struct DirectSwitchProPassSheet: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            HStack {
-                Spacer()
-                InfoCircleButton(
-                    title: "Sblocco valido per entrambi i telefoni",
-                    message: "• Il passaggio tra due iPhone (iPhone ↔ iPhone) è sempre 100% gratuito e illimitato.\n• Per il passaggio tra iPhone e Android, la Rubrica è gratuita e lo sblocco Una Tantum attiva foto, video 4K, calendari, messaggi e file su entrambi i telefoni pagando su uno solo."
-                )
-            }
+            DirectSwitchAppleEmblem(size: 68)
+                .padding(.top, 8)
 
-            DirectSwitchAppleEmblem(size: 64)
-
-            VStack(spacing: 6) {
-                Text("Passaggio iPhone ↔ Android")
-                    .font(.system(size: 22, weight: .bold))
+            HStack(spacing: 6) {
+                Image(systemName: "crown.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(AppleTheme.premiumAmber)
+                Text("Premium Direct")
+                    .font(.system(size: 23, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
-                Text("Sblocca copia illimitata su entrambi i telefoni")
-                    .font(.system(size: 14))
-                    .foregroundColor(AppleTheme.textSecondary)
+                InfoCircleButton(
+                    title: "Come funziona Premium Direct",
+                    message: "• Il passaggio tra due iPhone è sempre 100% gratuito.\n• Con Premium Direct sblocchi il trasferimento illimitato di foto originali, video 4K, calendari, messaggi e file tra iPhone e Android su entrambi i telefoni con un solo acquisto Una Tantum."
+                )
             }
 
             VStack(alignment: .leading, spacing: 10) {
                 featureLine(icon: "checkmark.circle.fill", text: "iPhone ↔ iPhone sempre 100% gratuito")
                 featureLine(icon: "photo.stack.fill", text: "Foto HEIC/JPG e Video 4K originali con Album")
-                featureLine(icon: "arrow.left.arrow.right", text: "Un solo sblocco vale per entrambi i telefoni")
+                featureLine(icon: "crown.fill", text: "Un solo sblocco vale per entrambi i telefoni")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .appleCard(padding: 14)
@@ -840,9 +809,9 @@ private struct DirectSwitchProPassSheet: View {
             }
 
             ApplePrimaryButton(
-                title: isProUnlocked ? "Già attivo su questo iPhone" : "Sblocca Tutto Una Tantum (9,99 €)",
-                icon: isProUnlocked ? "checkmark.seal.fill" : "lock.open.fill",
-                color: isProUnlocked ? AppleTheme.green : AppleTheme.blue,
+                title: isProUnlocked ? "Premium Direct già attivo" : "Attiva Premium Direct (9,99 €)",
+                icon: isProUnlocked ? "checkmark.seal.fill" : "crown.fill",
+                color: isProUnlocked ? AppleTheme.green : AppleTheme.premiumGold,
                 isDisabled: isProUnlocked
             ) {
                 Task {

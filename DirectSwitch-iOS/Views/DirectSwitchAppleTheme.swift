@@ -32,6 +32,12 @@ enum AppleTheme {
     static let slate = Color(red: 0.216, green: 0.255, blue: 0.318)          // Grigio Ardesia Neutro #374151
     static let charcoal = Color(red: 0.110, green: 0.118, blue: 0.137)       // Grafite Scuro Neutro #1C1E23
 
+    // Palette dedicata per il badge "Premium Direct" (Oro/Ambra stile funzionalità Premium)
+    static let premiumGold = Color(red: 0.780, green: 0.451, blue: 0.020)    // #C77305
+    static let premiumAmber = Color(red: 0.945, green: 0.588, blue: 0.039)   // #F1960A
+    static let premiumSurface = Color(red: 1.000, green: 0.965, blue: 0.863) // #FFF6DC
+    static let premiumBorder = Color(red: 0.922, green: 0.659, blue: 0.145)  // #EBA825
+
     // Alias neutro al posto del vecchio indaco/viola
     static let indigo = slate
 
@@ -215,20 +221,22 @@ struct AppleTopNavigationBar: View {
 
                     Button(action: onTapPassBadge) {
                         HStack(spacing: 5) {
-                            Image(systemName: isProUnlocked ? "checkmark.seal.fill" : "arrow.left.arrow.right")
+                            Image(systemName: "crown.fill")
                                 .font(.system(size: 11, weight: .semibold))
-                            Text(isProUnlocked ? "Tutto sbloccato" : "iPhone ↔ Android")
-                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(AppleTheme.premiumAmber)
+                            Text(isProUnlocked ? "Premium Attivo" : "Premium Direct")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(AppleTheme.premiumGold)
                         }
-                        .foregroundColor(isProUnlocked ? AppleTheme.green : AppleTheme.slate)
-                        .padding(.horizontal, 10)
+                        .padding(.horizontal, 11)
                         .padding(.vertical, 6)
-                        .background(isProUnlocked ? AppleTheme.green.opacity(0.14) : AppleTheme.inputSurface)
+                        .background(AppleTheme.premiumSurface)
                         .clipShape(Capsule())
                         .overlay(
                             Capsule()
-                                .stroke(AppleTheme.cardBorder, lineWidth: isProUnlocked ? 0 : 0.8)
+                                .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
                         )
+                        .shadow(color: AppleTheme.premiumAmber.opacity(0.14), radius: 4, x: 0, y: 2)
                     }
                     .buttonStyle(.plain)
                 }
@@ -384,29 +392,35 @@ struct AppleSecondaryButton: View {
     }
 }
 
-// MARK: - Riga categoria pulita in stile Impostazioni Apple / Passa a Android
+// MARK: - Riga categoria pulita in stile Impostazioni Apple / Passa a iOS (sottotitolo dentro ⓘ)
 
 struct CleanCategoryToggleRow: View {
     let icon: String
     let iconColor: Color
     let title: String
     var countBadge: String? = nil
+    var infoMessage: String = ""
     @Binding var isOn: Bool
 
+    private var fullInfoText: String {
+        if let badge = countBadge, !badge.isEmpty {
+            return infoMessage.isEmpty ? "Rilevati sul dispositivo: \(badge)." : "\(infoMessage)\n\nStato attuale: \(badge)."
+        }
+        return infoMessage.isEmpty ? "Seleziona se includere \(title.lowercased()) nel trasferimento." : infoMessage
+    }
+
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             AppleSettingsIcon(systemName: icon, color: iconColor)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(AppleTheme.textPrimary)
-                if let badge = countBadge, !badge.isEmpty {
-                    Text(badge)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(AppleTheme.textSecondary)
-                }
-            }
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(AppleTheme.textPrimary)
+
+            InfoCircleButton(
+                title: title,
+                message: fullInfoText
+            )
 
             Spacer()
 

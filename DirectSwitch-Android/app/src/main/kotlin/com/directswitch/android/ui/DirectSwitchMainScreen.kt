@@ -42,6 +42,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -677,7 +678,7 @@ fun DirectSwitchMainScreen(
     }
 }
 
-// MARK: - 1. Home pulita (stile "Passa a iOS" / "Android Switch" + grafica CloudSave)
+// MARK: - 1. Home pulita (solo Invia sopra e Ricevi sotto, sottotitoli dentro ⓘ)
 
 @Composable
 private fun AndroidHomeView(
@@ -689,36 +690,30 @@ private fun AndroidHomeView(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 18.dp, bottom = 12.dp),
+            .padding(top = 20.dp, bottom = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         DirectSwitchAppleEmblem(size = 88.dp)
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
                 text = "DirectSwitch",
-                fontSize = 28.sp,
+                fontSize = 29.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.textPrimary
             )
             InfoCircleButton(
-                title = "Come funziona DirectSwitch",
-                message = "DirectSwitch copia rubrica, foto, video 4K, calendari, SMS, documenti e chat WhatsApp direttamente tra due telefoni già configurati (Android o iPhone), senza formattare e senza passare dal cloud."
+                title = "DirectSwitch",
+                message = "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, documenti e chat WhatsApp direttamente tra due telefoni già configurati, senza passare dal cloud."
             )
         }
-
-        Text(
-            text = "Copia i tuoi dati senza formattare",
-            fontSize = 16.sp,
-            color = DirectSwitchTheme.textSecondary
-        )
     }
 
-    // Card 1: Questo è il Nuovo telefono (Ricevi con freccia orizzontale)
+    // Sezione 1 (SOPRA): Invia (freccia verso destra ->, sottotitolo dentro ⓘ)
     DirectSwitchCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -731,29 +726,31 @@ private fun AndroidHomeView(
             ) {
                 AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowForward, color = DirectSwitchTheme.blue)
                 Text(
-                    text = buildAnnotatedString {
-                        append("Questo è il ")
-                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Nuovo") }
-                        append(" telefono")
-                    },
-                    fontSize = 17.sp,
+                    text = "Invia",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
             InfoCircleButton(
-                title = "Ricevi su questo Android",
-                message = "Mostra un codice a 6 cifre (come 'Passa a iOS') o un codice QR per ricevere i dati dal tuo vecchio Android o iPhone senza cancellare ciò che hai già sul telefono."
+                title = "Invia",
+                message = "Invia i dati da questo telefono verso il dispositivo di destinazione:\n• 'Invia a un nuovo iPhone' per trasferire verso un iPhone.\n• 'Passa a un nuovo Android' per trasferire verso un altro telefono Android."
             )
         }
 
         DirectSwitchPrimaryButton(
-            text = "Ricevi da vecchio iPhone o Android",
-            onClick = onStartReceive,
+            text = "Invia a un nuovo iPhone",
+            onClick = onStartSend,
             containerColor = DirectSwitchTheme.blue
+        )
+
+        DirectSwitchNeutralOutlinedButton(
+            text = "Passa a un nuovo Android",
+            onClick = onStartSend
         )
     }
 
-    // Card 2: Questo è il Vecchio telefono (frecce orizzontali + scelta chiara iPhone vs Android)
+    // Sezione 2 (SOTTO): Ricevi (SOLTANTO la freccia verso sinistra <-, sottotitolo dentro ⓘ)
     DirectSwitchCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -764,52 +761,25 @@ private fun AndroidHomeView(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.slate)
+                AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowBack, color = DirectSwitchTheme.teal)
                 Text(
-                    text = buildAnnotatedString {
-                        append("Questo è il ")
-                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Vecchio") }
-                        append(" telefono")
-                    },
-                    fontSize = 17.sp,
+                    text = "Ricevi",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
             InfoCircleButton(
-                title = "Scegli il telefono di destinazione",
-                message = "• Tocca 'Invia a un nuovo iPhone' se il tuo nuovo telefono è un iPhone.\n• Tocca 'Passa a un nuovo Android' se il tuo nuovo telefono è un Android."
+                title = "Ricevi",
+                message = "Mostra il codice monouso a 6 cifre (come 'Passa a iOS') o il codice QR per ricevere i dati dal tuo altro telefono senza cancellare nulla."
             )
         }
 
         DirectSwitchPrimaryButton(
-            text = "Invia a un nuovo iPhone",
-            onClick = onStartSend,
-            containerColor = DirectSwitchTheme.charcoal
+            text = "Ricevi",
+            onClick = onStartReceive,
+            containerColor = DirectSwitchTheme.teal
         )
-
-        DirectSwitchNeutralOutlinedButton(
-            text = "Passa a un nuovo Android",
-            onClick = onStartSend
-        )
-
-        TextButton(
-            onClick = onOpenQuickPortal,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(
-                imageVector = Icons.Filled.QrCode2,
-                contentDescription = null,
-                tint = DirectSwitchTheme.blue,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.size(6.dp))
-            Text(
-                text = "Solo Rubrica o App via QR (senza internet)",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.blue
-            )
-        }
     }
 }
 
@@ -1647,14 +1617,17 @@ private fun CrossOsProPassSheetContent(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        DirectSwitchAppleEmblem(size = 64.dp)
-        Text("Passaggio iPhone ↔ Android", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-        Text(
-            "Android ↔ Android è sempre 100% gratuito. Per il passaggio diretto con iPhone sblocchi tutto su entrambi i telefoni con un solo acquisto.",
-            fontSize = 14.sp,
-            color = DirectSwitchTheme.textSecondary,
-            textAlign = TextAlign.Center
-        )
+        DirectSwitchAppleEmblem(size = 68.dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text("Premium Direct", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+            InfoCircleButton(
+                title = "Premium Direct",
+                message = "Android ↔ Android è sempre 100% gratuito. Con Premium Direct sblocchi il trasferimento illimitato tra iPhone e Android su entrambi i telefoni con un solo acquisto."
+            )
+        }
 
         if (hasCloudSave && !isUnlocked) {
             Text("App CloudSave rilevata sul dispositivo", fontSize = 12.sp, color = DirectSwitchTheme.blue)
@@ -1664,10 +1637,10 @@ private fun CrossOsProPassSheetContent(
         }
 
         DirectSwitchPrimaryButton(
-            text = if (isUnlocked) "Pass già attivo" else "Sblocca Pass Una Tantum (9,99 €)",
+            text = if (isUnlocked) "Premium Direct già attivo" else "Attiva Premium Direct (9,99 €)",
             onClick = onPurchasePass,
             enabled = !isUnlocked,
-            containerColor = if (isUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.blue
+            containerColor = if (isUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.premiumGold
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {

@@ -99,6 +99,12 @@ object DirectSwitchTheme {
     val slate = Color(0xFF374151)
     val charcoal = Color(0xFF1C1E23)
 
+    // Palette dedicata per il badge "Premium Direct" (Oro/Ambra stile funzionalità Premium)
+    val premiumGold = Color(0xFFC77305)
+    val premiumAmber = Color(0xFFF1960A)
+    val premiumSurface = Color(0xFFFFF6DC)
+    val premiumBorder = Color(0xFFEBA825)
+
     // Alias neutro senza viola
     val indigo = slate
     val tealPrimary = blue
@@ -284,25 +290,25 @@ fun AppleTopNavigationBar(
                 Surface(
                     onClick = onTapPassBadge,
                     shape = RoundedCornerShape(20.dp),
-                    color = if (isProUnlocked) DirectSwitchTheme.green.copy(alpha = 0.14f) else DirectSwitchTheme.inputSurface,
-                    border = if (isProUnlocked) null else BorderStroke(0.8.dp, DirectSwitchTheme.cardBorder)
+                    color = DirectSwitchTheme.premiumSurface,
+                    border = BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Icon(
-                            imageVector = if (isProUnlocked) Icons.Filled.Verified else Icons.Filled.SwapHoriz,
+                            imageVector = Icons.Filled.Verified,
                             contentDescription = null,
-                            tint = if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.slate,
+                            tint = DirectSwitchTheme.premiumAmber,
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = if (isProUnlocked) "Tutto sbloccato" else "iPhone ↔ Android",
+                            text = if (isProUnlocked) "Premium Attivo" else "Premium Direct",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (isProUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.slate
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.premiumGold
                         )
                     }
                 }
