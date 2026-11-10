@@ -171,6 +171,7 @@ struct TransferManifest: Codable, Sendable {
     var contactsPayload: [ContactTransferRecord] = []
     var calendarsPayload: [CalendarEventRecord] = []
     var smsPayload: [SmsTransferRecord] = []
+    var requestNativeWhatsAppMigration: Bool? = nil
 }
 
 struct ManifestResponse: Codable, Sendable {

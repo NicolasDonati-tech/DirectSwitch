@@ -177,4 +177,20 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(iOSPhotoKitMigrator.mimeTypeForFileName("CLIP_4K.MOV", isVideo: true), "video/quicktime")
         XCTAssertEqual(iOSPhotoKitMigrator.mimeTypeForFileName("VID_01.mp4", isVideo: true), "video/mp4")
     }
+
+    func testTransferManifestNativeWhatsAppMigrationFlagAndLegacyCompat() throws {
+        let manifest = TransferManifest(
+            sessionId: "ds_wa_sync",
+            senderPlatform: .IOS,
+            items: [],
+            requestNativeWhatsAppMigration: true
+        )
+        let encoded = try JSONEncoder().encode(manifest)
+        let decoded = try JSONDecoder().decode(TransferManifest.self, from: encoded)
+        XCTAssertEqual(decoded.requestNativeWhatsAppMigration, true)
+
+        let legacyJson = Data(#"{"sessionId":"ds_old","senderPlatform":"ANDROID","items":[]}"#.utf8)
+        let legacyDecoded = try JSONDecoder().decode(TransferManifest.self, from: legacyJson)
+        XCTAssertNil(legacyDecoded.requestNativeWhatsAppMigration)
+    }
 }

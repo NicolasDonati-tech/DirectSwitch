@@ -355,12 +355,18 @@ class DirectSwitchProtocolTest {
                     dateEpochMillis = 1762600000000L,
                     messageType = 1
                 )
-            )
+            ),
+            requestNativeWhatsAppMigration = true
         )
         val raw = DirectSwitchJson.instance.encodeToString(manifest)
         val decoded = DirectSwitchJson.instance.decodeFromString<TransferManifest>(raw)
         assertEquals(2, decoded.items.size)
         assertEquals(1, decoded.smsPayload.size)
         assertEquals("+393331234567", decoded.smsPayload.first().address)
+        assertEquals(true, decoded.requestNativeWhatsAppMigration)
+
+        val legacyRaw = """{"sessionId":"ds_legacy","senderPlatform":"IOS","items":[]}"""
+        val legacyDecoded = DirectSwitchJson.instance.decodeFromString<TransferManifest>(legacyRaw)
+        assertEquals(false, legacyDecoded.requestNativeWhatsAppMigration)
     }
 }

@@ -294,6 +294,8 @@ fun DirectSwitchMainScreen(
         autoDiscovery.stopAdvertising()
         autoDiscovery.stopScanning()
         server.stop()
+        server.resetProgress()
+        client.resetProgress()
         hotspotController.stopHotspot()
         useOffline5GhzHotspot = false
         hotspotStatusNote = null
@@ -665,7 +667,7 @@ fun DirectSwitchMainScreen(
                     googleBridgeNote = msg
                 },
                 onLaunchIphoneToAndroidCable = {
-                    val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(context)
+                    val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(context, preferWirelessQr = true)
                     googleBridgeNote = msg
                 },
                 onLaunchOldAndroidSend = {
@@ -1232,14 +1234,25 @@ private fun SenderCategoriesWizardView(
                 modifier = Modifier.weight(1f)
             ) {
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = DirectSwitchTheme.green, modifier = Modifier.size(28.dp))
-                Column {
-                    Text("Collegato a ${pairedPayload.receiverName}", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     Text(
-                        text = if (!isCrossOs) "Android ↔ Android • 100% Gratuito"
-                        else if (isFullUnlocked) "Pass Cross-OS attivo • Copia completa"
-                        else "Modalità anteprima • Rubrica + 25 foto",
-                        fontSize = 12.sp,
-                        color = if (isFullUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.orange
+                        "Collegato a ${pairedPayload.receiverName}",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                    InfoCircleButton(
+                        title = "Stato collegamento",
+                        message = if (!isCrossOs) {
+                            "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati."
+                        } else if (isFullUnlocked) {
+                            "Premium Direct attivo: trasferimento completo Android ↔ iPhone sbloccato senza limiti."
+                        } else {
+                            "Con Premium Direct sblocchi il trasferimento illimitato di foto originali, video 4K, calendari, messaggi e chat verso iPhone senza formattare."
+                        }
                     )
                 }
             }
@@ -1256,7 +1269,8 @@ private fun SenderCategoriesWizardView(
             Surface(
                 onClick = onOpenProSheet,
                 shape = RoundedCornerShape(10.dp),
-                color = DirectSwitchTheme.blue.copy(alpha = 0.10f),
+                color = DirectSwitchTheme.premiumSurface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -1264,8 +1278,8 @@ private fun SenderCategoriesWizardView(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Sblocca copia illimitata verso iPhone", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
-                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.blue)
+                    Text("Sblocca trasferimento completo con Premium Direct", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.premiumGold)
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.premiumGold)
                 }
             }
         }
@@ -1334,11 +1348,12 @@ private fun SenderCategoriesWizardView(
         )
         HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
 
+        val waArchives = summary?.whatsappArchivesCount ?: 0
         CleanCategoryToggleRow(
             icon = Icons.AutoMirrored.Filled.Chat,
             iconColor = DirectSwitchTheme.green,
             title = "Chat WhatsApp",
-            subtitle = summary?.let { "${it.whatsappArchivesCount} archivi .zip" },
+            subtitle = if (waArchives > 0) "Cronologia QR + $waArchives .zip" else "Cronologia diretta via QR",
             checked = categories.whatsAppVault,
             onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
         )
@@ -1367,6 +1382,26 @@ private fun TransferProgressWizardView(
     val context = LocalContext.current
     var stillDefaultSms by remember(progress.isCompleted, progress.errorMessage) {
         mutableStateOf(SmsSystemScanner.isDefaultSmsApp(context))
+    }
+    var whatsAppBridgeNote by remember(progress.isCompleted, progress.pendingNativeWhatsAppMigration) {
+        mutableStateOf<String?>(null)
+    }
+    var autoLaunchedAndroidSwitch by remember { mutableStateOf(false) }
+
+    LaunchedEffect(progress.isCompleted, progress.pendingNativeWhatsAppMigration, isReceiver, progress.peerPlatform) {
+        if (isReceiver &&
+            progress.isCompleted &&
+            progress.pendingNativeWhatsAppMigration &&
+            progress.peerPlatform == DevicePlatform.IOS &&
+            !autoLaunchedAndroidSwitch
+        ) {
+            autoLaunchedAndroidSwitch = true
+            val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(
+                context = context,
+                preferWirelessQr = true
+            )
+            whatsAppBridgeNote = msg
+        }
     }
     val restoreSmsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -1489,6 +1524,120 @@ private fun TransferProgressWizardView(
         if (progress.skippedDuplicates > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.CheckCircle, DirectSwitchTheme.teal, "Doppioni ignorati", "${progress.skippedDuplicates}")
+        }
+    }
+
+    if (progress.isCompleted && progress.pendingNativeWhatsAppMigration) {
+        val isFromIphone = isReceiver && progress.peerPlatform == DevicePlatform.IOS
+        val cardTitle = when {
+            isFromIphone -> "Passaggio Chat WhatsApp senza cavo"
+            isReceiver -> "Ricevi Chat WhatsApp su Android"
+            progress.peerPlatform == DevicePlatform.IOS -> "Chat WhatsApp → iPhone"
+            else -> "Chat WhatsApp → Nuovo Android"
+        }
+        val shortHint = when {
+            isFromIphone ->
+                "Modulo Android Switch avviato per mostrare il codice QR senza cavo: inquadralo da WhatsApp sull'iPhone, poi apri WhatsApp qui sotto."
+            isReceiver ->
+                "Apri WhatsApp su questo telefono, inserisci il tuo numero e mostra il codice QR da inquadrare con il vecchio Android."
+            progress.peerPlatform == DevicePlatform.IOS ->
+                "Apri WhatsApp per avviare il passaggio guidato in Wi-Fi locale verso il nuovo iPhone."
+            else ->
+                "Inserisci il tuo numero in WhatsApp sul nuovo Android, poi tocca qui sotto per inquadrare il codice QR."
+        }
+        val infoSteps = when {
+            isFromIphone ->
+                "1. DirectSwitch avvia automaticamente il modulo nativo Google 'Android Switch' in modalità senza cavo (puoi riaprirlo in ogni momento col pulsante verde).\n2. Scegli 'Senza cavo / Wi-Fi' fino a visualizzare il codice QR su questo Android.\n3. Sull'iPhone apri WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadra il codice QR.\n4. Terminata la ricezione su Android Switch, tocca '2. Apri WhatsApp per attivare le chat' e verifica il tuo numero: ritroverai tutte le conversazioni, foto e vocali senza alcun cavo!"
+            isReceiver ->
+                "Passaggio diretto Android → Android senza usare Google Drive:\n1. Tocca il pulsante verde per aprire WhatsApp e inserisci il tuo numero.\n2. Scegli 'Trasferisci la cronologia chat dal telefono precedente' per mostrare il codice QR.\n3. Sul vecchio Android apri WhatsApp → Impostazioni → Chat → Trasferisci chat e inquadra il QR."
+            progress.peerPlatform == DevicePlatform.IOS ->
+                "1. Eventuali archivi .zip sono già stati copiati nella cartella DirectSwitch dell'iPhone.\n2. Per l'intera cronologia nativa, apri WhatsApp e segui la connessione Wi-Fi locale con l'iPhone."
+            else ->
+                "1. Sul nuovo Android apri WhatsApp, inserisci il tuo numero e mostra il codice QR di trasferimento chat.\n2. Su questo Android tocca il pulsante verde qui sotto (Impostazioni → Chat → Trasferisci chat → Inizia) e inquadra il codice QR."
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = DirectSwitchTheme.cardSurface,
+            border = androidx.compose.foundation.BorderStroke(1.2.dp, DirectSwitchTheme.green.copy(alpha = 0.50f)),
+            shadowElevation = 2.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(11.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.Chat, color = DirectSwitchTheme.green)
+                        Text(
+                            text = cardTitle,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.textPrimary
+                        )
+                    }
+                    InfoCircleButton(
+                        title = cardTitle,
+                        message = infoSteps
+                    )
+                }
+
+                Text(
+                    text = shortHint,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    color = DirectSwitchTheme.textSecondary
+                )
+
+                if (isFromIphone) {
+                    DirectSwitchPrimaryButton(
+                        text = "1. Modulo Android Switch (QR senza cavo)",
+                        containerColor = DirectSwitchTheme.green,
+                        onClick = {
+                            val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(
+                                context = context,
+                                preferWirelessQr = true
+                            )
+                            whatsAppBridgeNote = msg
+                        }
+                    )
+                    DirectSwitchSecondaryButton(
+                        text = "2. Apri WhatsApp per attivare le chat",
+                        tint = DirectSwitchTheme.green,
+                        onClick = {
+                            val (_, msg) = GoogleSetupBridge.launchWhatsAppOrPlayStore(context)
+                            whatsAppBridgeNote = msg
+                        }
+                    )
+                } else {
+                    DirectSwitchPrimaryButton(
+                        text = if (isReceiver) "Apri WhatsApp e mostra QR" else "Apri WhatsApp e inquadra QR",
+                        containerColor = DirectSwitchTheme.green,
+                        onClick = {
+                            val (_, msg) = GoogleSetupBridge.launchWhatsAppOrPlayStore(context)
+                            whatsAppBridgeNote = msg
+                        }
+                    )
+                }
+
+                if (!whatsAppBridgeNote.isNullOrBlank()) {
+                    Text(
+                        text = whatsAppBridgeNote ?: "",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = DirectSwitchTheme.blue
+                    )
+                }
+            }
         }
     }
 
@@ -1659,7 +1808,7 @@ private fun CrossOsProPassSheetContent(
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppleSettingsIcon(icon = Icons.Filled.Image, color = DirectSwitchTheme.orange, size = 28.dp)
-                Text("Foto originali, Video 4K, Album, Contatti e Chat", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                Text("Foto originali, Video 4K, Contatti e Chat WhatsApp", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppleSettingsIcon(icon = Icons.Filled.CheckCircle, color = DirectSwitchTheme.teal, size = 28.dp)
@@ -1724,7 +1873,7 @@ private fun GoogleSetupBridgeSheetContent(
             fontSize = 14.sp,
             color = DirectSwitchTheme.textSecondary
         )
-        DirectSwitchPrimaryButton(text = "Ricevi da iPhone con cavo USB", onClick = onLaunchIphoneToAndroidCable)
+        DirectSwitchPrimaryButton(text = "Modulo Android Switch da iPhone (QR senza cavo)", onClick = onLaunchIphoneToAndroidCable)
         DirectSwitchSecondaryButton(text = "Ricevi su questo Android già avviato", onClick = onLaunchNewAndroidRestore)
         DirectSwitchSecondaryButton(text = "Invia da questo vecchio Android", onClick = onLaunchOldAndroidSend)
 

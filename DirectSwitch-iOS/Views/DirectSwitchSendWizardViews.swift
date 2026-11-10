@@ -478,8 +478,12 @@ struct SendCategoriesStepView: View {
                         icon: "bubble.left.and.bubble.right.fill",
                         iconColor: AppleTheme.green,
                         title: "Chat WhatsApp",
-                        countBadge: whatsAppCount > 0 ? "\(whatsAppCount) archivi .zip pronti" : "Archivi esportati (.zip)",
-                        infoMessage: "Trasferisce gli archivi .zip delle chat esportate da WhatsApp (con foto, vocali e cronologia messaggi).",
+                        countBadge: whatsAppCount > 0
+                            ? "Cronologia QR + \(whatsAppCount) .zip"
+                            : (isCrossOs ? "Senza cavo via QR (Android Switch)" : "Cronologia diretta via QR"),
+                        infoMessage: isCrossOs
+                            ? "Al termine della copia, DirectSwitch apre automaticamente il modulo Android Switch senza cavo sul telefono Android per mostrare il codice QR: su questo iPhone ti basterà aprire WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadrare il QR. Eventuali archivi .zip allegati vengono trasferiti insieme ai file."
+                            : "Al termine della copia, DirectSwitch ti guida a trasferire l'intera cronologia chat sul nuovo iPhone senza usare spazio iCloud: sul nuovo iPhone inserisci il tuo numero in WhatsApp e inquadra il codice QR da questo iPhone (Impostazioni → Chat → Trasferisci chat su iPhone).",
                         isOn: $includeWhatsApp
                     )
                 }
@@ -487,13 +491,13 @@ struct SendCategoriesStepView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("File e chat WhatsApp da allegare")
+                        Text("Documenti o archivi extra da allegare")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
                         Spacer()
                         InfoCircleButton(
-                            title: "Come allegare File e WhatsApp su iPhone",
-                            message: "• Per i Documenti: tocca 'Scegli da File' per allegare PDF, cartelle o archivi presenti sull'iPhone.\n• Per WhatsApp: in WhatsApp apri una chat → Esporta chat → scegli 'DirectSwitch' (oppure salvala in File e selezionala qui)."
+                            title: "Documenti e archivi opzionali",
+                            message: "• L'intera cronologia chat di WhatsApp viene trasferita senza cavo tramite codice QR al termine della copia.\n• Qui puoi inoltre allegare PDF, cartelle dall'app File o singoli archivi .zip esportati."
                         )
                     }
 

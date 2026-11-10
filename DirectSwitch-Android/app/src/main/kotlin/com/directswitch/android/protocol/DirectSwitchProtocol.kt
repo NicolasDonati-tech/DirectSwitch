@@ -194,7 +194,8 @@ data class TransferManifest(
     val items: List<ManifestItem>,
     val contactsPayload: List<ContactTransferRecord> = emptyList(),
     val calendarsPayload: List<CalendarEventRecord> = emptyList(),
-    val smsPayload: List<SmsTransferRecord> = emptyList()
+    val smsPayload: List<SmsTransferRecord> = emptyList(),
+    val requestNativeWhatsAppMigration: Boolean = false
 )
 
 @Serializable

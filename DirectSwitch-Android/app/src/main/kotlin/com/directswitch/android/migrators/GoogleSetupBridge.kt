@@ -14,6 +14,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
+import android.net.Uri
 import android.provider.Settings
 import com.directswitch.android.DirectSwitchLog
 
@@ -167,13 +168,27 @@ object GoogleSetupBridge {
     }
 
     /**
-     * SCENARIO 3 (DA IPHONE -> A QUESTO ANDROID TRAMITE CONFIGURA NATIVO GOOGLE):
-     * Apre il flusso nativo di Google "Android Switch" per importare da iPhone ad Android.
+     * SCENARIO 3 (DA IPHONE -> A QUESTO ANDROID TRAMITE ANDROID SWITCH NATIVO DI GOOGLE):
+     * Apre il flusso nativo di Google "Android Switch" (`com.google.android.apps.restore`) per importare
+     * da iPhone ad Android, inclusa la modalità wireless con codice QR per il passaggio nativo delle Chat WhatsApp senza cavo.
      */
-    fun launchIphoneToAndroidGoogleRestore(context: Context): Pair<Boolean, String> {
+    fun launchIphoneToAndroidGoogleRestore(
+        context: Context,
+        preferWirelessQr: Boolean = false
+    ): Pair<Boolean, String> {
         val pm = context.packageManager
         val capabilities = inspectDeviceCapabilities(context)
         val candidates = mutableListOf<Intent>()
+
+        fun Intent.applyIosExtras(): Intent = apply {
+            putExtra("source_device_type", "ios")
+            putExtra("is_ios_migration", true)
+            if (preferWirelessQr) {
+                putExtra("transport_type", "WIFI")
+                putExtra("wireless_migration", true)
+                putExtra("cableless", true)
+            }
+        }
 
         candidates.add(
             Intent().apply {
@@ -181,44 +196,79 @@ object GoogleSetupBridge {
                     "com.google.android.apps.restore",
                     "com.google.android.apps.restore.anya.AnytimeRestoreActivity"
                 )
-                putExtra("source_device_type", "ios")
-                putExtra("is_ios_migration", true)
-            }
+            }.applyIosExtras()
         )
         pm.getLaunchIntentForPackage("com.google.android.apps.restore")?.let { launchIntent ->
-            launchIntent.putExtra("source_device_type", "ios")
-            candidates.add(launchIntent)
+            candidates.add(launchIntent.applyIosExtras())
         }
         candidates.add(
             Intent("com.google.android.apps.restore.ACTION_START_RESTORE").apply {
                 setPackage("com.google.android.apps.restore")
-                putExtra("source_device_type", "ios")
-            }
+            }.applyIosExtras()
         )
         candidates.add(
             Intent("com.google.android.setupwizard.DEFERRED_SUW").apply {
                 setPackage("com.google.android.setupwizard")
-                putExtra("source_device_type", "ios")
-            }
+            }.applyIosExtras()
         )
         pm.getLaunchIntentForPackage("com.sec.android.easyMover")?.let { candidates.add(it) }
 
-        val cableHint = if (capabilities.isUsbCableDeviceAttached) {
-            "Cavo USB rilevato (${capabilities.attachedUsbProductName ?: "iPhone"}): premi 'Autorizza' sull'iPhone."
-        } else {
-            "Puoi collegare l'iPhone via cavo USB-C/Lightning oppure scegliere la modalità wireless con QR."
+        val hint = when {
+            preferWirelessQr ->
+                "Scegli 'Senza cavo / Wi-Fi' fino al codice QR, poi su iPhone apri WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadra il QR."
+            capabilities.isUsbCableDeviceAttached ->
+                "Cavo USB rilevato (${capabilities.attachedUsbProductName ?: "iPhone"}): premi 'Autorizza' sull'iPhone."
+            else ->
+                "Puoi proseguire senza cavo con codice QR Wi-Fi oppure collegare un cavo USB-C."
         }
 
         for (intent in candidates) {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
                 context.startActivity(intent)
-                return true to "Flusso Google 'iPhone → Android' avviato! $cableHint"
+                return true to "Modulo Google 'Android Switch' avviato! $hint"
             } catch (t: Throwable) {
                 DirectSwitchLog.warn("Avvio flusso iPhone-Android fallito", t)
             }
         }
+
+        if (preferWirelessQr) {
+            return false to "Android Switch non è preinstallato su questo modello: scarica 'Android Switch' dal Play Store o apri direttamente WhatsApp qui sotto."
+        }
         return false to "Android Switch nativo non accessibile su questa ROM: usa 'Ricevi con DirectSwitch' qui sotto."
+    }
+
+    /**
+     * Apre direttamente WhatsApp (o WhatsApp Business) su Android per completare la verifica del numero e
+     * finalizzare l'importazione della cronologia chat ricevuta da Android Switch (o apre il Play Store se non installato).
+     */
+    fun launchWhatsAppOrPlayStore(context: Context): Pair<Boolean, String> {
+        val pm = context.packageManager
+        for (pkg in listOf("com.whatsapp", "com.whatsapp.w4b")) {
+            val launch = pm.getLaunchIntentForPackage(pkg)
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                try {
+                    context.startActivity(launch)
+                    return true to "WhatsApp avviato: inserisci il tuo numero per completare il ripristino della cronologia chat."
+                } catch (t: Throwable) {
+                    DirectSwitchLog.warn("Avvio WhatsApp fallito", t)
+                }
+            }
+        }
+        val storeCandidates = listOf(
+            Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.whatsapp")),
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=com.whatsapp"))
+        )
+        for (storeIntent in storeCandidates) {
+            storeIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                context.startActivity(storeIntent)
+                return true to "Apertura Google Play Store per installare WhatsApp..."
+            } catch (_: Throwable) {
+            }
+        }
+        return false to "Impossibile aprire WhatsApp o Google Play Store su questo dispositivo."
     }
 
     private fun isPackageInstalled(pm: PackageManager, pkg: String): Boolean {

@@ -677,6 +677,10 @@ private struct DirectSwitchTransferProgressView: View {
                 }
                 .appleCard(padding: 0)
 
+                if transport.isCompleted && transport.pendingNativeWhatsAppMigration {
+                    whatsAppWirelessMigrationCard
+                }
+
                 if isReceiverMode && transport.isCompleted && (transport.importedSms > 0 || transport.completedItems > 0) {
                     HStack(spacing: 10) {
                         Image(systemName: "folder.fill")
@@ -745,6 +749,87 @@ private struct DirectSwitchTransferProgressView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
+    }
+
+    @ViewBuilder
+    private var whatsAppWirelessMigrationCard: some View {
+        let isToAndroid = !isReceiverMode && transport.peerPlatform == .ANDROID
+        let isFromAndroid = isReceiverMode && transport.peerPlatform == .ANDROID
+
+        let cardTitle: String = {
+            if isToAndroid { return "Chat WhatsApp → Android" }
+            if !isReceiverMode { return "Chat WhatsApp → Nuovo iPhone" }
+            if isFromAndroid { return "Importa Chat WhatsApp" }
+            return "Ricevi Chat WhatsApp su iPhone"
+        }()
+
+        let shortHint: String = {
+            if isToAndroid {
+                return "Sul telefono Android si è aperto il modulo QR senza cavo: apri WhatsApp qui sotto e inquadra il codice QR."
+            }
+            if !isReceiverMode {
+                return "Inserisci il numero in WhatsApp sul nuovo iPhone, poi tocca qui sotto per inquadrare il suo codice QR."
+            }
+            if isFromAndroid {
+                return "Apri WhatsApp su questo iPhone e verifica il tuo numero per completare il passaggio delle chat."
+            }
+            return "Apri WhatsApp, inserisci il tuo numero e mostra il codice QR da inquadrare con il vecchio iPhone."
+        }()
+
+        let infoSteps: String = {
+            if isToAndroid {
+                return "1. Sul telefono Android (dove DirectSwitch ha appena avviato Android Switch in modalità senza cavo) prosegui fino al codice QR sullo schermo.\n2. Tocca il pulsante verde qui sotto per aprire WhatsApp su questo iPhone.\n3. Vai in Impostazioni → Chat → Trasferisci chat su Android → Inizia e inquadra il codice QR dell'Android.\n4. Al termine apri WhatsApp sull'Android e verifica il tuo numero: ritroverai tutte le chat, foto e vocali senza alcun cavo!"
+            }
+            if !isReceiverMode {
+                return "Passaggio diretto iPhone → iPhone senza usare spazio iCloud:\n1. Sul nuovo iPhone apri WhatsApp, inserisci il tuo numero e scegli 'Trasferisci la cronologia chat da iPhone' per mostrare il codice QR.\n2. Su questo iPhone tocca il pulsante verde qui sotto e vai in Impostazioni → Chat → Trasferisci chat su iPhone → Inizia.\n3. Inquadra il codice QR mostrato sul nuovo iPhone tenendo i due telefoni vicini."
+            }
+            if isFromAndroid {
+                return "1. Eventuali archivi .zip esportati sono già salvati in File → Su iPhone → DirectSwitch.\n2. Apri WhatsApp su questo iPhone, inserisci il tuo numero di telefono e segui la procedura guidata in Wi-Fi locale."
+            }
+            return "Come funziona su questo nuovo iPhone:\n1. Tocca il pulsante verde qui sotto per aprire WhatsApp (o scaricarlo da App Store).\n2. Inserisci il tuo numero di telefono: WhatsApp ti chiederà di trasferire la cronologia chat dal vecchio iPhone mostrando un codice QR.\n3. Sul vecchio iPhone apri WhatsApp → Impostazioni → Chat → Trasferisci chat su iPhone e inquadra il QR tenendo i due telefoni vicini."
+        }()
+
+        let buttonTitle: String = {
+            if !isReceiverMode { return "Apri WhatsApp e inquadra QR" }
+            if isFromAndroid { return "Apri WhatsApp su iPhone" }
+            return "Apri WhatsApp e mostra QR"
+        }()
+
+        let buttonIcon: String = !isReceiverMode ? "qrcode.viewfinder" : "qrcode"
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "bubble.left.and.bubble.right.fill", color: AppleTheme.green)
+                Text(cardTitle)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
+                InfoCircleButton(
+                    title: cardTitle,
+                    message: infoSteps
+                )
+            }
+
+            Text(shortHint)
+                .font(.system(size: 13))
+                .foregroundColor(AppleTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ApplePrimaryButton(
+                title: buttonTitle,
+                icon: buttonIcon,
+                color: AppleTheme.green
+            ) {
+                DirectSwitchTransportViewModel.openWhatsAppOrAppStore()
+            }
+        }
+        .padding(14)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(AppleTheme.green.opacity(0.48), lineWidth: 1.2)
+        )
     }
 
     private func summaryRow(icon: String, color: Color, title: String, value: String) -> some View {
@@ -825,7 +910,7 @@ private struct DirectSwitchProPassSheet: View {
                 featureLine(
                     icon: "photo.stack.fill",
                     color: AppleTheme.orange,
-                    text: "Foto originali, Video 4K, Album, Contatti e Chat"
+                    text: "Foto originali, Video 4K, Contatti e Chat WhatsApp"
                 )
                 featureLine(
                     icon: "checkmark.seal.fill",

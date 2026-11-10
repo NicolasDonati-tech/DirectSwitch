@@ -93,6 +93,7 @@ data class LiveTransferProgress(
     val importedSms: Int = 0,
     val skippedDuplicates: Int = 0,
     val isCompleted: Boolean = false,
+    val pendingNativeWhatsAppMigration: Boolean = false,
     val errorMessage: String? = null
 )
 
@@ -230,6 +231,7 @@ class DirectSwitchTransferServer(
     private var bootstrapSecretToken: String? = null
     private var activeTier: SessionLicenseTier = SessionLicenseTier.INTRA_OS_FREE
     private val handshakeCompleted = AtomicBoolean(false)
+    private val requestedWhatsAppMigration = AtomicBoolean(false)
     private val pinPairingConsumed = AtomicBoolean(false)
     private val pinFailedAttempts = AtomicInteger(0)
     private val manifestMap = ConcurrentHashMap<String, ManifestItem>()
@@ -253,6 +255,7 @@ class DirectSwitchTransferServer(
         pinFailedAttempts.set(0)
         sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(sessionKeyHex)
         handshakeCompleted.set(false)
+        requestedWhatsAppMigration.set(false)
         manifestMap.clear()
         completedIds.clear()
         transferredBytesCounter.set(0L)
@@ -326,6 +329,11 @@ class DirectSwitchTransferServer(
             }
         }
         return boundPort
+    }
+
+    fun resetProgress() {
+        requestedWhatsAppMigration.set(false)
+        _progress.value = LiveTransferProgress()
     }
 
     fun stop() {
@@ -546,6 +554,9 @@ class DirectSwitchTransferServer(
                         writeJsonResponse(output, 401, """{"error":"SessionId manifesto non valido"}""")
                         return
                     }
+                    requestedWhatsAppMigration.set(
+                        manifest.requestNativeWhatsAppMigration && LicensePolicyEvaluator.allowsFullCategories(activeTier)
+                    )
 
                     // 1. Smart Merge Contatti (sempre abilitato), Calendari & SMS (se consentito dal tier)
                     val (mergedContacts, skippedContacts) = ContactsSmartMerger.mergeIncomingContacts(
@@ -704,7 +715,8 @@ class DirectSwitchTransferServer(
 
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Trasferimento completato con successo!",
-                        isCompleted = true
+                        isCompleted = true,
+                        pendingNativeWhatsAppMigration = requestedWhatsAppMigration.get()
                     )
                     val report = TransferCompletionReport(
                         sessionId = activeSessionId,
@@ -931,6 +943,10 @@ class DirectSwitchTransferClient(private val context: Context) {
     private val _progress = MutableStateFlow(LiveTransferProgress())
     val progress: StateFlow<LiveTransferProgress> = _progress
 
+    fun resetProgress() {
+        _progress.value = LiveTransferProgress()
+    }
+
     /**
      * Scambia in modo autenticato il PIN a 6 cifre letto sullo schermo del ricevente con il
      * [QrPairingPayload] completo (contenente la chiave di sessione a 256 bit).
@@ -1047,13 +1063,15 @@ class DirectSwitchTransferClient(private val context: Context) {
             )
 
             // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS
+            val wantNativeWa = includeWhatsAppVault && LicensePolicyEvaluator.allowsFullCategories(handshakeResp.licenseTier)
             val manifest = TransferManifest(
                 sessionId = qrPayload.sessionId,
                 senderPlatform = DevicePlatform.ANDROID,
                 items = mediaEntries.map { it.manifestItem },
                 contactsPayload = contacts,
                 calendarsPayload = calendars,
-                smsPayload = smsList
+                smsPayload = smsList,
+                requestNativeWhatsAppMigration = wantNativeWa
             )
             val manifestRespJson = postEncryptedJson(
                 client = activeClient,
@@ -1144,7 +1162,8 @@ class DirectSwitchTransferClient(private val context: Context) {
 
             _progress.value = _progress.value.copy(
                 phaseLabel = "Trasferimento completato!",
-                isCompleted = true
+                isCompleted = true,
+                pendingNativeWhatsAppMigration = wantNativeWa
             )
             Result.success(report)
         } catch (t: Throwable) {

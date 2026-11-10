@@ -52,6 +52,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
     @Published var statusLabel: String = "Pronto al trasferimento diretto"
     @Published var peerName: String = ""
+    @Published var peerPlatform: DevicePlatform? = nil
     @Published var licenseTier: SessionLicenseTier? = nil
     @Published var completedItems: Int = 0
     @Published var totalItems: Int = 0
@@ -67,6 +68,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var isTransferring: Bool = false
     @Published var currentItemName: String = ""
     @Published var isCompleted: Bool = false
+    @Published var pendingNativeWhatsAppMigration: Bool = false
     @Published var errorMessage: String? = nil
     @Published var activePairingPin: String = ""
     @Published var discoveredBeacons: [DiscoveryBeaconPayload] = []
@@ -82,6 +84,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var handshakeAuthenticated: Bool = false
     private var pinPairingConsumed: Bool = false
     private var pinFailedAttempts: Int = 0
+    private var requestedWhatsAppMigration: Bool = false
     private var manifestItems: [String: ManifestItem] = [:]
     private var completedItemIds: Set<String> = []
     private var transferredBytes: Int64 = 0
@@ -130,6 +133,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         manifestItems.removeAll()
         completedItemIds.removeAll()
         peerName = ""
+        peerPlatform = nil
         licenseTier = nil
         completedItems = 0
         totalItems = 0
@@ -146,6 +150,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         isTransferring = false
         currentItemName = ""
         isCompleted = false
+        pendingNativeWhatsAppMigration = false
+        requestedWhatsAppMigration = false
         errorMessage = nil
 
         startHttpListener(port: port, advertiseBonjour: true)
@@ -243,6 +249,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         stopReceiverServer()
         stopUdpAutoDiscovery()
         peerName = ""
+        peerPlatform = nil
         licenseTier = nil
         completedItems = 0
         totalItems = 0
@@ -259,8 +266,25 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         isTransferring = false
         currentItemName = ""
         isCompleted = false
+        pendingNativeWhatsAppMigration = false
+        requestedWhatsAppMigration = false
         errorMessage = nil
         statusLabel = "Pronto al trasferimento diretto"
+    }
+
+    /// Apre direttamente WhatsApp (o WhatsApp Business, oppure la pagina ufficiale App Store se non ancora installato).
+    @MainActor
+    static func openWhatsAppOrAppStore() {
+        let candidates = ["whatsapp://app", "whatsapp://", "whatsapp-smb://app"]
+        for scheme in candidates {
+            if let url = URL(string: scheme), UIApplication.shared.canOpenURL(url) {
+                UIApplication.shared.open(url)
+                return
+            }
+        }
+        if let storeURL = URL(string: "https://apps.apple.com/app/whatsapp-messenger/id310633997") {
+            UIApplication.shared.open(storeURL)
+        }
     }
 
     private nonisolated static func isAllowedPeerEndpoint(_ endpoint: Network.NWEndpoint) -> Bool {
@@ -566,6 +590,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 receiverHasCloudSavePro: iOSLicenseStore.hasVerifiedCloudSaveProEntitlement
             )
             peerName = req.senderName
+            peerPlatform = req.senderPlatform
             licenseTier = tier
             transferStartDate = Date()
             let enough = req.totalEstimatedBytes < max(0, free - 200 * 1024 * 1024)
@@ -616,6 +641,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let (insContacts, skipContacts) = iOSContactsSmartMerger.mergeIncomingContacts(manifest.contactsPayload)
             let currentTier = licenseTier ?? .INTRA_OS_FREE
             let fullAllowed = LicensePolicyEvaluator.allowsFullCategories(currentTier)
+            requestedWhatsAppMigration = (manifest.requestNativeWhatsAppMigration == true) && fullAllowed
 
             if fullAllowed && !manifest.calendarsPayload.isEmpty {
                 _ = await iOSCalendarMigrator.requestAccessIfNeeded()
@@ -724,6 +750,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
             isTransferring = false
             currentItemName = ""
+            pendingNativeWhatsAppMigration = requestedWhatsAppMigration
             isCompleted = true
             statusLabel = "Trasferimento su iPhone completato!"
             let elapsedMs = Int64(max(1.0, Date().timeIntervalSince(transferStartDate) * 1000.0))
@@ -842,10 +869,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         do {
             errorMessage = nil
             isCompleted = false
+            pendingNativeWhatsAppMigration = false
             isSessionConnected = true
             isTransferring = true
             currentItemName = ""
             peerName = qrPayload.receiverName
+            peerPlatform = qrPayload.receiverPlatform
             completedItems = 0
             totalItems = 0
             transferredBytesCount = 0
@@ -903,6 +932,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let hsRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/handshake", payload: hsReq, key: key)
             let hsResp = try JSONDecoder().decode(HandshakeResponse.self, from: hsRespData)
             peerName = hsResp.receiverName
+            peerPlatform = hsResp.receiverPlatform
             licenseTier = hsResp.licenseTier
 
             guard hsResp.accepted && hsResp.hasEnoughSpace else {
@@ -913,12 +943,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
 
+            let wantNativeWa = includeWhatsAppVault && LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
             let manifest = TransferManifest(
                 sessionId: qrPayload.sessionId,
                 senderPlatform: .IOS,
                 items: allItems,
                 contactsPayload: contacts,
-                calendarsPayload: calendars
+                calendarsPayload: calendars,
+                requestNativeWhatsAppMigration: wantNativeWa
             )
             let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
             let mfResp = try JSONDecoder().decode(ManifestResponse.self, from: mfRespData)
@@ -992,6 +1024,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
             currentItemName = ""
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
+            pendingNativeWhatsAppMigration = wantNativeWa
             isCompleted = true
         } catch {
             errorMessage = error.localizedDescription
