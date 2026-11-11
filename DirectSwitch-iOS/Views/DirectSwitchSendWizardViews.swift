@@ -430,6 +430,7 @@ struct SendCategoriesStepView: View {
     let isScanningDevice: Bool
     let isLocalProUnlocked: Bool
     let pickedDocuments: [(ManifestItem, URL)]
+    let selectedAppsCount: Int
 
     @Binding var includeContacts: Bool
     @Binding var includePhotos: Bool
@@ -437,9 +438,11 @@ struct SendCategoriesStepView: View {
     @Binding var includeCalendars: Bool
     @Binding var includeReminders: Bool
     @Binding var includeDocuments: Bool
+    @Binding var includeApps: Bool
     @Binding var includeWhatsApp: Bool
 
     var onScanExactCounts: () -> Void
+    var onManageApps: () -> Void
     var onAddFilesOrWhatsApp: () -> Void
     var onClearStagedFiles: () -> Void
     var onOpenProSheet: () -> Void
@@ -454,11 +457,11 @@ struct SendCategoriesStepView: View {
     }
 
     private var allSelected: Bool {
-        includeContacts && includePhotos && includeVideos && includeCalendars && includeReminders && includeDocuments && includeWhatsApp
+        includeContacts && includePhotos && includeVideos && includeCalendars && includeReminders && includeDocuments && includeApps && includeWhatsApp
     }
 
     private var anySelected: Bool {
-        includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeDocuments || includeWhatsApp
+        includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeDocuments || includeApps || includeWhatsApp
     }
 
     private var isCrossOs: Bool {
@@ -493,6 +496,7 @@ struct SendCategoriesStepView: View {
                         includeCalendars = target
                         includeReminders = target
                         includeDocuments = target
+                        includeApps = target
                         includeWhatsApp = target
                     }) {
                         Text(allSelected ? "Deseleziona" : "Seleziona tutto")
@@ -678,6 +682,17 @@ struct SendCategoriesStepView: View {
                     Divider().padding(.leading, 58)
 
                     CleanCategoryToggleRow(
+                        icon: "square.grid.2x2.fill",
+                        iconColor: AppleTheme.blue,
+                        title: "App installate",
+                        countBadge: selectedAppsCount > 0 ? "\(selectedAppsCount) app pronte" : "Rileva app",
+                        infoMessage: "Passa al nuovo telefono l'elenco completo delle tue app con icona e ID ufficiale App Store, pronte per essere installate automaticamente una dopo l'altra!",
+                        isOn: $includeApps
+                    )
+
+                    Divider().padding(.leading, 58)
+
+                    CleanCategoryToggleRow(
                         icon: "bubble.left.and.bubble.right.fill",
                         iconColor: AppleTheme.green,
                         title: "Chat WhatsApp",
@@ -685,12 +700,36 @@ struct SendCategoriesStepView: View {
                             ? "Cronologia QR + \(whatsAppCount) .zip"
                             : (isCrossOs ? "Senza cavo via QR (Android Switch)" : "Cronologia diretta via QR"),
                         infoMessage: isCrossOs
-                            ? "Al termine della copia, DirectSwitch apre automaticamente il modulo Android Switch senza cavo sul telefono Android per mostrare il codice QR: su questo iPhone ti basterà aprire WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadrare il QR."
-                            : "Al termine della copia, DirectSwitch ti guida passo-passo a trasferire il 100% di chat, foto e vocali sul nuovo iPhone via Wi-Fi diretto senza usare 1 MB di iCloud.",
+                            ? "Al termine della copia, DirectSwitch apre il modulo senza cavo sul telefono Android per mostrare il codice QR: su questo iPhone ti basterà aprire WhatsApp Personale → Impostazioni → Chat → Trasferisci chat su Android e inquadrare il QR."
+                            : "Al termine della copia, DirectSwitch apre WhatsApp Personale (mai Business per errore) e ti guida nei 2 tocchi dentro Impostazioni → Chat → Trasferisci chat su iPhone per spostare tutte le chat senza iCloud.",
                         isOn: $includeWhatsApp
                     )
                 }
                 .appleCard(padding: 0)
+
+                // Card dedicata per vedere tutte le app rilevate sull'iPhone che invia o importarle da screenshot Home
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Elenco App di questo iPhone")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Spacer()
+                        InfoCircleButton(
+                            title: "Passare il 100% delle tue App",
+                            message: "DirectSwitch rileva subito in automatico le app principali installate su questo iPhone.\n\nTocca il pulsante qui sotto per vedere l'elenco completo con le icone, cercare eventuali altre app oppure importarle tutte in 2 secondi da uno screenshot della schermata Home o di «Impostazioni → App»!"
+                        )
+                    }
+
+                    AppleSecondaryButton(
+                        title: selectedAppsCount > 0
+                            ? "Mostra o aggiungi le tue App (\(selectedAppsCount) selezionate)"
+                            : "Mostra e seleziona le App di questo iPhone",
+                        icon: "square.grid.2x2.fill",
+                        tint: AppleTheme.blue,
+                        action: onManageApps
+                    )
+                }
+                .appleCard(padding: 14)
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -726,20 +765,6 @@ struct SendCategoriesStepView: View {
                                 .buttonStyle(.plain)
                         }
                     }
-                }
-                .appleCard(padding: 14)
-
-                // Card informativa pulita: App, Account Mail, Password e Background
-                HStack(spacing: 12) {
-                    AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.slate)
-                    Text("App, Mail, Password e Background")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(AppleTheme.textPrimary)
-                    Spacer()
-                    InfoCircleButton(
-                        title: "Passaggio completo senza iCloud",
-                        message: "• App senza iCloud: al termine della copia, sul nuovo iPhone trovi il pulsante diretto ad App Store («App → Non su questo iPhone») che elenca gratuitamente il 100% delle tue app legate all'ID Apple (0 GB su iCloud) più i pulsanti rapidi 1-tap per le app principali.\n\n• Account Mail e Password: sul nuovo iPhone trovi i collegamenti rapidi 1-tap per Gmail, Outlook, Yahoo e Apple Mail, e il supporto all'importazione del file Password (.csv).\n\n• Esecuzione in Background e Resume: DirectSwitch mantiene attivo il trasferimento anche se passi brevemente a un'altra app o ricevi una chiamata, avvisandoti con una notifica se iOS sta per mettere in pausa il Wi-Fi e riprendendo esattamente dal file interrotto!"
-                    )
                 }
                 .appleCard(padding: 14)
 

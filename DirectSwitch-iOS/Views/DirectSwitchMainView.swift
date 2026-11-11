@@ -21,6 +21,7 @@ private enum DirectSwitchWizardStep: Equatable {
 struct DirectSwitchMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var transport = DirectSwitchTransportViewModel()
+    @StateObject private var appInstaller = iOSSequentialAppInstaller()
 
     @State private var activeStep: DirectSwitchWizardStep = .home
     @State private var isReceiverMode: Bool = false
@@ -44,7 +45,17 @@ struct DirectSwitchMainView: View {
     @State private var includeCalendars: Bool = true
     @State private var includeReminders: Bool = true
     @State private var includeDocuments: Bool = true
+    @State private var includeApps: Bool = true
     @State private var includeWhatsApp: Bool = true
+
+    // Catalogo App rilevate sull'iPhone che invia
+    @State private var senderAppsCatalog: [InstalledAppRecord] = []
+    @State private var deselectedSenderAppIds: Set<String> = []
+    @State private var showSenderAppsSheet: Bool = false
+
+    private var selectedSenderApps: [InstalledAppRecord] {
+        senderAppsCatalog.filter { !deselectedSenderAppIds.contains($0.id) }
+    }
 
     // File e archivi WhatsApp allegati
     @State private var showDocumentImporter: Bool = false
@@ -173,14 +184,17 @@ struct DirectSwitchMainView: View {
                                     isScanningDevice: isScanningDevice,
                                     isLocalProUnlocked: isProUnlocked,
                                     pickedDocuments: pickedDocuments,
+                                    selectedAppsCount: selectedSenderApps.count,
                                     includeContacts: $includeContacts,
                                     includePhotos: $includePhotos,
                                     includeVideos: $includeVideos,
                                     includeCalendars: $includeCalendars,
                                     includeReminders: $includeReminders,
                                     includeDocuments: $includeDocuments,
+                                    includeApps: $includeApps,
                                     includeWhatsApp: $includeWhatsApp,
                                     onScanExactCounts: scanExactDeviceCounts,
+                                    onManageApps: { showSenderAppsSheet = true },
                                     onAddFilesOrWhatsApp: { showDocumentImporter = true },
                                     onClearStagedFiles: {
                                         pickedDocuments.removeAll()
@@ -204,6 +218,7 @@ struct DirectSwitchMainView: View {
                         case .transferProgress:
                             DirectSwitchTransferProgressView(
                                 transport: transport,
+                                appInstaller: appInstaller,
                                 isReceiverMode: isReceiverMode,
                                 isProUnlocked: isProUnlocked,
                                 onOpenProSheet: { showProSheet = true },
@@ -239,6 +254,7 @@ struct DirectSwitchMainView: View {
         .task {
             isProUnlocked = await iOSLicenseStore.restoreStoreKitEntitlements()
             refreshAuthorizedSummary()
+            refreshSenderAppsCatalog()
         }
         .onChange(of: transport.isSessionConnected) { connected in
             if connected && activeStep == .receiveWaitCode {
@@ -250,6 +266,8 @@ struct DirectSwitchMainView: View {
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .active {
                 refreshAuthorizedSummary()
+                refreshSenderAppsCatalog()
+                appInstaller.handleSceneBecameActive()
                 receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
                 if activeStep == .sendConnect {
                     transport.startUdpAutoDiscovery()
@@ -269,6 +287,12 @@ struct DirectSwitchMainView: View {
                 pickedDocuments.append(contentsOf: imported)
                 refreshAuthorizedSummary()
             }
+        }
+        .sheet(isPresented: $showSenderAppsSheet) {
+            SenderAppsSelectionSheet(
+                appsCatalog: $senderAppsCatalog,
+                deselectedAppIds: $deselectedSenderAppIds
+            )
         }
         .sheet(isPresented: $showProSheet) {
             DirectSwitchProPassSheet(
@@ -362,6 +386,7 @@ struct DirectSwitchMainView: View {
             activeStep = .transferProgress
         }
         let docsSnapshot = pickedDocuments
+        let appsSnapshot = includeApps ? selectedSenderApps : []
         Task {
             await transport.executeSenderTransfer(
                 qrPayload: paired,
@@ -372,11 +397,38 @@ struct DirectSwitchMainView: View {
                 includeReminders: includeReminders,
                 includeDocuments: includeDocuments,
                 includeWhatsAppVault: includeWhatsApp,
+                installedApps: appsSnapshot,
                 pickedDocuments: docsSnapshot
             )
             if transport.isCompleted && transport.failedItemsCount == 0 {
                 pickedDocuments.removeAll()
                 refreshAuthorizedSummary()
+            }
+        }
+    }
+
+    private func refreshSenderAppsCatalog() {
+        let detected = iOSInstalledAppsScanner.scanLocallyInstalledApps()
+        if senderAppsCatalog.isEmpty {
+            senderAppsCatalog = detected
+        } else {
+            var merged = senderAppsCatalog
+            for app in detected {
+                let exists = merged.contains {
+                    $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+                }
+                if !exists {
+                    merged.append(app)
+                }
+            }
+            senderAppsCatalog = merged
+        }
+        let snapshot = senderAppsCatalog
+        Task {
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(snapshot)
+            if !enriched.isEmpty {
+                self.senderAppsCatalog = enriched
             }
         }
     }
@@ -452,6 +504,7 @@ struct DirectSwitchMainView: View {
         selectedBeacon = nil
         pinCodeInput = ""
         pairingErrorNote = nil
+        appInstaller.stopSequence()
         transport.resetSession()
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .home
@@ -543,15 +596,13 @@ private struct DirectSwitchHomeView: View {
 
 private struct DirectSwitchTransferProgressView: View {
     @ObservedObject var transport: DirectSwitchTransportViewModel
+    @ObservedObject var appInstaller: iOSSequentialAppInstaller
     let isReceiverMode: Bool
     let isProUnlocked: Bool
     var onOpenProSheet: () -> Void
     var onRetryIfFailed: () -> Void
     var onReconnectNewCode: () -> Void
     var onFinish: () -> Void
-
-    @State private var showAllReceivedApps: Bool = false
-    @State private var showEssentialiOSApps: Bool = false
 
     private var progressFraction: Double {
         if transport.isCompleted { return 1.0 }
@@ -772,6 +823,16 @@ private struct DirectSwitchTransferProgressView: View {
                         )
                     }
 
+                    if isReceiverMode && !transport.receivedInstalledApps.isEmpty {
+                        Divider().padding(.leading, 56)
+                        summaryRow(
+                            icon: "square.grid.2x2.fill",
+                            color: AppleTheme.blue,
+                            title: "App trasferite",
+                            value: "\(transport.receivedInstalledApps.count)"
+                        )
+                    }
+
                     if transport.skippedDuplicates > 0 {
                         Divider().padding(.leading, 56)
                         summaryRow(
@@ -825,15 +886,10 @@ private struct DirectSwitchTransferProgressView: View {
                 }
 
                 if isReceiverMode && transport.isCompleted {
-                    if !transport.receivedInstalledApps.isEmpty {
-                        receivedAppsCatalogCard
-                    } else {
-                        iosZeroCloudAppHubCard
-                    }
-                }
-
-                if isReceiverMode && transport.isCompleted {
-                    mailAndAccountsHelperCard
+                    ReceiverAppsAutoInstallCard(
+                        incomingApps: transport.receivedInstalledApps,
+                        installer: appInstaller
+                    )
                 }
 
                 if isReceiverMode && transport.isCompleted && (transport.importedSms > 0 || transport.completedItems > 0) {
@@ -962,47 +1018,51 @@ private struct DirectSwitchTransferProgressView: View {
     private var whatsAppWirelessMigrationCard: some View {
         let isToAndroid = !isReceiverMode && transport.peerPlatform == .ANDROID
         let isFromAndroid = isReceiverMode && transport.peerPlatform == .ANDROID
+        let isPersonalInstalled = iOSInstalledAppsScanner.isPersonalWhatsAppInstalled()
+        let isBusinessAlsoInstalled = iOSInstalledAppsScanner.isWhatsAppBusinessInstalled()
 
         let cardTitle: String = {
             if isToAndroid { return "Chat WhatsApp → Android" }
-            if !isReceiverMode { return "Chat WhatsApp → Nuovo iPhone" }
+            if !isReceiverMode { return "Chat WhatsApp → Altro iPhone" }
             if isFromAndroid { return "Importa Chat WhatsApp" }
             return "Ricevi Chat WhatsApp senza iCloud"
         }()
 
-        let shortHint: String = {
+        let stepsList: [String] = {
             if isToAndroid {
-                return "Sul telefono Android si è aperto il modulo QR senza cavo: apri WhatsApp qui sotto e inquadra il codice QR."
+                return [
+                    "Sul telefono Android prosegui nella schermata aperta fino al codice QR.",
+                    "Tocca «Apri WhatsApp Personale» qui sotto.",
+                    "Dentro WhatsApp vai in Impostazioni ⚙️ → Chat → Trasferisci chat su Android → Inizia per aprire la fotocamera interna di WhatsApp e inquadrare il QR."
+                ]
             }
             if !isReceiverMode {
-                return "Sul nuovo iPhone inserisci il numero in WhatsApp (senza toccare «Salta»), poi tocca qui sotto per inquadrare il QR."
+                return [
+                    "Sull'altro iPhone apri WhatsApp Personale, verifica il numero SMS e tocca Continua su «Trasferisci la cronologia chat da iPhone» per mostrare il QR.",
+                    "Su questo iPhone tocca «Apri WhatsApp Personale» qui sotto.",
+                    "Dentro WhatsApp vai in Impostazioni ⚙️ → Chat → Trasferisci chat su iPhone → Inizia per aprire lo scanner interno di WhatsApp e inquadrare il QR."
+                ]
             }
             if isFromAndroid {
-                return "Apri WhatsApp su questo iPhone e verifica il tuo numero per completare il passaggio delle chat."
+                return [
+                    "Tocca il pulsante verde qui sotto per aprire (o scaricare) WhatsApp Personale.",
+                    "Inserisci il tuo numero di telefono e segui la procedura guidata per importare le chat."
+                ]
             }
-            return "Apri WhatsApp, inserisci il numero e scegli «Trasferisci la cronologia chat da iPhone» per mostrare il codice QR."
+            return [
+                "Tocca il pulsante verde qui sotto per aprire (o scaricare da App Store) WhatsApp Personale.",
+                "Inserisci il tuo numero e il codice SMS: quando appare «Trasferisci la cronologia chat da iPhone», tocca Continua (NON toccare «Salta») per mostrare il codice QR.",
+                "Dal vecchio iPhone apri WhatsApp Personale → Impostazioni ⚙️ → Chat → Trasferisci chat su iPhone → Inizia e inquadra il QR mostrato qui!"
+            ]
         }()
 
-        let infoSteps: String = {
-            if isToAndroid {
-                return "1. Sul telefono Android (dove DirectSwitch ha appena avviato Android Switch in modalità senza cavo) prosegui fino al codice QR sullo schermo.\n2. Tocca il pulsante verde qui sotto per aprire WhatsApp su questo iPhone.\n3. Vai in Impostazioni → Chat → Trasferisci chat su Android → Inizia e inquadra il codice QR dell'Android.\n4. Al termine apri WhatsApp sull'Android e verifica il tuo numero: ritroverai tutte le chat, foto e vocali senza alcun cavo!"
-            }
-            if !isReceiverMode {
-                return "Passaggio diretto iPhone → iPhone senza usare 1 MB di iCloud:\n1. Sul nuovo iPhone scarica/apri WhatsApp, inserisci il tuo numero e verifica l'SMS (ATTENZIONE: non toccare «Salta»!).\n2. Scegli «Trasferisci la cronologia chat da iPhone» e consenti «Rete locale» per mostrare il codice QR.\n3. Su QUESTO vecchio iPhone tocca il pulsante verde qui sotto → Impostazioni → Chat → Trasferisci chat su iPhone → Inizia e inquadra il QR tenendo i due iPhone vicini."
-            }
-            if isFromAndroid {
-                return "1. Eventuali archivi .zip esportati sono già salvati in File → Su iPhone → DirectSwitch.\n2. Apri WhatsApp su questo iPhone, inserisci il tuo numero di telefono e segui la procedura guidata in Wi-Fi locale."
-            }
-            return "Passaggio 100% senza iCloud (chat, foto, video e note vocali):\n1. Tocca il pulsante verde qui sotto per aprire o installare WhatsApp.\n2. Inserisci il tuo numero di telefono e il codice SMS.\n3. Quando appare «Trasferisci la cronologia chat da iPhone», tocca Continua (NON toccare «Salta») e consenti «Rete locale» per mostrare il codice QR.\n4. Sul vecchio iPhone apri WhatsApp → Impostazioni → Chat → Trasferisci chat su iPhone → Inizia e inquadra il QR!"
-        }()
+        let buttonTitle: String = isPersonalInstalled
+            ? "Apri WhatsApp Personale"
+            : "Scarica WhatsApp Personale"
 
-        let buttonTitle: String = {
-            if !isReceiverMode { return "Apri WhatsApp e inquadra QR" }
-            if isFromAndroid { return "Apri WhatsApp su iPhone" }
-            return "Apri WhatsApp e mostra QR"
-        }()
-
-        let buttonIcon: String = !isReceiverMode ? "qrcode.viewfinder" : "qrcode"
+        let buttonIcon: String = isPersonalInstalled
+            ? "bubble.left.and.bubble.right.fill"
+            : "arrow.down.app.fill"
 
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
@@ -1012,22 +1072,53 @@ private struct DirectSwitchTransferProgressView: View {
                     .foregroundColor(AppleTheme.textPrimary)
                 Spacer()
                 InfoCircleButton(
-                    title: cardTitle,
-                    message: infoSteps
+                    title: "Perché lo scanner QR si apre dentro WhatsApp",
+                    message: "Per motivi di sicurezza Meta non permette ad alcuna app esterna di avviare direttamente la fotocamera di migrazione di WhatsApp.\n\n• Il pulsante qui sotto apre sempre il tuo WhatsApp Personale (mai WhatsApp Business per errore).\n• Una volta dentro WhatsApp sul vecchio telefono, bastano 2 tocchi: Impostazioni ⚙️ (in basso a destra) → Chat → Trasferisci chat su iPhone (o Android) → Inizia per aprire lo scanner QR integrato!"
                 )
             }
 
-            Text(shortHint)
-                .font(.system(size: 13))
-                .foregroundColor(AppleTheme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(stepsList.enumerated()), id: \.offset) { idx, stepText in
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("\(idx + 1)")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .frame(width: 19, height: 19)
+                            .background(AppleTheme.green)
+                            .clipShape(Circle())
+                            .padding(.top, 1)
+
+                        Text(stepText)
+                            .font(.system(size: 13))
+                            .foregroundColor(AppleTheme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
 
             ApplePrimaryButton(
                 title: buttonTitle,
                 icon: buttonIcon,
                 color: AppleTheme.green
             ) {
-                DirectSwitchTransportViewModel.openWhatsAppOrAppStore()
+                DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
+            }
+
+            if isBusinessAlsoInstalled {
+                Button(action: {
+                    DirectSwitchTransportViewModel.openWhatsAppBusiness()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "briefcase.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Devi trasferire invece l'account aziendale? Apri WhatsApp Business")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(AppleTheme.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 2)
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(14)
@@ -1062,193 +1153,6 @@ private struct DirectSwitchTransferProgressView: View {
             }
         }
         .appleCard(padding: 14)
-    }
-
-    private var iosZeroCloudAppHubCard: some View {
-        let essentials = iOSPermissionsHelper.essentialiOSApps
-
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.blue)
-                Text("Riscarica le tue App (Zero iCloud)")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(AppleTheme.textPrimary)
-                Spacer()
-                InfoCircleButton(
-                    title: "Come riscaricare tutte le App senza iCloud",
-                    message: "Non serve alcun backup su iCloud per riavere tutte le tue app:\n\n1. Tocca «Apri App Store» qui sotto.\n2. Tocca la tua icona profilo in alto a destra → App → «Non su questo iPhone».\n3. Troverai l'elenco gratuito del 100% delle app che avevi sul vecchio iPhone pronte da scaricare con un tocco!\n\nIn alternativa usa l'elenco rapido qui sotto per le app principali."
-                )
-            }
-
-            AppleSecondaryButton(
-                title: "Apri App Store («Non su questo iPhone»)",
-                icon: "bag.fill",
-                tint: AppleTheme.blue
-            ) {
-                iOSPermissionsHelper.openAppStorePurchasedSection()
-            }
-
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showEssentialiOSApps.toggle()
-                }
-            }) {
-                HStack(spacing: 5) {
-                    Text(showEssentialiOSApps ? "Nascondi app essenziali rapide" : "Mostra app essenziali rapide (1-tap)")
-                        .font(.system(size: 13, weight: .semibold))
-                    Image(systemName: showEssentialiOSApps ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .bold))
-                }
-                .foregroundColor(AppleTheme.blue)
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.plain)
-
-            if showEssentialiOSApps {
-                VStack(spacing: 8) {
-                    ForEach(essentials) { app in
-                        HStack(spacing: 10) {
-                            Text(app.appName)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                                .lineLimit(1)
-                            Spacer()
-                            Button(action: {
-                                iOSPermissionsHelper.searchAppOnAppStore(appName: app.appName)
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.down.app.fill")
-                                        .font(.system(size: 12))
-                                    Text("Scarica")
-                                        .font(.system(size: 12, weight: .bold))
-                                }
-                                .foregroundColor(AppleTheme.blue)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(AppleTheme.cardSelected)
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .padding(.top, 2)
-            }
-        }
-        .appleCard(padding: 14)
-    }
-
-    @ViewBuilder
-    private var receivedAppsCatalogCard: some View {
-        let apps = transport.receivedInstalledApps
-        let visibleApps = showAllReceivedApps ? apps : Array(apps.prefix(8))
-
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.blue)
-                Text("App dal vecchio telefono (\(apps.count))")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(AppleTheme.textPrimary)
-                Spacer()
-                InfoCircleButton(
-                    title: "Riscarica le tue App da App Store",
-                    message: "Proprio come «Passa a iOS», le app non vengono copiate come file eseguibili ma riscaricate in versione nativa iOS dall'App Store.\n\nTocca «App Store» accanto a ogni app rilevata sul tuo Android per aprirla subito."
-                )
-            }
-
-            VStack(spacing: 8) {
-                ForEach(visibleApps) { app in
-                    HStack(spacing: 10) {
-                        Text(app.appName)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                            .lineLimit(1)
-                        Spacer()
-                        Button(action: {
-                            iOSPermissionsHelper.searchAppOnAppStore(appName: app.appName)
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.down.app.fill")
-                                    .font(.system(size: 12))
-                                Text("App Store")
-                                    .font(.system(size: 12, weight: .bold))
-                            }
-                            .foregroundColor(AppleTheme.blue)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(AppleTheme.cardSelected)
-                            .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if apps.count > 8 {
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showAllReceivedApps.toggle()
-                    }
-                }) {
-                    Text(showAllReceivedApps ? "Mostra meno" : "Mostra tutte le \(apps.count) app")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(AppleTheme.blue)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .appleCard(padding: 14)
-    }
-
-    private var mailAndAccountsHelperCard: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 10) {
-                AppleSettingsIcon(systemName: "envelope.fill", color: AppleTheme.teal)
-                Text("Account Mail rapidi")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(AppleTheme.textPrimary)
-                Spacer()
-                InfoCircleButton(
-                    title: "Configurare Mail senza iCloud",
-                    message: "Per sicurezza Apple non consente di esportare token OAuth delle caselle email.\n\n• Tocca Gmail, Outlook o Yahoo per aprire subito l'app ufficiale (o scaricarla da App Store).\n• Per Apple Mail o PEC (Aruba/Legalmail), tocca il pulsante in basso e vai in Impostazioni → App → Mail → Account Mail → Aggiungi account."
-                )
-            }
-
-            HStack(spacing: 8) {
-                mailProviderChip(title: "Gmail", scheme: "googlegmail", storeQuery: "Gmail")
-                mailProviderChip(title: "Outlook", scheme: "ms-outlook", storeQuery: "Microsoft Outlook")
-                mailProviderChip(title: "Yahoo", scheme: "ymail", storeQuery: "Yahoo Mail")
-            }
-
-            AppleSecondaryButton(
-                title: "Aggiungi Mail / PEC in Impostazioni",
-                icon: "envelope.badge.fill",
-                tint: AppleTheme.teal
-            ) {
-                DirectSwitchTransportViewModel.openAppSettings()
-            }
-        }
-        .appleCard(padding: 14)
-    }
-
-    private func mailProviderChip(title: String, scheme: String, storeQuery: String) -> some View {
-        Button(action: {
-            iOSPermissionsHelper.openMailProviderOrStore(scheme: scheme, appStoreQuery: storeQuery)
-        }) {
-            HStack(spacing: 5) {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 13, weight: .bold))
-            }
-            .foregroundColor(AppleTheme.teal)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(AppleTheme.teal.opacity(0.10))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-        .buttonStyle(.plain)
     }
 
     private func summaryRow(icon: String, color: Color, title: String, value: String) -> some View {

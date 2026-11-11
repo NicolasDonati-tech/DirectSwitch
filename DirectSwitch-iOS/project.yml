@@ -54,11 +54,54 @@ targets:
           - com.directswitch.ios.transfer.keepalive
         LSApplicationQueriesSchemes:
           - com.cloudsave.ios
-          - whatsapp
+          - whatsapp-consumer
           - whatsapp-smb
+          - whatsapp
+          - instagram
+          - tg
+          - fb
+          - fb-messenger
+          - snssdk1233
+          - youtube
           - googlegmail
+          - comgooglemaps
+          - googlechrome
+          - googledrive
+          - googlephotos
+          - google
+          - otpauth
+          - spotify
+          - nflx
+          - aiv
+          - disneyplus
+          - dazn
+          - com.amazon.mobile.shopping
+          - paypal
+          - revolut
+          - satispay
           - ms-outlook
-          - ymail
+          - msteams
+          - msauth
+          - zoomus
+          - twitter
+          - barcelona
+          - linkedin
+          - snapchat
+          - pinterest
+          - reddit
+          - discord
+          - twitch
+          - waze
+          - uber
+          - subito
+          - vinted
+          - booking
+          - airbnb
+          - chatgpt
+          - shazam
+          - ryanair
+          - ioit
+          - posteid
         CFBundleDocumentTypes:
           - CFBundleTypeName: "Archivio WhatsApp, Cartella o Documento DirectSwitch"
             LSHandlerRank: Alternate

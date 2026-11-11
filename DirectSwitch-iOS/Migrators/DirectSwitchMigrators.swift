@@ -107,17 +107,6 @@ enum iOSPermissionsHelper {
         }
     }
 
-    /// Apre direttamente l'app Mail del provider (se già installata) o la sua scheda su App Store per il login OAuth 1-tap.
-    @MainActor
-    static func openMailProviderOrStore(scheme: String, appStoreQuery: String) {
-        if let customURL = URL(string: "\(scheme)://"),
-           UIApplication.shared.canOpenURL(customURL) {
-            UIApplication.shared.open(customURL)
-            return
-        }
-        searchAppOnAppStore(appName: appStoreQuery)
-    }
-
     /// Cerca un'app direttamente sull'App Store di iPhone.
     @MainActor
     static func searchAppOnAppStore(appName: String) {

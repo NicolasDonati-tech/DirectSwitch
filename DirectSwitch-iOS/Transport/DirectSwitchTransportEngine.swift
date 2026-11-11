@@ -449,18 +449,60 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         return false
     }
 
-    /// Apre direttamente WhatsApp (o WhatsApp Business, oppure la pagina ufficiale App Store se non ancora installato).
+    /// Apre esclusivamente WhatsApp Personale (Messenger) senza mai attivare per errore WhatsApp Business:
+    /// usa lo schema dedicato `whatsapp-consumer://` (o Universal Link `wa.me`), altrimenti apre la scheda ufficiale App Store (`id310633997`).
     @MainActor
-    static func openWhatsAppOrAppStore() {
-        let candidates = ["whatsapp://app", "whatsapp://", "whatsapp-smb://app"]
-        for scheme in candidates {
+    static func openPersonalWhatsAppOrStore() {
+        let consumerSchemes = ["whatsapp-consumer://app", "whatsapp-consumer://"]
+        for scheme in consumerSchemes {
             if let url = URL(string: scheme), UIApplication.shared.canOpenURL(url) {
                 UIApplication.shared.open(url)
                 return
             }
         }
-        if let storeURL = URL(string: "https://apps.apple.com/app/whatsapp-messenger/id310633997") {
-            UIApplication.shared.open(storeURL)
+
+        let businessInstalled = iOSInstalledAppsScanner.isWhatsAppBusinessInstalled()
+        if !businessInstalled {
+            for generic in ["whatsapp://app", "whatsapp://"] {
+                if let url = URL(string: generic), UIApplication.shared.canOpenURL(url) {
+                    UIApplication.shared.open(url)
+                    return
+                }
+            }
+        }
+
+        // Se Business è installato e sta intercettando `whatsapp://`, prova Universal Link verso Messenger; se fallisce apre App Store Messenger
+        if let universalURL = URL(string: "https://wa.me/") {
+            UIApplication.shared.open(universalURL, options: [.universalLinksOnly: true]) { opened in
+                if !opened {
+                    Self.openPersonalWhatsAppStorePage()
+                }
+            }
+            return
+        }
+        openPersonalWhatsAppStorePage()
+    }
+
+    @MainActor
+    static func openPersonalWhatsAppStorePage() {
+        if let nativeStore = URL(string: "itms-apps://itunes.apple.com/app/id310633997"),
+           UIApplication.shared.canOpenURL(nativeStore) {
+            UIApplication.shared.open(nativeStore)
+            return
+        }
+        if let webStore = URL(string: "https://apps.apple.com/it/app/whatsapp-messenger/id310633997") {
+            UIApplication.shared.open(webStore)
+        }
+    }
+
+    /// Apre esplicitamente WhatsApp Business solo quando l'utente tocca la voce secondaria dedicata.
+    @MainActor
+    static func openWhatsAppBusiness() {
+        for scheme in ["whatsapp-smb://app", "whatsapp-smb://"] {
+            if let url = URL(string: scheme), UIApplication.shared.canOpenURL(url) {
+                UIApplication.shared.open(url)
+                return
+            }
         }
     }
 
@@ -878,7 +920,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             importedSms += insSms
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
-            receivedInstalledApps = fullAllowed ? (manifest.installedAppsPayload ?? []) : []
+            if fullAllowed, let incomingApps = manifest.installedAppsPayload, !incomingApps.isEmpty {
+                receivedInstalledApps = incomingApps
+            } else if !fullAllowed {
+                receivedInstalledApps = []
+            }
 
             let resp = ManifestResponse(
                 acceptedItemIds: acceptedItems.map(\.id),
@@ -1241,6 +1287,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         includeReminders: Bool = true,
         includeDocuments: Bool = true,
         includeWhatsAppVault: Bool = true,
+        installedApps: [InstalledAppRecord] = [],
         pickedDocuments: [(ManifestItem, URL)] = []
     ) async {
         Self.raiseOpenFileDescriptorLimitIfNeeded()
@@ -1372,7 +1419,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
             didAuthenticateSession = true
 
-            let wantNativeWa = includeWhatsAppVault && LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
+            let fullCategoriesAllowed = LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
+            let wantNativeWa = includeWhatsAppVault && fullCategoriesAllowed
+            let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && !installedApps.isEmpty) ? installedApps : nil
             let manifest = TransferManifest(
                 sessionId: qrPayload.sessionId,
                 senderPlatform: .IOS,
@@ -1380,6 +1429,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 contactsPayload: contacts,
                 calendarsPayload: calendars,
                 remindersPayload: reminders.isEmpty ? nil : reminders,
+                installedAppsPayload: appsToSend,
                 requestNativeWhatsAppMigration: wantNativeWa
             )
             let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)

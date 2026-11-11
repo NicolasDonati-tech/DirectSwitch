@@ -393,4 +393,44 @@ final class DirectSwitchTests: XCTestCase {
         )
         XCTAssertEqual(fallbackId, "videos_99")
     }
+
+    func testRichAppCatalogMetadataOcrFilteringAndWhatsAppPersonalSeparation() throws {
+        // Verifica rispetto rigoroso del tetto Apple di 50 schemi totali in Info.plist
+        XCTAssertLessThanOrEqual(iOSInstalledAppsScanner.knownProbes.count, 48)
+
+        let personalProbe = iOSInstalledAppsScanner.knownProbes.first { $0.bundleId == "net.whatsapp.WhatsApp" }
+        let businessProbe = iOSInstalledAppsScanner.knownProbes.first { $0.bundleId == "net.whatsapp.WhatsAppSMB" }
+        XCTAssertEqual(personalProbe?.urlScheme, "whatsapp-consumer")
+        XCTAssertEqual(personalProbe?.appStoreId, 310633997)
+        XCTAssertEqual(businessProbe?.urlScheme, "whatsapp-smb")
+        XCTAssertEqual(businessProbe?.appStoreId, 1386412985)
+
+        let richApp = InstalledAppRecord(
+            packageName: "com.spotify.client",
+            appName: "Spotify",
+            appStoreId: 324684580,
+            iconUrl: "https://is1-ssl.mzstatic.com/image/thumb/icon100.jpg",
+            urlScheme: "spotify"
+        )
+        let encoded = try JSONEncoder().encode([richApp])
+        let decoded = try JSONDecoder().decode([InstalledAppRecord].self, from: encoded)
+        XCTAssertEqual(decoded.first?.appStoreId, 324684580)
+        XCTAssertEqual(decoded.first?.urlScheme, "spotify")
+
+        // Retrocompatibilità JSON Android privo dei campi opzionali iOS
+        let androidAppsJson = Data(#"[{"packageName":"com.instagram.android","appName":"Instagram"}]"#.utf8)
+        let androidDecoded = try JSONDecoder().decode([InstalledAppRecord].self, from: androidAppsJson)
+        XCTAssertEqual(androidDecoded.first?.packageName, "com.instagram.android")
+        XCTAssertNil(androidDecoded.first?.appStoreId)
+
+        // Filtro OCR screenshot Home / Impostazioni -> App
+        let rawOcr = ["21:34", "87%", "5G", "Impostazioni", "Safari", "Mail", "Intesa Sanpaolo", "Spotify", "Aruba PEC", "Spotify"]
+        let filtered = iOSInstalledAppsScanner.filterPlausibleAppNames(rawOcr)
+        XCTAssertEqual(filtered, ["Intesa Sanpaolo", "Spotify", "Aruba PEC"])
+
+        XCTAssertEqual(
+            iOSAppStoreCatalogResolver.sanitizeIconUrl("http://is1.mzstatic.com/icon.png"),
+            "https://is1.mzstatic.com/icon.png"
+        )
+    }
 }

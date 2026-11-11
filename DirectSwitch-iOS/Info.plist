@@ -69,11 +69,54 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>com.cloudsave.ios</string>
-		<string>whatsapp</string>
+		<string>whatsapp-consumer</string>
 		<string>whatsapp-smb</string>
+		<string>whatsapp</string>
+		<string>instagram</string>
+		<string>tg</string>
+		<string>fb</string>
+		<string>fb-messenger</string>
+		<string>snssdk1233</string>
+		<string>youtube</string>
 		<string>googlegmail</string>
+		<string>comgooglemaps</string>
+		<string>googlechrome</string>
+		<string>googledrive</string>
+		<string>googlephotos</string>
+		<string>google</string>
+		<string>otpauth</string>
+		<string>spotify</string>
+		<string>nflx</string>
+		<string>aiv</string>
+		<string>disneyplus</string>
+		<string>dazn</string>
+		<string>com.amazon.mobile.shopping</string>
+		<string>paypal</string>
+		<string>revolut</string>
+		<string>satispay</string>
 		<string>ms-outlook</string>
-		<string>ymail</string>
+		<string>msteams</string>
+		<string>msauth</string>
+		<string>zoomus</string>
+		<string>twitter</string>
+		<string>barcelona</string>
+		<string>linkedin</string>
+		<string>snapchat</string>
+		<string>pinterest</string>
+		<string>reddit</string>
+		<string>discord</string>
+		<string>twitch</string>
+		<string>waze</string>
+		<string>uber</string>
+		<string>subito</string>
+		<string>vinted</string>
+		<string>booking</string>
+		<string>airbnb</string>
+		<string>chatgpt</string>
+		<string>shazam</string>
+		<string>ryanair</string>
+		<string>ioit</string>
+		<string>posteid</string>
 	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>

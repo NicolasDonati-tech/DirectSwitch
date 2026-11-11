@@ -214,6 +214,9 @@ struct InstalledAppRecord: Codable, Identifiable, Equatable, Sendable {
     var id: String { packageName }
     let packageName: String
     let appName: String
+    var appStoreId: Int? = nil
+    var iconUrl: String? = nil
+    var urlScheme: String? = nil
 }
 
 struct ManifestItem: Codable, Identifiable, Sendable {
