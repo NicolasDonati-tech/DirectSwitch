@@ -1636,7 +1636,7 @@ private fun TransferProgressWizardView(
                     )
                     TextButton(
                         onClick = {
-                            InstalledAppsScanner.openAppOnPlayStore(context, app.packageName, app.appName)
+                            InstalledAppsScanner.openAppOnPlayStore(context, app)
                         }
                     ) {
                         Text("Play Store", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
