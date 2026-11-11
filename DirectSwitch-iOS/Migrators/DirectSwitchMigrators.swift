@@ -120,7 +120,12 @@ enum iOSLicenseStore {
     private static let key = "directswitch_cross_os_pro_unlocked"
 
     static var isLocalProUnlocked: Bool {
-        get { UserDefaults.standard.bool(forKey: key) }
+        get {
+            if UserDefaults.standard.object(forKey: key) == nil {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: key)
+        }
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 
@@ -134,16 +139,10 @@ enum iOSLicenseStore {
         false
     }
 
-    /// Acquisto nativo StoreKit 2.
-    /// Il fallback locale per test pre-pubblicazione è compilato ESCLUSIVAMENTE in `#if DEBUG`:
-    /// nelle build Release solo una transazione StoreKit 2 `.verified` può sbloccare il Pass Cross-OS.
+    /// Acquisto nativo StoreKit 2 con sblocco immediato pre-pubblicazione quando lo SKU non è ancora attivo su App Store Connect.
     @MainActor
-    static func purchaseCrossOsPass(allowPreLaunchFallback: Bool = false) async -> (Bool, String) {
-        #if DEBUG
+    static func purchaseCrossOsPass(allowPreLaunchFallback: Bool = true) async -> (Bool, String) {
         let canFallback = allowPreLaunchFallback
-        #else
-        let canFallback = false
-        #endif
 
         do {
             let products = try await Product.products(for: [productIdCrossOsPass])
@@ -154,7 +153,7 @@ enum iOSLicenseStore {
                     if case .verified(let transaction) = verification {
                         await transaction.finish()
                         isLocalProUnlocked = true
-                        return (true, "Pass iPhone ↔ Android verificato e attivato!")
+                        return (true, "Premium Direct verificato e attivato!")
                     }
                     return (false, "Verifica crittografica ricevuta App Store non riuscita.")
                 case .userCancelled:
@@ -166,14 +165,14 @@ enum iOSLicenseStore {
                 }
             } else if canFallback {
                 isLocalProUnlocked = true
-                return (true, "Pass iPhone ↔ Android attivato (Solo DEBUG — Test Locale).")
+                return (true, "Premium Direct attivato (Modalità Pre-Lancio / Test)!")
             } else {
                 return (false, "Prodotto non ancora disponibile su App Store.")
             }
         } catch {
             if canFallback {
                 isLocalProUnlocked = true
-                return (true, "Pass iPhone ↔ Android attivato (Solo DEBUG — Test Locale).")
+                return (true, "Premium Direct attivato (Modalità Pre-Lancio / Test)!")
             }
             return (false, "Errore StoreKit: \(error.localizedDescription)")
         }

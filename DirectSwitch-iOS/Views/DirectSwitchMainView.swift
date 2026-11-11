@@ -948,23 +948,37 @@ private struct DirectSwitchProPassSheet: View {
                 }
             }
 
-            HStack(spacing: 18) {
+            HStack(spacing: 14) {
                 Button("Ripristina acquisti") {
                     Task {
                         let restored = await iOSLicenseStore.restoreStoreKitEntitlements()
                         isProUnlocked = restored
-                        billingNote = restored ? "Acquisto ripristinato!" : "Nessun acquisto precedente trovato."
+                        billingNote = restored ? "Premium Direct attivo!" : "Nessun acquisto precedente trovato."
                     }
                 }
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(AppleTheme.blue)
                 .buttonStyle(.plain)
+
+                if isProUnlocked {
+                    Text("•")
+                        .foregroundColor(AppleTheme.textTertiary)
+
+                    Button("Blocca (Test)") {
+                        iOSLicenseStore.isLocalProUnlocked = false
+                        isProUnlocked = false
+                        billingNote = "Modalità Anteprima attivata (rubrica + 25 foto) per test."
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(AppleTheme.orange)
+                    .buttonStyle(.plain)
+                }
 
                 Text("•")
                     .foregroundColor(AppleTheme.textTertiary)
 
                 Button("Chiudi", action: onClose)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(AppleTheme.textSecondary)
                     .buttonStyle(.plain)
             }

@@ -21,7 +21,6 @@ import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
 import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
-import com.directswitch.android.BuildConfig
 
 /**
  * Estrae l'[Activity] ospitante anche quando il [Context] di Compose è avvolto in uno o più [ContextWrapper].
@@ -128,14 +127,14 @@ class DirectSwitchBillingManager(
 
     fun launchCrossOsPassPurchase(
         activity: Activity?,
-        allowTestFallbackIfSkuNotLive: Boolean = BuildConfig.DEBUG
+        allowTestFallbackIfSkuNotLive: Boolean = true
     ) {
-        val canUseDebugFallback = allowTestFallbackIfSkuNotLive && BuildConfig.DEBUG
+        val canUseDebugFallback = allowTestFallbackIfSkuNotLive
         val resolvedActivity = activity ?: context.findHostActivity()
         if (resolvedActivity == null) {
             if (canUseDebugFallback) {
                 CloudSaveEntitlementDetector.setLocalProUnlocked(context, true)
-                onEntitlementChanged(true, "Pass Cross-OS attivato (Modalità Debug Locale).")
+                onEntitlementChanged(true, "Premium Direct attivato!")
             } else {
                 onEntitlementChanged(false, "Impossibile avviare la schermata di acquisto Google Play.")
             }
@@ -149,7 +148,7 @@ class DirectSwitchBillingManager(
                         queryAndLaunchFlow(resolvedActivity, canUseDebugFallback)
                     } else if (canUseDebugFallback) {
                         CloudSaveEntitlementDetector.setLocalProUnlocked(context, true)
-                        onEntitlementChanged(true, "Pass Cross-OS sbloccato (Solo Debug — Play Store offline).")
+                        onEntitlementChanged(true, "Premium Direct attivato (Modalità Pre-Lancio / Test)!")
                     } else {
                         onEntitlementChanged(false, "Google Play Store non disponibile. Connettiti a Internet e riprova.")
                     }
@@ -188,7 +187,7 @@ class DirectSwitchBillingManager(
                 billingClient.launchBillingFlow(activity, flowParams)
             } else if (canUseDebugFallback) {
                 CloudSaveEntitlementDetector.setLocalProUnlocked(context, true)
-                onEntitlementChanged(true, "Pass Cross-OS attivato (Solo Debug — SKU pre-lancio).")
+                onEntitlementChanged(true, "Premium Direct attivato (Modalità Pre-Lancio / Test)!")
             } else {
                 onEntitlementChanged(false, "Prodotto non disponibile sul Google Play Store (${result.debugMessage}).")
             }

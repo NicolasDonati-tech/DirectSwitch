@@ -648,6 +648,11 @@ fun DirectSwitchMainScreen(
                 billingNote = billingStatusNote,
                 onPurchasePass = { billingManager.launchCrossOsPassPurchase(context.findHostActivity()) },
                 onRestorePurchases = { billingManager.restoreExistingPurchases(userInitiated = true) },
+                onLockForTest = {
+                    CloudSaveEntitlementDetector.setLocalProUnlocked(context, false)
+                    isProUnlocked = false
+                    billingStatusNote = "Modalità Anteprima attivata (rubrica + 25 foto) per test."
+                },
                 onClose = { showProSheet = false }
             )
         }
@@ -1751,6 +1756,7 @@ private fun CrossOsProPassSheetContent(
     billingNote: String?,
     onPurchasePass: () -> Unit,
     onRestorePurchases: () -> Unit,
+    onLockForTest: () -> Unit = {},
     onClose: () -> Unit
 ) {
     Column(
@@ -1837,9 +1843,14 @@ private fun CrossOsProPassSheetContent(
             containerColor = if (isUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.premiumGold
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             TextButton(onClick = onRestorePurchases) {
                 Text("Ripristina acquisti", color = DirectSwitchTheme.blue, fontWeight = FontWeight.SemiBold)
+            }
+            if (isUnlocked) {
+                TextButton(onClick = onLockForTest) {
+                    Text("Blocca (Test)", color = DirectSwitchTheme.orange, fontWeight = FontWeight.SemiBold)
+                }
             }
             TextButton(onClick = onClose) {
                 Text("Chiudi", color = DirectSwitchTheme.textSecondary, fontWeight = FontWeight.SemiBold)

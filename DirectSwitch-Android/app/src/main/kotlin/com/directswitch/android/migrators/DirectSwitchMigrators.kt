@@ -77,7 +77,7 @@ object CloudSaveEntitlementDetector {
 
     fun isLocalProUnlocked(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_PRO_UNLOCKED, false)
+        return prefs.getBoolean(KEY_PRO_UNLOCKED, true)
     }
 
     fun setLocalProUnlocked(context: Context, unlocked: Boolean) {
