@@ -17,6 +17,7 @@ import UIKit
 /// Stato mutabile per una singola connessione HTTP in ingresso sul ricevente iOS:
 /// evita copie ricorsive O(N^2) in memoria e scrive gli upload `PUT /v1/item/...` direttamente su disco.
 private final class IncomingHttpStreamState: @unchecked Sendable {
+    private let fileLock = NSLock()
     var headerBuffer = Data()
     var headersParsed = false
     var method = ""
@@ -30,15 +31,31 @@ private final class IncomingHttpStreamState: @unchecked Sendable {
     var tempBodyFileHandle: FileHandle? = nil
 
     func closeHandle() {
+        fileLock.lock()
+        defer { fileLock.unlock() }
         try? tempBodyFileHandle?.close()
         tempBodyFileHandle = nil
     }
 
+    func takeBodyFileOwnership() -> URL? {
+        fileLock.lock()
+        defer { fileLock.unlock() }
+        try? tempBodyFileHandle?.close()
+        tempBodyFileHandle = nil
+        let owned = tempBodyFileURL
+        tempBodyFileURL = nil
+        return owned
+    }
+
     func cleanupTempFile() {
-        closeHandle()
-        if let url = tempBodyFileURL {
+        fileLock.lock()
+        try? tempBodyFileHandle?.close()
+        tempBodyFileHandle = nil
+        let urlToDelete = tempBodyFileURL
+        tempBodyFileURL = nil
+        fileLock.unlock()
+        if let url = urlToDelete {
             try? FileManager.default.removeItem(at: url)
-            tempBodyFileURL = nil
         }
     }
 }
@@ -86,6 +103,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var bootstrapPortalUrl: String? = nil
 
     private var listener: NWListener?
+    private var activeReceiverPort: UInt16 = 49443
+    private var activeReceiverAdvertiseBonjour: Bool = true
     private var udpDiscoveryListener: NWListener?
     private var bonjourBrowser: NWBrowser?
     private var beaconBroadcastTask: Task<Void, Never>?
@@ -102,8 +121,23 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var manifestItems: [String: ManifestItem] = [:]
     private var completedItemIds: Set<String> = []
     private var pendingLiveVideoTempURLs: [String: URL] = [:]
+    private var senderUploadedIdsBySession: [String: Set<String>] = [:]
+    private var senderUploadedBytesBySession: [String: Int64] = [:]
     private var transferredBytes: Int64 = 0
     private var transferStartDate: Date = Date()
+
+    /// Innalza il limite soft dei file descriptor aperti da 256 (default iOS) fino a 4096 per evitare errori `EMFILE`
+    /// e blocchi socket oltre i 4.000+ file trasferiti consecutivamente.
+    private nonisolated static func raiseOpenFileDescriptorLimitIfNeeded() {
+        var rl = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &rl) == 0 else { return }
+        let desired: rlim_t = 4096
+        let target = rl.rlim_max == RLIM_INFINITY ? desired : min(rl.rlim_max, desired)
+        if rl.rlim_cur < target {
+            rl.rlim_cur = target
+            _ = setrlimit(RLIMIT_NOFILE, &rl)
+        }
+    }
 
     private func cleanupPendingLiveVideos() {
         for (_, url) in pendingLiveVideoTempURLs {
@@ -187,6 +221,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         receivedInstalledApps = []
         errorMessage = nil
 
+        Self.raiseOpenFileDescriptorLimitIfNeeded()
+        activeReceiverPort = port
+        activeReceiverAdvertiseBonjour = true
+        iOSBackgroundTransferKeepAlive.shared.onReturnToForegroundWhileActive = { [weak self] in
+            self?.reviveReceiverListenerIfNeeded()
+        }
         iOSBackgroundTransferKeepAlive.shared.beginActiveSession(roleLabel: "Ricezione dati su questo iPhone")
         startHttpListener(port: port, advertiseBonjour: true)
 
@@ -240,9 +280,37 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         return url
     }
 
+    private func reviveReceiverListenerIfNeeded() {
+        guard !activeSessionId.isEmpty && !isCompleted else { return }
+        if listener == nil {
+            startHttpListener(port: activeReceiverPort, advertiseBonjour: activeReceiverAdvertiseBonjour)
+            return
+        }
+        if let state = listener?.state {
+            switch state {
+            case .failed, .cancelled:
+                listener?.cancel()
+                listener = nil
+                startHttpListener(port: activeReceiverPort, advertiseBonjour: activeReceiverAdvertiseBonjour)
+            default:
+                break
+            }
+        }
+    }
+
     private func startHttpListener(port: UInt16, advertiseBonjour: Bool) {
+        activeReceiverPort = port
+        activeReceiverAdvertiseBonjour = advertiseBonjour
+
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.noDelay = true
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 15
+        let tcpParams = NWParameters(tls: nil, tcp: tcpOptions)
+        tcpParams.allowLocalEndpointReuse = true
+
         guard let nwPort = Network.NWEndpoint.Port(rawValue: port),
-              let nwListener = try? NWListener(using: .tcp, on: nwPort) else {
+              let nwListener = try? NWListener(using: tcpParams, on: nwPort) else {
             errorMessage = "Impossibile aprire la porta locale \(port)."
             return
         }
@@ -255,11 +323,28 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 Task { @MainActor [weak self] in
                     self?.isLocalNetworkDenied = false
                 }
-            case .waiting(let err), .failed(let err):
+            case .waiting(let err):
                 if Self.isLocalNetworkPolicyDenied(err) {
                     Task { @MainActor [weak self] in
                         self?.isLocalNetworkDenied = true
                         self?.needsLocalNetworkRedirect = true
+                    }
+                }
+            case .failed(let err):
+                if Self.isLocalNetworkPolicyDenied(err) {
+                    Task { @MainActor [weak self] in
+                        self?.isLocalNetworkDenied = true
+                        self?.needsLocalNetworkRedirect = true
+                    }
+                } else {
+                    // Self-healing automatico se iOS chiude il socket in seguito a standby/cambio AP durante maxi-trasferimenti
+                    Task { @MainActor [weak self] in
+                        guard let self, !self.activeSessionId.isEmpty, !self.isCompleted else { return }
+                        self.listener?.cancel()
+                        self.listener = nil
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        guard !self.activeSessionId.isEmpty, !self.isCompleted else { return }
+                        self.startHttpListener(port: self.activeReceiverPort, advertiseBonjour: self.activeReceiverAdvertiseBonjour)
                     }
                 }
             default:
@@ -275,8 +360,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 conn.cancel()
                 return
             }
-            conn.start(queue: .global(qos: .userInitiated))
             let streamState = IncomingHttpStreamState()
+            conn.stateUpdateHandler = { connState in
+                switch connState {
+                case .failed, .cancelled:
+                    streamState.cleanupTempFile()
+                default:
+                    break
+                }
+            }
+            conn.start(queue: .global(qos: .userInitiated))
             self.receiveHttpStream(on: conn, state: streamState)
         }
         nwListener.start(queue: .global(qos: .userInitiated))
@@ -286,6 +379,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     func stopReceiverServer() {
         UIApplication.shared.isIdleTimerDisabled = false
         cleanupPendingLiveVideos()
+        activeSessionId = ""
         beaconBroadcastTask?.cancel()
         beaconBroadcastTask = nil
         listener?.cancel()
@@ -305,6 +399,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         stopReceiverServer()
         stopUdpAutoDiscovery()
         cleanupPendingLiveVideos()
+        senderUploadedIdsBySession.removeAll()
+        senderUploadedBytesBySession.removeAll()
         peerName = ""
         peerPlatform = nil
         licenseTier = nil
@@ -489,13 +585,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             if state.headersParsed && state.receivedBodyBytes >= state.expectedBodyLength {
-                state.closeHandle()
+                let bodyFileURL = state.takeBodyFileOwnership()
                 let method = state.method
                 let rawTarget = state.rawTarget
                 let path = state.path
                 let headers = state.headers
                 let bodyData = state.inMemoryBody
-                let bodyFileURL = state.tempBodyFileURL
                 Task { @MainActor in
                     await self.routeIncomingHttp(
                         method: method,
@@ -680,27 +775,32 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             peerPlatform = req.senderPlatform
             licenseTier = tier
             transferStartDate = Date()
-            let enough = req.totalEstimatedBytes < max(0, free - 200 * 1024 * 1024)
-            handshakeAuthenticated = enough
-            if enough {
+            // In fase di handshake verifichiamo un margine operativo minimo (250 MB):
+            // il controllo esatto sui byte da scrivere viene eseguito in /v1/manifest DOPO aver escluso i file già presenti (fondamentale per il Resume all'85%!).
+            let hasMinimalWorkingRoom = free > 250 * 1024 * 1024
+            let enough = hasMinimalWorkingRoom && (completedItemIds.isEmpty ? req.totalEstimatedBytes < max(0, free - 150 * 1024 * 1024) || req.totalEstimatedBytes == 0 : true)
+            // Se anche su nuova sessione molti file sono già nel Rullino, consentiamo comunque l'analisi del manifest se c'è almeno 250 MB liberi
+            let allowProceedToManifest = hasMinimalWorkingRoom
+            handshakeAuthenticated = allowProceedToManifest
+            if allowProceedToManifest {
                 isSessionConnected = true
                 isTransferring = true
                 errorMessage = nil
             } else {
-                errorMessage = "Spazio su iPhone insufficiente per completare il trasferimento."
+                errorMessage = "Spazio su iPhone insufficiente (meno di 250 MB liberi)."
             }
-            statusLabel = enough
+            statusLabel = allowProceedToManifest
                 ? "Connesso in modo sicuro a \(req.senderName)!"
                 : "Spazio su iPhone insufficiente per completare il trasferimento."
 
             let resp = HandshakeResponse(
-                accepted: enough,
+                accepted: allowProceedToManifest,
                 receiverName: UIDevice.current.name,
                 receiverPlatform: .IOS,
                 freeStorageBytes: free,
                 licenseTier: tier,
-                hasEnoughSpace: enough,
-                statusMessage: enough ? "iPhone pronto a ricevere" : "Spazio su iPhone insufficiente"
+                hasEnoughSpace: enough || allowProceedToManifest,
+                statusMessage: allowProceedToManifest ? "iPhone pronto a ricevere" : "Spazio su iPhone insufficiente"
             )
             if let encoded = try? JSONEncoder().encode(resp),
                let jsonStr = String(data: encoded, encoding: .utf8) {
@@ -758,11 +858,19 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             }
 
+            let remainingBytesToWrite = acceptedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            let freeNow = iOSStorageCapacityChecker.freeStorageBytes()
+            if remainingBytesToWrite > max(0, freeNow - 150 * 1024 * 1024) {
+                errorMessage = "Spazio libero insufficiente su questo iPhone per i restanti \(DirectSwitchUIHelpers.formatBytes(remainingBytesToWrite))."
+                sendPlainJson(connection: connection, status: 507, json: #"{"error":"insufficient_storage"}"#)
+                return
+            }
+
             let totalSkipped = skipContacts + skippedMediaDuplicates
             let previouslyCompletedInSession = completedItemIds.count
             completedItems = previouslyCompletedInSession
             totalItems = previouslyCompletedInSession + acceptedItems.count
-            totalBytesCount = transferredBytes + acceptedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            totalBytesCount = transferredBytes + remainingBytesToWrite
             mergedContacts += insContacts
             contactsAlreadyPresentCount = skipContacts
             importedCalendars += insCal
@@ -1135,7 +1243,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         includeWhatsAppVault: Bool = true,
         pickedDocuments: [(ManifestItem, URL)] = []
     ) async {
+        Self.raiseOpenFileDescriptorLimitIfNeeded()
         var didAuthenticateSession = false
+        let previouslySentIds = senderUploadedIdsBySession[qrPayload.sessionId] ?? []
+        let previouslySentBytes = senderUploadedBytesBySession[qrPayload.sessionId] ?? 0
         do {
             errorMessage = nil
             needsLocalNetworkRedirect = false
@@ -1151,20 +1262,26 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             currentItemName = ""
             peerName = qrPayload.receiverName
             peerPlatform = qrPayload.receiverPlatform
-            completedItems = 0
-            totalItems = 0
-            transferredBytesCount = 0
-            totalBytesCount = 0
+            completedItems = previouslySentIds.count
+            if totalItems < completedItems {
+                totalItems = completedItems
+            }
+            transferredBytesCount = previouslySentBytes
+            if totalBytesCount < transferredBytesCount {
+                totalBytesCount = transferredBytesCount
+            }
             speedMegabytesPerSec = 0.0
-            mergedContacts = 0
-            importedCalendars = 0
-            importedReminders = 0
-            importedSms = 0
-            savedLivePhotos = 0
+            if previouslySentIds.isEmpty {
+                mergedContacts = 0
+                importedCalendars = 0
+                importedReminders = 0
+                importedSms = 0
+                savedLivePhotos = 0
+                skippedDuplicates = 0
+                gatedPreviewCount = 0
+            }
             iCloudOptimizedSkippedHint = 0
             receivedPasswordsCsvCount = 0
-            skippedDuplicates = 0
-            gatedPreviewCount = 0
             UIApplication.shared.isIdleTimerDisabled = true
             iOSBackgroundTransferKeepAlive.shared.beginActiveSession(
                 roleLabel: "Invio dati a \(qrPayload.receiverName)"
@@ -1180,26 +1297,38 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             let hotspotFallbackHint = await joinAndroidHotspotIfPresent(payload: qrPayload)
-            statusLabel = "Ricerca canale diretto verso \(qrPayload.receiverName)..."
+            statusLabel = previouslySentIds.isEmpty
+                ? "Ricerca canale diretto verso \(qrPayload.receiverName)..."
+                : "Ripresa canale diretto verso \(qrPayload.receiverName)..."
 
-            guard let reachableIp = await findReachableIp(ips: qrPayload.ips, port: qrPayload.port) else {
+            var candidateIps = qrPayload.ips
+            for b in discoveredBeacons where b.sessionId == qrPayload.sessionId || b.receiverName == qrPayload.receiverName {
+                for ip in b.ips where !candidateIps.contains(ip) {
+                    candidateIps.insert(ip, at: 0)
+                }
+            }
+
+            guard var activeIp = await findReachableIp(ips: candidateIps, port: qrPayload.port) else {
                 needsLocalNetworkRedirect = (hotspotFallbackHint == nil)
+                if !previouslySentIds.isEmpty {
+                    canResumeInterruptedTransfer = true
+                }
                 errorMessage = hotspotFallbackHint
-                    ?? "Il trasferimento non parte perché DirectSwitch non è abilitata per le reti locali (oppure \(qrPayload.receiverName) non è sulla stessa rete Wi-Fi / Hotspot). Tocca il pulsante qui sotto per attivare la voce «Rete locale» nelle Impostazioni di DirectSwitch."
+                    ?? "Impossibile collegarsi a \(qrPayload.receiverName). Assicurati che DirectSwitch sia aperta sull'altro telefono e che «Rete locale» sia attiva nelle Impostazioni."
                 return
             }
             isLocalNetworkDenied = false
             needsLocalNetworkRedirect = false
-            let baseUrl = "http://\(reachableIp):\(qrPayload.port)"
+            var baseUrl = "http://\(activeIp):\(qrPayload.port)"
             let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qrPayload.sessionKeyHex)
 
-            if includeContacts { _ = await iOSContactsSmartMerger.requestAccessIfNeeded() }
-            if includeCalendars { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
-            if includeReminders { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
+            if includeContacts && previouslySentIds.isEmpty { _ = await iOSContactsSmartMerger.requestAccessIfNeeded() }
+            if includeCalendars && previouslySentIds.isEmpty { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
+            if includeReminders && previouslySentIds.isEmpty { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
 
-            let contacts = includeContacts ? iOSContactsSmartMerger.readAllContacts() : []
-            let calendars = includeCalendars ? iOSCalendarMigrator.readEvents() : []
-            let reminders = includeReminders ? await iOSRemindersMigrator.readReminders() : []
+            let contacts = (includeContacts && previouslySentIds.isEmpty) ? iOSContactsSmartMerger.readAllContacts() : []
+            let calendars = (includeCalendars && previouslySentIds.isEmpty) ? iOSCalendarMigrator.readEvents() : []
+            let reminders = (includeReminders && previouslySentIds.isEmpty) ? await iOSRemindersMigrator.readReminders() : []
             let scanResult = await iOSPhotoKitMigrator.scanLibraryAssetsWithMetadata(
                 includePhotos: includePhotos,
                 includeVideos: includeVideos
@@ -1215,7 +1344,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             }
             let allItems = scannedAssets.map(\.0) + filteredPickedDocs.map(\.0)
-            let estimatedBytes = allItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            let currentSentIds = senderUploadedIdsBySession[qrPayload.sessionId] ?? []
+            let remainingEstimatedBytes = allItems
+                .filter { !currentSentIds.contains($0.id) }
+                .reduce(Int64(0)) { $0 + $1.sizeBytes }
 
             let hsReq = HandshakeRequest(
                 sessionId: qrPayload.sessionId,
@@ -1223,7 +1355,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 senderPlatform: .IOS,
                 senderHasPro: iOSLicenseStore.isLocalProUnlocked,
                 senderHasCloudSavePro: iOSLicenseStore.hasVerifiedCloudSaveProEntitlement,
-                totalEstimatedBytes: estimatedBytes
+                totalEstimatedBytes: remainingEstimatedBytes
             )
             let hsRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/handshake", payload: hsReq, key: key)
             let hsResp = try JSONDecoder().decode(HandshakeResponse.self, from: hsRespData)
@@ -1252,38 +1384,129 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             )
             let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
             let mfResp = try JSONDecoder().decode(ManifestResponse.self, from: mfRespData)
-            mergedContacts = mfResp.contactsMergedCount
-            contactsAlreadyPresentCount = mfResp.contactsSkippedDuplicates
-            importedCalendars = mfResp.calendarsImportedCount
-            importedReminders = mfResp.remindersImportedCount ?? 0
+            if mfResp.contactsMergedCount > 0 || mergedContacts == 0 {
+                mergedContacts = mfResp.contactsMergedCount
+            }
+            if mfResp.contactsSkippedDuplicates > 0 || contactsAlreadyPresentCount == 0 {
+                contactsAlreadyPresentCount = mfResp.contactsSkippedDuplicates
+            }
+            if mfResp.calendarsImportedCount > 0 || importedCalendars == 0 {
+                importedCalendars = mfResp.calendarsImportedCount
+            }
+            if let remCount = mfResp.remindersImportedCount, remCount > 0 || importedReminders == 0 {
+                importedReminders = remCount
+            }
             importedSms = mfResp.smsImportedCount
             skippedDuplicates = mfResp.skippedDuplicateCount
             gatedPreviewCount = mfResp.gatedByCrossOsPreviewCount
 
+            var uploadedIdSet = senderUploadedIdsBySession[qrPayload.sessionId] ?? []
+            var cumulativeSentBytes = senderUploadedBytesBySession[qrPayload.sessionId] ?? 0
+
             let acceptedSet = Set(mfResp.acceptedItemIds)
-            let assetsToUpload = scannedAssets.filter { acceptedSet.contains($0.0.id) }
-            let docsToUpload = filteredPickedDocs.filter { acceptedSet.contains($0.0.id) }
+            let assetsToUpload = scannedAssets.filter { acceptedSet.contains($0.0.id) && !uploadedIdSet.contains($0.0.id) }
+            let docsToUpload = filteredPickedDocs.filter { acceptedSet.contains($0.0.id) && !uploadedIdSet.contains($0.0.id) }
 
-            totalItems = assetsToUpload.count + docsToUpload.count
-            totalBytesCount = assetsToUpload.reduce(Int64(0)) { $0 + $1.0.sizeBytes }
+            let remainingBytesToUpload = assetsToUpload.reduce(Int64(0)) { $0 + $1.0.sizeBytes }
                 + docsToUpload.reduce(Int64(0)) { $0 + $1.0.sizeBytes }
-            completedItems = 0
-            let startTime = Date()
-            var uploadedBytes: Int64 = 0
 
-            let uploadConfig = URLSessionConfiguration.ephemeral
-            uploadConfig.timeoutIntervalForRequest = 180.0
-            uploadConfig.timeoutIntervalForResource = 900.0
-            uploadConfig.httpMaximumConnectionsPerHost = 2
-            uploadConfig.waitsForConnectivity = false
-            let uploadSession = URLSession(configuration: uploadConfig)
+            completedItems = uploadedIdSet.count
+            totalItems = uploadedIdSet.count + assetsToUpload.count + docsToUpload.count
+            transferredBytesCount = cumulativeSentBytes
+            totalBytesCount = cumulativeSentBytes + remainingBytesToUpload
+
+            let runStartTime = Date()
+            var runBytesSent: Int64 = 0
+            var sessionFilesCounter = 0
+
+            var uploadSession = Self.makeUploadSession()
             defer { uploadSession.finishTasksAndInvalidate() }
+
+            // Helper interno: invia un singolo file distinguendo errori di rete (con riconnessione automatica 45s) da singoli file corrotti
+            func sendFileResiliently(item: ManifestItem, plainFileURL: URL) async throws -> Int64? {
+                var quickAttempt = 0
+                var didTryFullReconnect = false
+
+                while true {
+                    do {
+                        return try await self.encryptAndStreamFileItem(
+                            item: item,
+                            plainFileURL: plainFileURL,
+                            baseUrl: baseUrl,
+                            key: key,
+                            session: uploadSession
+                        )
+                    } catch {
+                        let nsErr = error as NSError
+                        // Permesso Foto negato sul ricevente -> interrompi subito con avviso chiaro
+                        if nsErr.code == 403 {
+                            throw error
+                        }
+
+                        // Se è un errore HTTP 422/500 sul singolo file ma il server è vivo, riprova 1 volta e poi salta SOLO questo file
+                        if nsErr.domain == "DirectSwitchHttp" && (nsErr.code == 422 || nsErr.code == 500) {
+                            if quickAttempt == 0 {
+                                quickAttempt += 1
+                                try? await Task.sleep(nanoseconds: 350_000_000)
+                                continue
+                            }
+                            return nil
+                        }
+
+                        // Errore di RETE / CONNESSIONE (es. -1004 Impossibile connettersi al server, -1005 Connessione persa, -1001 Timeout):
+                        // NON marcare MAI i file rimanenti come illeggibili!
+                        if quickAttempt < 2 {
+                            let backoffNs: UInt64 = quickAttempt == 0 ? 450_000_000 : 1_200_000_000
+                            quickAttempt += 1
+                            try? await Task.sleep(nanoseconds: backoffNs)
+                            continue
+                        }
+
+                        if !didTryFullReconnect {
+                            didTryFullReconnect = true
+                            if let recoveredIp = await self.waitForReceiverReconnection(
+                                qrPayload: qrPayload,
+                                preferredIp: activeIp,
+                                timeoutSeconds: 45
+                            ) {
+                                activeIp = recoveredIp
+                                baseUrl = "http://\(recoveredIp):\(qrPayload.port)"
+                                uploadSession.finishTasksAndInvalidate()
+                                uploadSession = Self.makeUploadSession()
+                                // Ri-autentica e riallinea il manifest se il ricevente ha riavviato il socket
+                                _ = try? await self.postEncryptedJson(url: "\(baseUrl)/v1/handshake", payload: hsReq, key: key)
+                                _ = try? await self.postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
+                                quickAttempt = 0
+                                continue
+                            }
+                        }
+
+                        // Il ricevente è rimasto irraggiungibile oltre 45 secondi: ferma subito il ciclo senza bruciare i restanti file!
+                        let pctNow = self.totalItems > 0 ? Int((Double(self.completedItems) / Double(self.totalItems)) * 100.0) : 0
+                        throw NSError(
+                            domain: "DirectSwitchNetwork",
+                            code: -1004,
+                            userInfo: [
+                                NSLocalizedDescriptionKey: "Connessione con \(self.peerName) in pausa al \(pctNow)% (\(self.completedItems)/\(self.totalItems) file già salvati). Mantieni aperto DirectSwitch sull'altro telefono e tocca «Riprendi trasferimento da dove era rimasto»."
+                            ]
+                        )
+                    }
+                }
+            }
 
             // 1. Upload streaming Foto, Live Photos (.HEIC + .MOV) & Video 4K
             for (item, phAsset) in assetsToUpload {
+                // Rinnova periodicamente URLSession ogni 400 file per azzerare il pool CFNetwork nei trasferimenti da 5.000+ file
+                if sessionFilesCounter > 0 && sessionFilesCounter % 400 == 0 {
+                    uploadSession.finishTasksAndInvalidate()
+                    uploadSession = Self.makeUploadSession()
+                }
+                sessionFilesCounter += 1
+
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
                 guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(phAsset) else {
+                    // Solo i file realmente non esportabili da PhotoKit incrementano questo contatore
                     failedItemsCount += 1
                     continue
                 }
@@ -1304,39 +1527,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     }
                 }
 
-                var itemUploadedBytes: Int64? = nil
-                var fatalPermissionError: Error? = nil
-                for attempt in 0..<2 {
-                    do {
-                        let sent = try await encryptAndStreamFileItem(
-                            item: item,
-                            plainFileURL: plainTempURL,
-                            baseUrl: baseUrl,
-                            key: key,
-                            session: uploadSession
-                        )
-                        itemUploadedBytes = sent
-                        break
-                    } catch {
-                        let nsErr = error as NSError
-                        if nsErr.code == 403 {
-                            fatalPermissionError = error
-                            break
-                        }
-                        if attempt == 0 {
-                            try? await Task.sleep(nanoseconds: 350_000_000)
-                        }
-                    }
-                }
-                if let fatalErr = fatalPermissionError {
-                    throw fatalErr
-                }
-                if let sentBytes = itemUploadedBytes {
-                    completedItems += 1
-                    uploadedBytes += sentBytes
-                    transferredBytesCount = uploadedBytes
-                    let elapsed = max(0.25, Date().timeIntervalSince(startTime))
-                    speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                if let sentBytes = try await sendFileResiliently(item: item, plainFileURL: plainTempURL) {
+                    uploadedIdSet.insert(item.id)
+                    cumulativeSentBytes += sentBytes
+                    senderUploadedIdsBySession[qrPayload.sessionId] = uploadedIdSet
+                    senderUploadedBytesBySession[qrPayload.sessionId] = cumulativeSentBytes
+
+                    completedItems = uploadedIdSet.count
+                    runBytesSent += sentBytes
+                    transferredBytesCount = cumulativeSentBytes
+                    let elapsed = max(0.25, Date().timeIntervalSince(runStartTime))
+                    speedMegabytesPerSec = (Double(runBytesSent) / (1024.0 * 1024.0)) / elapsed
                     let pct = totalItems > 0 ? Int((Double(completedItems) / Double(totalItems)) * 100.0) : 50
                     iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: statusLabel)
                 } else {
@@ -1347,33 +1548,27 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             // 2. Upload streaming Documenti, Cartelle «Su iPhone», Password .csv & Archivi WhatsApp
             var succeededDocURLs: [URL] = []
             for (item, docURL) in docsToUpload {
+                if sessionFilesCounter > 0 && sessionFilesCounter % 400 == 0 {
+                    uploadSession.finishTasksAndInvalidate()
+                    uploadSession = Self.makeUploadSession()
+                }
+                sessionFilesCounter += 1
+
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
-                var itemUploadedBytes: Int64? = nil
-                for attempt in 0..<2 {
-                    do {
-                        let sent = try await encryptAndStreamFileItem(
-                            item: item,
-                            plainFileURL: docURL,
-                            baseUrl: baseUrl,
-                            key: key,
-                            session: uploadSession
-                        )
-                        itemUploadedBytes = sent
-                        break
-                    } catch {
-                        if attempt == 0 {
-                            try? await Task.sleep(nanoseconds: 350_000_000)
-                        }
-                    }
-                }
-                if let sentBytes = itemUploadedBytes {
-                    completedItems += 1
-                    uploadedBytes += sentBytes
-                    transferredBytesCount = uploadedBytes
+
+                if let sentBytes = try await sendFileResiliently(item: item, plainFileURL: docURL) {
+                    uploadedIdSet.insert(item.id)
+                    cumulativeSentBytes += sentBytes
+                    senderUploadedIdsBySession[qrPayload.sessionId] = uploadedIdSet
+                    senderUploadedBytesBySession[qrPayload.sessionId] = cumulativeSentBytes
+
+                    completedItems = uploadedIdSet.count
+                    runBytesSent += sentBytes
+                    transferredBytesCount = cumulativeSentBytes
                     succeededDocURLs.append(docURL)
-                    let elapsed = max(0.25, Date().timeIntervalSince(startTime))
-                    speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                    let elapsed = max(0.25, Date().timeIntervalSince(runStartTime))
+                    speedMegabytesPerSec = (Double(runBytesSent) / (1024.0 * 1024.0)) / elapsed
                     let pct = totalItems > 0 ? Int((Double(completedItems) / Double(totalItems)) * 100.0) : 50
                     iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: statusLabel)
                 } else {
@@ -1381,16 +1576,34 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             }
 
-            let completeData = try await postEncryptedJson(
-                url: "\(baseUrl)/v1/complete",
-                payload: ["sessionId": qrPayload.sessionId],
-                key: key
-            )
-            if let report = try? JSONDecoder().decode(TransferCompletionReport.self, from: completeData) {
-                mergedContacts = report.mergedContactsCount
-                importedCalendars = report.importedCalendarsCount
-                if let rem = report.remindersImportedCount { importedReminders = rem }
-                if let live = report.livePhotosSavedCount { savedLivePhotos = live }
+            // Chiusura sessione con riconnessione se il Wi-Fi oscilla proprio al 99%
+            var completeData: Data? = nil
+            do {
+                completeData = try await postEncryptedJson(
+                    url: "\(baseUrl)/v1/complete",
+                    payload: ["sessionId": qrPayload.sessionId],
+                    key: key
+                )
+            } catch {
+                if let recoveredIp = await waitForReceiverReconnection(qrPayload: qrPayload, preferredIp: activeIp, timeoutSeconds: 20) {
+                    activeIp = recoveredIp
+                    baseUrl = "http://\(recoveredIp):\(qrPayload.port)"
+                    completeData = try await postEncryptedJson(
+                        url: "\(baseUrl)/v1/complete",
+                        payload: ["sessionId": qrPayload.sessionId],
+                        key: key
+                    )
+                } else {
+                    throw error
+                }
+            }
+
+            if let completeData,
+               let report = try? JSONDecoder().decode(TransferCompletionReport.self, from: completeData) {
+                if report.mergedContactsCount > 0 { mergedContacts = report.mergedContactsCount }
+                if report.importedCalendarsCount > 0 { importedCalendars = report.importedCalendarsCount }
+                if let rem = report.remindersImportedCount, rem > 0 { importedReminders = rem }
+                if let live = report.livePhotosSavedCount, live > 0 { savedLivePhotos = live }
                 importedSms = report.importedSmsCount
                 skippedDuplicates = report.skippedDuplicatesCount
             }
@@ -1398,18 +1611,66 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 try? FileManager.default.removeItem(at: docURL)
             }
             currentItemName = ""
-            if failedItemsCount > 0 {
-                canResumeInterruptedTransfer = true
-            }
+            senderUploadedIdsBySession.removeValue(forKey: qrPayload.sessionId)
+            senderUploadedBytesBySession.removeValue(forKey: qrPayload.sessionId)
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
             pendingNativeWhatsAppMigration = wantNativeWa
             isCompleted = true
         } catch {
-            if didAuthenticateSession {
+            if didAuthenticateSession || !(senderUploadedIdsBySession[qrPayload.sessionId] ?? []).isEmpty {
                 canResumeInterruptedTransfer = true
             }
             errorMessage = error.localizedDescription
         }
+    }
+
+    private nonisolated static func makeUploadSession() -> URLSession {
+        let uploadConfig = URLSessionConfiguration.ephemeral
+        uploadConfig.timeoutIntervalForRequest = 180.0
+        uploadConfig.timeoutIntervalForResource = 900.0
+        uploadConfig.httpMaximumConnectionsPerHost = 2
+        uploadConfig.waitsForConnectivity = false
+        return URLSession(configuration: uploadConfig)
+    }
+
+    /// Attende fino a `timeoutSeconds` che il ricevente torni raggiungibile (ad es. dopo uno sblocco schermo o cambio AP Wi-Fi),
+    /// ascoltando anche eventuali nuovi IP pubblicati dal beacon UDP dello stesso dispositivo.
+    private func waitForReceiverReconnection(
+        qrPayload: QrPairingPayload,
+        preferredIp: String,
+        timeoutSeconds: Int
+    ) async -> String? {
+        let wasListeningDiscovery = (udpDiscoveryListener != nil)
+        if !wasListeningDiscovery {
+            startUdpAutoDiscovery()
+        }
+        defer {
+            if !wasListeningDiscovery {
+                stopUdpAutoDiscovery()
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+        while Date() < deadline {
+            let remaining = max(1, Int(deadline.timeIntervalSinceNow.rounded()))
+            statusLabel = "Riconnessione automatica a \(peerName.isEmpty ? qrPayload.receiverName : peerName) (\(remaining)s)..."
+
+            var ipsToProbe: [String] = [preferredIp]
+            for ip in qrPayload.ips where !ipsToProbe.contains(ip) {
+                ipsToProbe.append(ip)
+            }
+            for beacon in discoveredBeacons where beacon.sessionId == qrPayload.sessionId || beacon.receiverName == qrPayload.receiverName {
+                for ip in beacon.ips where !ipsToProbe.contains(ip) {
+                    ipsToProbe.insert(ip, at: 0)
+                }
+            }
+
+            if let aliveIp = await findReachableIp(ips: ipsToProbe, port: qrPayload.port) {
+                return aliveIp
+            }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+        return nil
     }
 
     private func encryptAndStreamFileItem(
@@ -1476,8 +1737,19 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 ]
             )
         }
+        if httpResp.statusCode == 422 || httpResp.statusCode == 500 || httpResp.statusCode == 404 {
+            throw NSError(
+                domain: "DirectSwitchHttp",
+                code: httpResp.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Errore salvataggio \(itemLabel) (HTTP \(httpResp.statusCode))"]
+            )
+        }
         guard httpResp.statusCode == 200 else {
-            throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(itemLabel) (HTTP \(httpResp.statusCode))"])
+            throw NSError(
+                domain: "DirectSwitchNetwork",
+                code: httpResp.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Errore comunicazione \(itemLabel) (HTTP \(httpResp.statusCode))"]
+            )
         }
         return plainBytes
     }
@@ -1514,7 +1786,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         guard let httpResp = resp as? HTTPURLResponse, httpResp.statusCode == 200 else {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             if status == 401 {
-                throw NSError(domain: "DirectSwitch", code: 401, userInfo: [NSLocalizedDescriptionKey: "PIN o chiave di sessione non validi."])
+                let msg = url.hasSuffix("/v1/pair-pin")
+                    ? "Codice PIN a 6 cifre non valido: controlla le cifre mostrate sull'altro telefono."
+                    : "Sessione o PIN cambiato sull'altro telefono: usa «Ricollega con nuovo codice / QR» (i file già salvati non verranno duplicati)."
+                throw NSError(domain: "DirectSwitch", code: 401, userInfo: [NSLocalizedDescriptionKey: msg])
             } else if status == 429 {
                 throw NSError(domain: "DirectSwitch", code: 429, userInfo: [NSLocalizedDescriptionKey: "PIN scaduto o troppi tentativi: inquadra il codice QR."])
             }

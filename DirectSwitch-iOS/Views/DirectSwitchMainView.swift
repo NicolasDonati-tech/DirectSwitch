@@ -214,6 +214,19 @@ struct DirectSwitchMainView: View {
                                         handleBackNavigation()
                                     }
                                 },
+                                onReconnectNewCode: {
+                                    pairedTargetPayload = nil
+                                    selectedBeacon = nil
+                                    pinCodeInput = ""
+                                    manualCodeInput = ""
+                                    pairingErrorNote = nil
+                                    transport.errorMessage = nil
+                                    transport.needsLocalNetworkRedirect = false
+                                    transport.startUdpAutoDiscovery()
+                                    withAnimation(.easeInOut(duration: 0.22)) {
+                                        activeStep = .sendConnect
+                                    }
+                                },
                                 onFinish: finishAndReturnHome
                             )
                         }
@@ -534,6 +547,7 @@ private struct DirectSwitchTransferProgressView: View {
     let isProUnlocked: Bool
     var onOpenProSheet: () -> Void
     var onRetryIfFailed: () -> Void
+    var onReconnectNewCode: () -> Void
     var onFinish: () -> Void
 
     @State private var showAllReceivedApps: Bool = false
@@ -608,14 +622,25 @@ private struct DirectSwitchTransferProgressView: View {
                         DirectSwitchAppleEmblem(size: 68)
                             .padding(.top, 14)
 
-                        Text(isReceiverMode ? "Copia su questo iPhone..." : "Copia dei dati in corso...")
-                            .font(.system(size: 23, weight: .bold))
-                            .foregroundColor(AppleTheme.textPrimary)
+                        if transport.errorMessage != nil {
+                            Text("Trasferimento in pausa (\(percentageInt)%)")
+                                .font(.system(size: 23, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
 
-                        Text("Tieni entrambi i telefoni vicini fino al termine")
-                            .font(.system(size: 14))
-                            .foregroundColor(AppleTheme.textSecondary)
-                            .multilineTextAlignment(.center)
+                            Text("I file già copiati sono al sicuro e non verranno duplicati")
+                                .font(.system(size: 14))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .multilineTextAlignment(.center)
+                        } else {
+                            Text(isReceiverMode ? "Copia su questo iPhone..." : "Copia dei dati in corso...")
+                                .font(.system(size: 23, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+
+                            Text("Tieni entrambi i telefoni vicini fino al termine")
+                                .font(.system(size: 14))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .multilineTextAlignment(.center)
+                        }
 
                         if transport.isBackgroundKeepAliveActive {
                             HStack(spacing: 6) {
@@ -760,9 +785,9 @@ private struct DirectSwitchTransferProgressView: View {
                     if transport.failedItemsCount > 0 {
                         Divider().padding(.leading, 56)
                         summaryRow(
-                            icon: "exclamationmark.circle",
+                            icon: "icloud.slash",
                             color: AppleTheme.orange,
-                            title: "File in sospeso / saltati",
+                            title: "Foto iCloud non scaricate / illeggibili",
                             value: "\(transport.failedItemsCount)"
                         )
                     }
@@ -854,14 +879,22 @@ private struct DirectSwitchTransferProgressView: View {
                             DirectSwitchTransportViewModel.openAppSettings()
                         }
                         if !isReceiverMode {
-                            AppleSecondaryButton(
+                            ApplePrimaryButton(
                                 title: transport.canResumeInterruptedTransfer
                                     ? "Riprendi trasferimento da dove era rimasto"
                                     : "Riprova copia",
                                 icon: "arrow.clockwise",
-                                tint: AppleTheme.blue,
+                                color: AppleTheme.blue,
                                 action: onRetryIfFailed
                             )
+                            if transport.canResumeInterruptedTransfer {
+                                AppleSecondaryButton(
+                                    title: "Ricollega con nuovo codice / QR (salta già copiati)",
+                                    icon: "qrcode",
+                                    tint: AppleTheme.teal,
+                                    action: onReconnectNewCode
+                                )
+                            }
                         }
                     }
                 } else if let err = transport.errorMessage, !err.isEmpty {
@@ -883,24 +916,39 @@ private struct DirectSwitchTransferProgressView: View {
                             }
                         }
                         if !isReceiverMode {
-                            AppleSecondaryButton(
+                            ApplePrimaryButton(
                                 title: transport.canResumeInterruptedTransfer
                                     ? "Riprendi trasferimento da dove era rimasto"
                                     : "Riprova copia",
                                 icon: "arrow.clockwise",
-                                tint: AppleTheme.blue,
+                                color: AppleTheme.blue,
                                 action: onRetryIfFailed
                             )
+                            if transport.canResumeInterruptedTransfer {
+                                AppleSecondaryButton(
+                                    title: "Ricollega con nuovo codice / QR (salta già copiati)",
+                                    icon: "qrcode",
+                                    tint: AppleTheme.teal,
+                                    action: onReconnectNewCode
+                                )
+                            }
                         }
                     }
                     .appleCard(padding: 14)
                 }
 
-                if transport.isCompleted || transport.errorMessage != nil {
+                if transport.isCompleted {
                     ApplePrimaryButton(
-                        title: transport.isCompleted ? "Fine" : "Torna alla Home",
-                        icon: transport.isCompleted ? "checkmark" : nil,
+                        title: "Fine",
+                        icon: "checkmark",
                         color: AppleTheme.blue,
+                        action: onFinish
+                    )
+                } else if transport.errorMessage != nil {
+                    AppleSecondaryButton(
+                        title: "Torna alla Home",
+                        icon: "house",
+                        tint: AppleTheme.slate,
                         action: onFinish
                     )
                 }

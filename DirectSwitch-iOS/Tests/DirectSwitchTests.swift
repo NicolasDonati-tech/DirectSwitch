@@ -369,4 +369,28 @@ final class DirectSwitchTests: XCTestCase {
 
         XCTAssertEqual(iOSBackgroundTransferKeepAlive.bgTaskIdentifier, "com.directswitch.ios.transfer.keepalive")
     }
+
+    func testDeterministicAssetManifestIdIsUrlSafeAcrossNewScreenshots() {
+        let rawLocalId = "B84E8479-475C-4727-A4A4-B77AA9980897/L0/001"
+        let idBeforeNewScreenshot = iOSPhotoKitMigrator.stableManifestItemId(
+            localIdentifier: rawLocalId,
+            category: .PHOTOS,
+            fallbackIndex: 4354
+        )
+        let idAfterNewScreenshot = iOSPhotoKitMigrator.stableManifestItemId(
+            localIdentifier: rawLocalId,
+            category: .PHOTOS,
+            fallbackIndex: 4355
+        )
+        XCTAssertEqual(idBeforeNewScreenshot, idAfterNewScreenshot)
+        XCTAssertEqual(idBeforeNewScreenshot, "photos_B84E8479-475C-4727-A4A4-B77AA9980897_L0_001")
+        XCTAssertNotNil(URL(string: "http://192.168.1.20:49443/v1/item/\(idBeforeNewScreenshot)"))
+
+        let fallbackId = iOSPhotoKitMigrator.stableManifestItemId(
+            localIdentifier: "",
+            category: .VIDEOS,
+            fallbackIndex: 99
+        )
+        XCTAssertEqual(fallbackId, "videos_99")
+    }
 }
