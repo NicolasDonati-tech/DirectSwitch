@@ -111,6 +111,23 @@ struct ReceivePairingStepView: View {
                             .foregroundColor(AppleTheme.textSecondary)
                     }
 
+                    HStack(spacing: 6) {
+                        Image(systemName: "bolt.shield.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.teal)
+                        Text("Anti-Standby e Keep-Alive Background attivi")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.teal)
+                        InfoCircleButton(
+                            title: "Esecuzione in Background attiva",
+                            message: "DirectSwitch mantiene lo schermo sveglio e protegge il canale di rete locale anche se passi temporaneamente in Impostazioni o rispondi a una chiamata."
+                        )
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(AppleTheme.teal.opacity(0.09))
+                    .clipShape(Capsule())
+
                     if !isLocalNetworkDenied {
                         Button(action: onOpenAppSettings) {
                             HStack(spacing: 6) {

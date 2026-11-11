@@ -51,19 +51,35 @@
 	<string>DirectSwitch legge e importa gli appuntamenti del Calendario evitando eventi duplicati sul nuovo telefono.</string>
 	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
 	<string>DirectSwitch salva gli appuntamenti ricevuti nel Calendario del nuovo telefono.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>DirectSwitch trasferisce le liste e i promemoria sul nuovo iPhone senza usare iCloud.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>DirectSwitch legge e importa tutti i promemoria sul nuovo iPhone evitando duplicati.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>DirectSwitch utilizza la fotocamera per inquadrare il codice QR del telefono ricevente.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>processing</string>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.directswitch.ios.transfer.keepalive</string>
+	</array>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>com.cloudsave.ios</string>
 		<string>whatsapp</string>
 		<string>whatsapp-smb</string>
+		<string>googlegmail</string>
+		<string>ms-outlook</string>
+		<string>ymail</string>
 	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>Archivio WhatsApp o Documento DirectSwitch</string>
+			<string>Archivio WhatsApp, Cartella o Documento DirectSwitch</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
@@ -71,8 +87,10 @@
 				<string>public.zip-archive</string>
 				<string>com.pkware.zip-archive</string>
 				<string>com.adobe.pdf</string>
+				<string>public.comma-separated-values-text</string>
 				<string>public.plain-text</string>
 				<string>public.text</string>
+				<string>public.audio</string>
 				<string>public.data</string>
 				<string>public.content</string>
 			</array>

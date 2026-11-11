@@ -8,6 +8,7 @@
 
 import Foundation
 import Contacts
+import CoreLocation
 import Photos
 import EventKit
 import StoreKit
@@ -17,10 +18,12 @@ import UIKit
 struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     let contactsCount: Int
     let photosCount: Int
+    var livePhotosCount: Int = 0
     let photosBytes: Int64
     let videosCount: Int
     let videosBytes: Int64
     let calendarEventsCount: Int
+    var remindersCount: Int = 0
     let documentsCount: Int
     let whatsappArchivesCount: Int
     let freeStorageBytes: Int64
@@ -29,15 +32,37 @@ struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     var contactsDenied: Bool = false
     var photosDenied: Bool = false
     var calendarsDenied: Bool = false
+    var remindersDenied: Bool = false
 }
 
 enum iOSPermissionsHelper {
-    /// Richiede in anticipo i permessi di Contatti, Libreria Foto e Calendari (usato sia in Invia che in Ricevi)
+    /// Elenco curato delle app essenziali più diffuse in Italia per il download 1-tap su nuovo iPhone senza iCloud.
+    static let essentialiOSApps: [InstalledAppRecord] = [
+        InstalledAppRecord(packageName: "net.whatsapp.WhatsApp", appName: "WhatsApp Messenger"),
+        InstalledAppRecord(packageName: "com.google.Gmail", appName: "Gmail"),
+        InstalledAppRecord(packageName: "com.google.Maps", appName: "Google Maps"),
+        InstalledAppRecord(packageName: "com.google.chrome.ios", appName: "Google Chrome"),
+        InstalledAppRecord(packageName: "com.google.ios.youtube", appName: "YouTube"),
+        InstalledAppRecord(packageName: "com.burbn.instagram", appName: "Instagram"),
+        InstalledAppRecord(packageName: "ph.telegra.Telegraph", appName: "Telegram Messenger"),
+        InstalledAppRecord(packageName: "com.spotify.client", appName: "Spotify"),
+        InstalledAppRecord(packageName: "com.microsoft.Office.Outlook", appName: "Microsoft Outlook"),
+        InstalledAppRecord(packageName: "it.pagopa.app.io", appName: "IO"),
+        InstalledAppRecord(packageName: "it.ipzs.cieid", appName: "CieID"),
+        InstalledAppRecord(packageName: "posteitaliane.posteapp.appposteid", appName: "PosteID"),
+        InstalledAppRecord(packageName: "it.aruba.pec.mobile", appName: "Aruba PEC")
+    ]
+
+    /// Richiede in anticipo i permessi di Contatti, Libreria Foto, Calendari, Promemoria e Notifiche background
     /// evitando che i popup di sistema compaiano a metà di una connessione HTTP attiva.
     static func requestAllTransferPermissions() async {
         _ = await iOSContactsSmartMerger.requestAccessIfNeeded()
         _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         _ = await iOSCalendarMigrator.requestAccessIfNeeded()
+        _ = await iOSRemindersMigrator.requestAccessIfNeeded()
+        await MainActor.run {
+            iOSBackgroundTransferKeepAlive.shared.requestNotificationPermissionIfNeeded()
+        }
     }
 
     static func receiverDeniedSummaryText() -> String? {
@@ -54,6 +79,10 @@ enum iOSPermissionsHelper {
         if eStatus == .denied || eStatus == .restricted {
             missing.append("Calendari")
         }
+        let rStatus = EKEventStore.authorizationStatus(for: .reminder)
+        if rStatus == .denied || rStatus == .restricted {
+            missing.append("Promemoria")
+        }
         guard !missing.isEmpty else { return nil }
         return "Permessi disattivati su questo iPhone: \(missing.joined(separator: ", ")). Attivali in Impostazioni → DirectSwitch per salvare tutti i dati ricevuti."
     }
@@ -65,7 +94,31 @@ enum iOSPermissionsHelper {
         UIApplication.shared.open(url)
     }
 
-    /// Cerca un'app proveniente da Android direttamente sull'App Store di iPhone.
+    /// Apre direttamente l'App Store per accedere allo storico gratuito «App → Non su questo iPhone» (0 GB su iCloud).
+    @MainActor
+    static func openAppStorePurchasedSection() {
+        if let appStoreURL = URL(string: "itms-apps://itunes.apple.com/"),
+           UIApplication.shared.canOpenURL(appStoreURL) {
+            UIApplication.shared.open(appStoreURL)
+            return
+        }
+        if let webURL = URL(string: "https://apps.apple.com/it/iphone/today") {
+            UIApplication.shared.open(webURL)
+        }
+    }
+
+    /// Apre direttamente l'app Mail del provider (se già installata) o la sua scheda su App Store per il login OAuth 1-tap.
+    @MainActor
+    static func openMailProviderOrStore(scheme: String, appStoreQuery: String) {
+        if let customURL = URL(string: "\(scheme)://"),
+           UIApplication.shared.canOpenURL(customURL) {
+            UIApplication.shared.open(customURL)
+            return
+        }
+        searchAppOnAppStore(appName: appStoreQuery)
+    }
+
+    /// Cerca un'app direttamente sull'App Store di iPhone.
     @MainActor
     static func searchAppOnAppStore(appName: String) {
         let trimmed = appName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -112,7 +165,10 @@ enum iOSStorageCapacityChecker {
 
 enum iOSDeviceDataAnalyzer {
     /// Legge subito spazio libero/totale e i conteggi delle sole categorie già autorizzate (nessun popup a freddo).
-    static func scanAuthorizedSummary(stagedItems: [ManifestItem] = []) -> iOSLocalDeviceScanSummary {
+    static func scanAuthorizedSummary(
+        stagedItems: [ManifestItem] = [],
+        knownRemindersCount: Int = 0
+    ) -> iOSLocalDeviceScanSummary {
         let (freeBytes, totalBytes) = iOSStorageCapacityChecker.freeAndTotalStorageBytes()
         let rawContactsStatus = CNContactStore.authorizationStatus(for: .contacts)
         let contactsAuth = iOSContactsSmartMerger.isAuthorized()
@@ -126,10 +182,15 @@ enum iOSDeviceDataAnalyzer {
         let calAuth = iOSCalendarMigrator.isAuthorized()
         let calendarsDenied = (rawCalStatus == .denied || rawCalStatus == .restricted)
 
+        let rawRemStatus = EKEventStore.authorizationStatus(for: .reminder)
+        let remAuth = iOSRemindersMigrator.isAuthorized()
+        let remindersDenied = (rawRemStatus == .denied || rawRemStatus == .restricted)
+
         let contactsCount = contactsAuth ? iOSContactsSmartMerger.readAllContacts().count : 0
         let calendarCount = calAuth ? iOSCalendarMigrator.readEvents().count : 0
 
         var photosCount = 0
+        var livePhotosCount = 0
         var photosBytes: Int64 = 0
         var videosCount = 0
         var videosBytes: Int64 = 0
@@ -139,7 +200,12 @@ enum iOSDeviceDataAnalyzer {
             fetched.enumerateObjects { asset, _, _ in
                 if asset.mediaType == .image {
                     photosCount += 1
-                    photosBytes += 2_800_000
+                    if asset.mediaSubtypes.contains(.photoLive) {
+                        livePhotosCount += 1
+                        photosBytes += 4_800_000
+                    } else {
+                        photosBytes += 2_800_000
+                    }
                 } else if asset.mediaType == .video {
                     videosCount += 1
                     videosBytes += Int64(max(1.0, asset.duration) * 2_200_000.0)
@@ -153,28 +219,33 @@ enum iOSDeviceDataAnalyzer {
         return iOSLocalDeviceScanSummary(
             contactsCount: contactsCount,
             photosCount: photosCount,
+            livePhotosCount: livePhotosCount,
             photosBytes: photosBytes,
             videosCount: videosCount,
             videosBytes: videosBytes,
             calendarEventsCount: calendarCount,
+            remindersCount: knownRemindersCount,
             documentsCount: docsCount,
             whatsappArchivesCount: waCount,
             freeStorageBytes: freeBytes,
             totalStorageBytes: totalBytes,
-            hasFullPermissions: contactsAuth && photosAuth && calAuth,
+            hasFullPermissions: contactsAuth && photosAuth && calAuth && remAuth,
             contactsDenied: contactsDenied,
             photosDenied: photosDenied,
-            calendarsDenied: calendarsDenied
+            calendarsDenied: calendarsDenied,
+            remindersDenied: remindersDenied
         )
     }
 
-    /// Richiede i permessi di lettura e restituisce il conteggio esatto dei contenuti sull'iPhone.
+    /// Richiede i permessi di lettura e restituisce il conteggio esatto dei contenuti sull'iPhone (inclusi Promemoria e Live Photos).
     static func requestPermissionsAndScanAll(stagedItems: [ManifestItem] = []) async -> iOSLocalDeviceScanSummary {
         _ = await iOSContactsSmartMerger.requestAccessIfNeeded()
         _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         _ = await iOSCalendarMigrator.requestAccessIfNeeded()
+        _ = await iOSRemindersMigrator.requestAccessIfNeeded()
+        let remCount = await iOSRemindersMigrator.readReminders().count
         return await Task.detached(priority: .userInitiated) {
-            scanAuthorizedSummary(stagedItems: stagedItems)
+            scanAuthorizedSummary(stagedItems: stagedItems, knownRemindersCount: remCount)
         }.value
     }
 }
@@ -271,6 +342,41 @@ enum iOSContactsSmartMerger {
         return isAuthorized()
     }
 
+    private static func encodeContactLabel(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "other" }
+        switch raw {
+        case CNLabelPhoneNumberMobile: return "mobile"
+        case CNLabelPhoneNumberiPhone: return "iphone"
+        case CNLabelPhoneNumberMain: return "main"
+        case CNLabelHome: return "home"
+        case CNLabelWork: return "work"
+        case CNLabelEmailiCloud: return "icloud"
+        default: return CNLabeledValue<NSString>.localizedString(forLabel: raw)
+        }
+    }
+
+    private static func decodePhoneLabel(_ tag: String) -> String {
+        switch tag.lowercased() {
+        case "mobile": return CNLabelPhoneNumberMobile
+        case "iphone": return CNLabelPhoneNumberiPhone
+        case "main": return CNLabelPhoneNumberMain
+        case "home": return CNLabelHome
+        case "work": return CNLabelWork
+        case "other", "": return CNLabelOther
+        default: return tag
+        }
+    }
+
+    private static func decodeGenericLabel(_ tag: String) -> String {
+        switch tag.lowercased() {
+        case "home": return CNLabelHome
+        case "work": return CNLabelWork
+        case "icloud": return CNLabelEmailiCloud
+        case "other", "": return CNLabelOther
+        default: return tag
+        }
+    }
+
     static func readAllContacts() -> [ContactTransferRecord] {
         let store = CNContactStore()
         guard isAuthorized() else { return [] }
@@ -278,21 +384,67 @@ enum iOSContactsSmartMerger {
             CNContactIdentifierKey as CNKeyDescriptor,
             CNContactGivenNameKey as CNKeyDescriptor,
             CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactNicknameKey as CNKeyDescriptor,
             CNContactOrganizationNameKey as CNKeyDescriptor,
+            CNContactJobTitleKey as CNKeyDescriptor,
+            CNContactBirthdayKey as CNKeyDescriptor,
             CNContactPhoneNumbersKey as CNKeyDescriptor,
-            CNContactEmailAddressesKey as CNKeyDescriptor
+            CNContactEmailAddressesKey as CNKeyDescriptor,
+            CNContactUrlAddressesKey as CNKeyDescriptor,
+            CNContactPostalAddressesKey as CNKeyDescriptor,
+            CNContactThumbnailImageDataKey as CNKeyDescriptor
         ]
         let req = CNContactFetchRequest(keysToFetch: keys)
         var out: [ContactTransferRecord] = []
         try? store.enumerateContacts(with: req) { contact, _ in
-            let name = [contact.givenName, contact.familyName]
+            let given = contact.givenName.trimmingCharacters(in: .whitespaces)
+            let family = contact.familyName.trimmingCharacters(in: .whitespaces)
+            let name = [given, family]
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespaces)
             let orgTrimmed = contact.organizationName.trimmingCharacters(in: .whitespaces)
-            let phones = contact.phoneNumbers.map { $0.value.stringValue }.filter { !$0.isEmpty }
-            let emails = contact.emailAddresses.map { String($0.value) }.filter { !$0.isEmpty }
-            let fallbackLabel = !orgTrimmed.isEmpty ? orgTrimmed : (phones.first ?? emails.first ?? "")
+            let nickTrimmed = contact.nickname.trimmingCharacters(in: .whitespaces)
+            let jobTrimmed = contact.jobTitle.trimmingCharacters(in: .whitespaces)
+
+            let labeledPhones: [LabeledValueRecord] = contact.phoneNumbers.compactMap { lv in
+                let val = lv.value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !val.isEmpty else { return nil }
+                return LabeledValueRecord(label: encodeContactLabel(lv.label), value: val)
+            }
+            let phones = labeledPhones.map(\.value)
+
+            let labeledEmails: [LabeledValueRecord] = contact.emailAddresses.compactMap { lv in
+                let val = String(lv.value).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !val.isEmpty else { return nil }
+                return LabeledValueRecord(label: encodeContactLabel(lv.label), value: val)
+            }
+            let emails = labeledEmails.map(\.value)
+
+            let urls: [String] = contact.urlAddresses.map { String($0.value).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            let addresses: [PostalAddressTransferRecord] = contact.postalAddresses.compactMap { lv in
+                let pa = lv.value
+                if pa.street.isEmpty && pa.city.isEmpty && pa.postalCode.isEmpty && pa.country.isEmpty {
+                    return nil
+                }
+                return PostalAddressTransferRecord(
+                    label: encodeContactLabel(lv.label),
+                    street: pa.street,
+                    city: pa.city,
+                    state: pa.state,
+                    postalCode: pa.postalCode,
+                    country: pa.country
+                )
+            }
+
+            var avatarBase64: String? = nil
+            if let thumb = contact.thumbnailImageData, !thumb.isEmpty, thumb.count <= 65_536 {
+                avatarBase64 = thumb.base64EncodedString()
+            }
+
+            let fallbackLabel = !orgTrimmed.isEmpty ? orgTrimmed : (!nickTrimmed.isEmpty ? nickTrimmed : (phones.first ?? emails.first ?? ""))
             let effectiveName = name.isEmpty ? fallbackLabel : name
 
             if !effectiveName.isEmpty {
@@ -302,7 +454,19 @@ enum iOSContactsSmartMerger {
                         displayName: effectiveName,
                         phones: phones,
                         emails: emails,
-                        organization: orgTrimmed.isEmpty ? nil : orgTrimmed
+                        organization: orgTrimmed.isEmpty ? nil : orgTrimmed,
+                        givenName: given.isEmpty ? nil : given,
+                        familyName: family.isEmpty ? nil : family,
+                        nickname: nickTrimmed.isEmpty ? nil : nickTrimmed,
+                        jobTitle: jobTrimmed.isEmpty ? nil : jobTrimmed,
+                        birthdayYear: contact.birthday?.year,
+                        birthdayMonth: contact.birthday?.month,
+                        birthdayDay: contact.birthday?.day,
+                        labeledPhones: labeledPhones.isEmpty ? nil : labeledPhones,
+                        labeledEmails: labeledEmails.isEmpty ? nil : labeledEmails,
+                        urls: urls.isEmpty ? nil : urls,
+                        postalAddresses: addresses.isEmpty ? nil : addresses,
+                        avatarJpegBase64: avatarBase64
                     )
                 )
             }
@@ -344,18 +508,79 @@ enum iOSContactsSmartMerger {
             }
 
             let mutable = CNMutableContact()
-            let parts = record.displayName.split(separator: " ", maxSplits: 1).map(String.init)
-            mutable.givenName = parts.first ?? record.displayName
-            if parts.count > 1 { mutable.familyName = parts[1] }
+            if let g = record.givenName, !g.isEmpty {
+                mutable.givenName = g
+                if let f = record.familyName, !f.isEmpty {
+                    mutable.familyName = f
+                }
+            } else {
+                let parts = record.displayName.split(separator: " ", maxSplits: 1).map(String.init)
+                mutable.givenName = parts.first ?? record.displayName
+                if parts.count > 1 { mutable.familyName = parts[1] }
+            }
             if let org = record.organization, !org.isEmpty {
                 mutable.organizationName = org
             }
-            mutable.phoneNumbers = record.phones.map {
-                CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: $0))
+            if let nick = record.nickname, !nick.isEmpty {
+                mutable.nickname = nick
             }
-            mutable.emailAddresses = record.emails.map {
-                CNLabeledValue(label: CNLabelOther, value: $0 as NSString)
+            if let job = record.jobTitle, !job.isEmpty {
+                mutable.jobTitle = job
             }
+            if let bMonth = record.birthdayMonth, let bDay = record.birthdayDay {
+                var comps = DateComponents()
+                if let bYear = record.birthdayYear, bYear > 1900 {
+                    comps.year = bYear
+                }
+                comps.month = bMonth
+                comps.day = bDay
+                mutable.birthday = comps
+            }
+
+            if let richPhones = record.labeledPhones, !richPhones.isEmpty {
+                mutable.phoneNumbers = richPhones.map {
+                    CNLabeledValue(label: decodePhoneLabel($0.label), value: CNPhoneNumber(stringValue: $0.value))
+                }
+            } else {
+                mutable.phoneNumbers = record.phones.map {
+                    CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: $0))
+                }
+            }
+
+            if let richEmails = record.labeledEmails, !richEmails.isEmpty {
+                mutable.emailAddresses = richEmails.map {
+                    CNLabeledValue(label: decodeGenericLabel($0.label), value: $0.value as NSString)
+                }
+            } else {
+                mutable.emailAddresses = record.emails.map {
+                    CNLabeledValue(label: CNLabelOther, value: $0 as NSString)
+                }
+            }
+
+            if let urls = record.urls, !urls.isEmpty {
+                mutable.urlAddresses = urls.map {
+                    CNLabeledValue(label: CNLabelURLAddressHomePage, value: $0 as NSString)
+                }
+            }
+
+            if let addresses = record.postalAddresses, !addresses.isEmpty {
+                mutable.postalAddresses = addresses.map { addr in
+                    let mAddr = CNMutablePostalAddress()
+                    mAddr.street = addr.street
+                    mAddr.city = addr.city
+                    mAddr.state = addr.state
+                    mAddr.postalCode = addr.postalCode
+                    mAddr.country = addr.country
+                    return CNLabeledValue(label: decodeGenericLabel(addr.label ?? "home"), value: mAddr)
+                }
+            }
+
+            if let b64 = record.avatarJpegBase64,
+               let imgData = Data(base64Encoded: b64),
+               !imgData.isEmpty {
+                mutable.imageData = imgData
+            }
+
             toInsert.append(mutable)
             normPhones.forEach { existingPhones.insert($0) }
             normEmails.forEach { existingEmails.insert($0) }
@@ -445,6 +670,16 @@ enum iOSPhotoKitMigrator {
         }
     }
 
+    /// Individua la clip `.MOV` accoppiata se l'asset è una Live Photo nativa di iPhone.
+    static func pairedLiveVideoResource(for asset: PHAsset) -> PHAssetResource? {
+        guard asset.mediaType == .image, asset.mediaSubtypes.contains(.photoLive) else {
+            return nil
+        }
+        let resources = PHAssetResource.assetResources(for: asset)
+        return resources.first(where: { $0.type == .fullSizePairedVideo })
+            ?? resources.first(where: { $0.type == .pairedVideo })
+    }
+
     private static func buildAssetAlbumMap() -> [String: String] {
         var map: [String: String] = [:]
         let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
@@ -462,14 +697,20 @@ enum iOSPhotoKitMigrator {
     }
 
     static func saveMediaFileToLibrary(item: ManifestItem, fileURL: URL) async -> Bool {
-        let (saved, _) = await saveMediaFileToLibraryWithReason(item: item, fileURL: fileURL)
-        return saved
+        let res = await saveMediaFileToLibraryWithReason(item: item, fileURL: fileURL, pairedLiveVideoURL: nil)
+        return res.saved
     }
 
-    /// Salva una foto o un video nel Rullino iOS in due fasi isolate:
-    /// 1) Salva prima il file nel Rullino principale con `PHAssetResourceCreationOptions` (funziona anche in modalità `.limited` / `.addOnly`).
-    /// 2) Solo dopo il salvataggio, collega opzionalmente l'asset all'Album utente (`subtype: .albumRegular`), così un vincolo sugli album non annulla mai il salvataggio della foto.
-    static func saveMediaFileToLibraryWithReason(item: ManifestItem, fileURL: URL) async -> (saved: Bool, errorCode: String?) {
+    /// Salva una foto, una Live Photo (`.HEIC` + `.MOV` accoppiato) o un video nel Rullino iOS in due fasi isolate:
+    /// 1) Salva prima il file nel Rullino principale con `PHAssetResourceCreationOptions` (preservando data, GPS e Preferiti ❤️).
+    ///    Se è presente `pairedLiveVideoURL`, tenta prima la ricostruzione atomica Live Photo; se iOS rifiuta l'accoppiamento
+    ///    (es. su foto ritagliate), ripiega automaticamente sul salvataggio della foto singola senza perdere alcuno scatto.
+    /// 2) Solo dopo il salvataggio, collega opzionalmente l'asset all'Album utente (`subtype: .albumRegular`).
+    static func saveMediaFileToLibraryWithReason(
+        item: ManifestItem,
+        fileURL: URL,
+        pairedLiveVideoURL: URL? = nil
+    ) async -> (saved: Bool, savedAsLivePhoto: Bool, errorCode: String?) {
         let rwStatus = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         var isFullReadWrite = (rwStatus == .authorized)
         var canSaveToLibrary = (rwStatus == .authorized || rwStatus == .limited)
@@ -479,50 +720,96 @@ enum iOSPhotoKitMigrator {
             isFullReadWrite = false
         }
         guard canSaveToLibrary else {
-            return (false, "photo_permission_denied")
+            return (false, false, "photo_permission_denied")
         }
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            return (false, "missing_temp_file")
+            return (false, false, "missing_temp_file")
         }
 
         let safeName = URL(fileURLWithPath: item.fileName).lastPathComponent
         let fallbackExt = item.category == .VIDEOS ? "mp4" : "jpg"
         let finalName = safeName.isEmpty ? "media_\(UUID().uuidString).\(fallbackExt)" : safeName
 
+        let creationDate: Date? = item.capturedEpochMillis > 0
+            ? Date(timeIntervalSince1970: TimeInterval(item.capturedEpochMillis) / 1000.0)
+            : nil
+        let locationObj: CLLocation? = {
+            if let lat = item.latitude, let lon = item.longitude {
+                return CLLocation(latitude: lat, longitude: lon)
+            }
+            return nil
+        }()
+        let markFavorite = (item.isFavorite == true)
+
         final class LocalIdBox: @unchecked Sendable {
             var value: String?
         }
         let idBox = LocalIdBox()
-        do {
-            try await PHPhotoLibrary.shared().performChanges {
-                let req = PHAssetCreationRequest.forAsset()
-                let resOpts = PHAssetResourceCreationOptions()
-                resOpts.originalFilename = finalName
-                resOpts.shouldMoveFile = false
-                if item.category == .VIDEOS {
-                    req.addResource(with: .video, fileURL: fileURL, options: resOpts)
-                } else {
-                    req.addResource(with: .photo, fileURL: fileURL, options: resOpts)
-                }
-                if item.capturedEpochMillis > 0 {
-                    req.creationDate = Date(timeIntervalSince1970: TimeInterval(item.capturedEpochMillis) / 1000.0)
-                }
-                idBox.value = req.placeholderForCreatedAsset?.localIdentifier
-            }
-        } catch {
-            // Secondo tentativo minimale tramite URL immagine/video standard (senza opzioni custom)
+        var savedLive = false
+
+        // Percorso 1: ricostruzione nativa Live Photo (.photo + .pairedVideo nella stessa PHAssetCreationRequest)
+        if item.category == .PHOTOS,
+           let liveURL = pairedLiveVideoURL,
+           FileManager.default.fileExists(atPath: liveURL.path) {
+            let rawLiveName = URL(fileURLWithPath: item.livePhotoVideoFileName ?? "").lastPathComponent
+            let finalLiveName = rawLiveName.isEmpty ? "live_\(UUID().uuidString).mov" : rawLiveName
             do {
                 try await PHPhotoLibrary.shared().performChanges {
-                    let fallbackReq = item.category == .VIDEOS
-                        ? PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
-                        : PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
-                    if item.capturedEpochMillis > 0 {
-                        fallbackReq?.creationDate = Date(timeIntervalSince1970: TimeInterval(item.capturedEpochMillis) / 1000.0)
+                    let req = PHAssetCreationRequest.forAsset()
+                    let photoOpts = PHAssetResourceCreationOptions()
+                    photoOpts.originalFilename = finalName
+                    photoOpts.shouldMoveFile = false
+                    req.addResource(with: .photo, fileURL: fileURL, options: photoOpts)
+
+                    let liveOpts = PHAssetResourceCreationOptions()
+                    liveOpts.originalFilename = finalLiveName
+                    liveOpts.shouldMoveFile = false
+                    req.addResource(with: .pairedVideo, fileURL: liveURL, options: liveOpts)
+
+                    if let creationDate { req.creationDate = creationDate }
+                    if let locationObj { req.location = locationObj }
+                    if markFavorite { req.isFavorite = true }
+                    idBox.value = req.placeholderForCreatedAsset?.localIdentifier
+                }
+                savedLive = true
+            } catch {
+                savedLive = false
+            }
+        }
+
+        // Percorso 2: salvataggio foto singola o video 4K (usato anche come fallback infallibile se il pairing Live Photo fallisce)
+        if !savedLive {
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    let req = PHAssetCreationRequest.forAsset()
+                    let resOpts = PHAssetResourceCreationOptions()
+                    resOpts.originalFilename = finalName
+                    resOpts.shouldMoveFile = false
+                    if item.category == .VIDEOS {
+                        req.addResource(with: .video, fileURL: fileURL, options: resOpts)
+                    } else {
+                        req.addResource(with: .photo, fileURL: fileURL, options: resOpts)
                     }
-                    idBox.value = fallbackReq?.placeholderForCreatedAsset?.localIdentifier
+                    if let creationDate { req.creationDate = creationDate }
+                    if let locationObj { req.location = locationObj }
+                    if markFavorite { req.isFavorite = true }
+                    idBox.value = req.placeholderForCreatedAsset?.localIdentifier
                 }
             } catch {
-                return (false, "photokit_save_failed")
+                // Secondo tentativo minimale tramite URL immagine/video standard
+                do {
+                    try await PHPhotoLibrary.shared().performChanges {
+                        let fallbackReq = item.category == .VIDEOS
+                            ? PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+                            : PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+                        if let creationDate { fallbackReq?.creationDate = creationDate }
+                        if let locationObj { fallbackReq?.location = locationObj }
+                        if markFavorite { fallbackReq?.isFavorite = true }
+                        idBox.value = fallbackReq?.placeholderForCreatedAsset?.localIdentifier
+                    }
+                } catch {
+                    return (false, false, "photokit_save_failed")
+                }
             }
         }
 
@@ -544,7 +831,7 @@ enum iOSPhotoKitMigrator {
             }
         }
 
-        return (true, nil)
+        return (true, savedLive, nil)
     }
 
     static func saveMediaToLibrary(item: ManifestItem, plainData: Data) async -> Bool {
@@ -594,17 +881,22 @@ enum iOSPhotoKitMigrator {
         return PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil).firstObject
     }
 
-    /// Scansiona Foto e Video del Rullino iOS preservando il vero Album utente (`Vacanze`, `WhatsApp`, ecc.).
-    static func scanLibraryAssets(includePhotos: Bool, includeVideos: Bool) async -> [(ManifestItem, PHAsset)] {
-        guard includePhotos || includeVideos else { return [] }
+    /// Scansiona Foto, Live Photos e Video del Rullino iOS preservando Album utente, Preferiti (❤️), coordinate GPS
+    /// e rilevando eventuali elementi ottimizzati su iCloud non ancora presenti offline.
+    static func scanLibraryAssetsWithMetadata(
+        includePhotos: Bool,
+        includeVideos: Bool
+    ) async -> (items: [(ManifestItem, PHAsset)], iCloudOptimizedCount: Int) {
+        guard includePhotos || includeVideos else { return ([], 0) }
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-        guard status == .authorized || status == .limited else { return [] }
+        guard status == .authorized || status == .limited else { return ([], 0) }
 
         let albumMap = buildAssetAlbumMap()
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         let fetched = PHAsset.fetchAssets(with: opts)
         var out: [(ManifestItem, PHAsset)] = []
+        var cloudOptimized = 0
 
         fetched.enumerateObjects { asset, idx, _ in
             let isVideo = asset.mediaType == .video
@@ -613,6 +905,10 @@ enum iOSPhotoKitMigrator {
                 return
             }
             guard let primary = primaryMediaResource(for: asset) else { return }
+            if let locallyAvailable = primary.value(forKey: "locallyAvailable") as? Bool, !locallyAvailable {
+                cloudOptimized += 1
+            }
+            let pairedLive = isPhoto ? pairedLiveVideoResource(for: asset) : nil
             let size = (primary.value(forKey: "fileSize") as? Int64) ?? 1_048_576
             let createdMs = Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000.0)
             let fileName = primary.originalFilename.isEmpty ? "media_\(idx).\(isVideo ? "mov" : "jpg")" : primary.originalFilename
@@ -626,27 +922,47 @@ enum iOSPhotoKitMigrator {
                 sizeBytes: size,
                 capturedEpochMillis: createdMs,
                 dedupKey: "\(fileName.lowercased())_\(size)_\(createdMs)",
-                mimeType: mimeTypeForFileName(fileName, isVideo: isVideo)
+                mimeType: mimeTypeForFileName(fileName, isVideo: isVideo),
+                isFavorite: asset.isFavorite ? true : nil,
+                latitude: asset.location?.coordinate.latitude,
+                longitude: asset.location?.coordinate.longitude,
+                isLivePhoto: pairedLive != nil ? true : nil,
+                livePhotoVideoFileName: pairedLive?.originalFilename
             )
             out.append((item, asset))
         }
-        return out
+        return (out, cloudOptimized)
+    }
+
+    static func scanLibraryAssets(includePhotos: Bool, includeVideos: Bool) async -> [(ManifestItem, PHAsset)] {
+        let res = await scanLibraryAssetsWithMetadata(includePhotos: includePhotos, includeVideos: includeVideos)
+        return res.items
     }
 
     /// Esporta un `PHAsset` direttamente su file temporaneo su disco tramite `PHAssetResourceManager.writeData`
     /// senza caricare video 4K multi-GB in memoria RAM.
     static func exportAssetToTempFile(_ asset: PHAsset) async -> URL? {
         guard let primary = primaryMediaResource(for: asset) else { return nil }
-        let safeName = URL(fileURLWithPath: primary.originalFilename).lastPathComponent
+        return await exportResourceToTempFile(primary, prefix: "ds_exp")
+    }
+
+    /// Esporta la componente video `.MOV` accoppiata di una Live Photo su file temporaneo.
+    static func exportLivePairedVideoToTempFile(_ asset: PHAsset) async -> URL? {
+        guard let paired = pairedLiveVideoResource(for: asset) else { return nil }
+        return await exportResourceToTempFile(paired, prefix: "ds_live")
+    }
+
+    private static func exportResourceToTempFile(_ resource: PHAssetResource, prefix: String) async -> URL? {
+        let safeName = URL(fileURLWithPath: resource.originalFilename).lastPathComponent
         let destURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ds_exp_\(UUID().uuidString)_\(safeName.isEmpty ? "asset.bin" : safeName)")
+            .appendingPathComponent("\(prefix)_\(UUID().uuidString)_\(safeName.isEmpty ? "asset.bin" : safeName)")
         try? FileManager.default.removeItem(at: destURL)
 
         return await withCheckedContinuation { continuation in
             let opts = PHAssetResourceRequestOptions()
             opts.isNetworkAccessAllowed = true
             PHAssetResourceManager.default().writeData(
-                for: primary,
+                for: resource,
                 toFile: destURL,
                 options: opts
             ) { error in
@@ -709,6 +1025,10 @@ enum iOSSmsArchiveStore {
 }
 
 enum iOSDocumentsSandboxBridge {
+    static func isPasswordsCsvFile(_ fileName: String) -> Bool {
+        URL(fileURLWithPath: fileName).pathExtension.lowercased() == "csv"
+    }
+
     static func mimeForExtension(_ ext: String) -> String {
         switch ext.lowercased() {
         case "pdf": return "application/pdf"
@@ -717,6 +1037,8 @@ enum iOSDocumentsSandboxBridge {
         case "csv": return "text/csv"
         case "vcf": return "text/vcard"
         case "ics": return "text/calendar"
+        case "m4a": return "audio/mp4"
+        case "mp3": return "audio/mpeg"
         case "opus": return "audio/ogg"
         default: return "application/octet-stream"
         }
@@ -744,20 +1066,26 @@ enum iOSDocumentsSandboxBridge {
         return candidate
     }
 
-    private static func targetDirectory(for item: ManifestItem) -> URL? {
+    /// Ricostruisce in sicurezza la gerarchia di sottocartelle dentro `Su iPhone -> DirectSwitch -> DirectSwitch_Documenti`.
+    static func sanitizedRelativeComponents(_ rawFolder: String) -> [String] {
+        let normalized = rawFolder.replacingOccurrences(of: "\\", with: "/")
+        return normalized
+            .split(separator: "/")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
+    static func targetDirectory(for item: ManifestItem) -> URL? {
         guard let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }
         var dir = docsRoot.appendingPathComponent("DirectSwitch_Documenti", isDirectory: true)
-        let sub = item.category == .WHATSAPP_VAULT
-            ? "WhatsApp_Vault"
-            : item.relativeAlbumOrFolder
-                .replacingOccurrences(of: "..", with: "")
-                .replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "\\", with: "_")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !sub.isEmpty {
-            dir = dir.appendingPathComponent(sub, isDirectory: true)
+        if item.category == .WHATSAPP_VAULT {
+            dir = dir.appendingPathComponent("WhatsApp_Vault", isDirectory: true)
+        } else {
+            for comp in sanitizedRelativeComponents(item.relativeAlbumOrFolder) {
+                dir = dir.appendingPathComponent(comp, isDirectory: true)
+            }
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -802,50 +1130,89 @@ enum iOSDocumentsSandboxBridge {
         }
     }
 
-    /// Copia nel Vault i Documenti o gli archivi `.zip` di WhatsApp selezionati dall'app File o condivisi da WhatsApp (`Apri in DirectSwitch`).
+    /// Copia nel Vault singoli file, archivi `.zip` di WhatsApp, file Password `.csv` oppure INTERE CARTELLE
+    /// selezionate da «Su iPhone» nell'app File, preservando ricorsivamente tutta la gerarchia di sottocartelle.
     static func importPickedDocumentURLs(_ urls: [URL]) -> [(ManifestItem, URL)] {
         let stagingDir = stagingVaultDirectory()
         var results: [(ManifestItem, URL)] = []
+        var counter = 0
 
-        for (idx, url) in urls.enumerated() {
-            guard url.isFileURL else { continue }
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer {
-                if accessed { url.stopAccessingSecurityScopedResource() }
-            }
-            let rawName = url.lastPathComponent
-            let safeName = rawName.isEmpty ? "documento_\(idx).bin" : rawName
-            let stagedURL = uniqueDestinationURL(in: stagingDir, preferredFileName: safeName)
+        func stageSingleFile(sourceURL: URL, relativeFolder: String, removeInboxIfApplicable: Bool) {
+            let rawName = sourceURL.lastPathComponent
+            let safeName = rawName.isEmpty ? "documento_\(counter).bin" : rawName
+            let stagedURL = uniqueDestinationURL(
+                in: stagingDir,
+                preferredFileName: "\(UUID().uuidString.prefix(6))_\(safeName)"
+            )
             do {
-                try FileManager.default.copyItem(at: url, to: stagedURL)
-                if url.path.contains("/Documents/Inbox/") {
-                    try? FileManager.default.removeItem(at: url)
+                try FileManager.default.copyItem(at: sourceURL, to: stagedURL)
+                if removeInboxIfApplicable && sourceURL.path.contains("/Documents/Inbox/") {
+                    try? FileManager.default.removeItem(at: sourceURL)
                 }
                 let attrs = try FileManager.default.attributesOfItem(atPath: stagedURL.path)
                 let size = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0
                 guard size > 0 else {
                     try? FileManager.default.removeItem(at: stagedURL)
-                    continue
+                    return
                 }
                 let modDate = (attrs[.modificationDate] as? Date) ?? Date()
                 let modMs = Int64(modDate.timeIntervalSince1970 * 1000.0)
                 let lower = safeName.lowercased()
-                let ext = stagedURL.pathExtension.lowercased()
+                let ext = sourceURL.pathExtension.lowercased()
                 let isWhatsApp = lower.contains("whatsapp") || ext == "opus" || (ext == "zip" && lower.contains("chat"))
                 let category: TransferCategory = isWhatsApp ? .WHATSAPP_VAULT : .DOCUMENTS
+                let folderToUse = isWhatsApp ? "WhatsApp_Vault" : (relativeFolder.isEmpty ? "Documenti" : relativeFolder)
                 let item = ManifestItem(
-                    id: "doc_\(UUID().uuidString.prefix(8).lowercased())_\(idx)",
+                    id: "doc_\(UUID().uuidString.prefix(8).lowercased())_\(counter)",
                     category: category,
                     fileName: safeName,
-                    relativeAlbumOrFolder: isWhatsApp ? "WhatsApp_Vault" : "Documenti",
+                    relativeAlbumOrFolder: folderToUse,
                     sizeBytes: size,
                     capturedEpochMillis: modMs,
-                    dedupKey: "\(lower)_\(size)_\(modMs)",
+                    dedupKey: "\(folderToUse.lowercased())/\(lower)_\(size)_\(modMs)",
                     mimeType: mimeForExtension(ext)
                 )
+                counter += 1
                 results.append((item, stagedURL))
             } catch {
-                continue
+                try? FileManager.default.removeItem(at: stagedURL)
+            }
+        }
+
+        for url in urls {
+            guard url.isFileURL else { continue }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { url.stopAccessingSecurityScopedResource() }
+            }
+
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDir {
+                let rootFolderName = url.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanRoot = rootFolderName.isEmpty ? "Cartella_iPhone" : rootFolderName
+                let resolvedRootPath = url.resolvingSymlinksInPath().path
+                if let enumerator = FileManager.default.enumerator(
+                    at: url,
+                    includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) {
+                    for case let childURL as URL in enumerator {
+                        let vals = try? childURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                        if vals?.isDirectory == true { continue }
+                        let childDirPath = childURL.deletingLastPathComponent().resolvingSymlinksInPath().path
+                        var subRel = ""
+                        if childDirPath.hasPrefix(resolvedRootPath) {
+                            subRel = String(childDirPath.dropFirst(resolvedRootPath.count))
+                                .trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+                        }
+                        let fullRel = subRel.isEmpty ? cleanRoot : "\(cleanRoot)/\(subRel)"
+                        stageSingleFile(sourceURL: childURL, relativeFolder: fullRel, removeInboxIfApplicable: false)
+                    }
+                }
+            } else {
+                let ext = url.pathExtension.lowercased()
+                let defaultFolder = ext == "csv" ? "Password_Esportate" : "Documenti"
+                stageSingleFile(sourceURL: url, relativeFolder: defaultFolder, removeInboxIfApplicable: true)
             }
         }
         return results
@@ -881,21 +1248,48 @@ enum iOSCalendarMigrator {
         }
     }
 
+    private static func encodeFrequency(_ freq: EKRecurrenceFrequency) -> String {
+        switch freq {
+        case .daily: return "daily"
+        case .weekly: return "weekly"
+        case .monthly: return "monthly"
+        case .yearly: return "yearly"
+        @unknown default: return "yearly"
+        }
+    }
+
+    private static func decodeFrequency(_ raw: String?) -> EKRecurrenceFrequency? {
+        switch raw?.lowercased() {
+        case "daily": return .daily
+        case "weekly": return .weekly
+        case "monthly": return .monthly
+        case "yearly": return .yearly
+        default: return nil
+        }
+    }
+
     static func readEvents() -> [CalendarEventRecord] {
         guard isAuthorized() else { return [] }
         let store = EKEventStore()
-        let start = Date().addingTimeInterval(-365 * 86400)
-        let end = Date().addingTimeInterval(365 * 86400 * 2)
+        // Finestra ampia (-10 anni .. +10 anni) per non perdere appuntamenti storici o ricorrenze annuali
+        let start = Date().addingTimeInterval(-365 * 86400 * 10)
+        let end = Date().addingTimeInterval(365 * 86400 * 10)
         let pred = store.predicateForEvents(withStart: start, end: end, calendars: nil)
         return store.events(matching: pred).map { ev in
-            CalendarEventRecord(
+            let rule = ev.recurrenceRules?.first
+            let alarmOffset = ev.alarms?.first?.relativeOffset
+            return CalendarEventRecord(
                 id: ev.eventIdentifier ?? UUID().uuidString,
                 title: ev.title ?? "Evento",
                 description: ev.notes,
                 location: ev.location,
                 startEpochMillis: Int64(ev.startDate.timeIntervalSince1970 * 1000.0),
                 endEpochMillis: Int64(ev.endDate.timeIntervalSince1970 * 1000.0),
-                allDay: ev.isAllDay
+                allDay: ev.isAllDay,
+                calendarTitle: ev.calendar?.title,
+                recurrenceFrequency: rule.map { encodeFrequency($0.frequency) },
+                recurrenceInterval: rule.map { max(1, $0.interval) },
+                alarmOffsetSeconds: alarmOffset
             )
         }
     }
@@ -933,11 +1327,155 @@ enum iOSCalendarMigrator {
             ev.startDate = Date(timeIntervalSince1970: TimeInterval(rec.startEpochMillis) / 1000.0)
             ev.endDate = Date(timeIntervalSince1970: TimeInterval(rec.endEpochMillis) / 1000.0)
             ev.isAllDay = rec.allDay
+            if let freq = decodeFrequency(rec.recurrenceFrequency) {
+                let rule = EKRecurrenceRule(
+                    recurrenceWith: freq,
+                    interval: max(1, rec.recurrenceInterval ?? 1),
+                    end: nil
+                )
+                ev.addRecurrenceRule(rule)
+            }
+            if let offset = rec.alarmOffsetSeconds {
+                ev.addAlarm(EKAlarm(relativeOffset: offset))
+            }
             if (try? store.save(ev, span: .thisEvent, commit: false)) != nil {
                 existingSignatures.insert(sig)
                 imported += 1
             }
         }
+        if imported > 0 {
+            do {
+                try store.commit()
+            } catch {
+                return 0
+            }
+        }
+        return imported
+    }
+}
+
+/// Migratore nativo dei Promemoria Apple (`EKReminder`) senza iCloud, con conservazione delle liste, scadenze, note e priorità.
+enum iOSRemindersMigrator {
+    static func isAuthorized() -> Bool {
+        let status = EKEventStore.authorizationStatus(for: .reminder)
+        if #available(iOS 17.0, *) {
+            return status == .fullAccess
+        } else {
+            return status == .authorized
+        }
+    }
+
+    static func requestAccessIfNeeded() async -> Bool {
+        if isAuthorized() { return true }
+        let store = EKEventStore()
+        if #available(iOS 17.0, *) {
+            return (try? await store.requestFullAccessToReminders()) ?? false
+        } else {
+            return (try? await store.requestAccess(to: .reminder)) ?? false
+        }
+    }
+
+    static func readReminders() async -> [ReminderTransferRecord] {
+        guard isAuthorized() else { return [] }
+        let store = EKEventStore()
+        let pred = store.predicateForReminders(in: nil)
+        let fetched: [EKReminder] = await withCheckedContinuation { cont in
+            store.fetchReminders(matching: pred) { list in
+                cont.resume(returning: list ?? [])
+            }
+        }
+        return fetched.compactMap { rem in
+            let cleanTitle = (rem.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanTitle.isEmpty else { return nil }
+            let dueMs: Int64? = {
+                guard let comps = rem.dueDateComponents,
+                      let date = Calendar.current.date(from: comps) else { return nil }
+                return Int64(date.timeIntervalSince1970 * 1000.0)
+            }()
+            return ReminderTransferRecord(
+                id: rem.calendarItemIdentifier,
+                title: cleanTitle,
+                notes: rem.notes,
+                listName: rem.calendar?.title,
+                isCompleted: rem.isCompleted,
+                priority: rem.priority,
+                dueEpochMillis: dueMs
+            )
+        }
+    }
+
+    static func importReminders(_ incoming: [ReminderTransferRecord]) async -> Int {
+        guard !incoming.isEmpty, isAuthorized() else { return 0 }
+        let store = EKEventStore()
+        guard let fallbackCalendar = store.defaultCalendarForNewReminders() else { return 0 }
+
+        let existingPred = store.predicateForReminders(in: nil)
+        let existingList: [EKReminder] = await withCheckedContinuation { cont in
+            store.fetchReminders(matching: existingPred) { list in
+                cont.resume(returning: list ?? [])
+            }
+        }
+
+        var existingSignatures = Set<String>()
+        for rem in existingList {
+            let normList = (rem.calendar?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normTitle = (rem.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normTitle.isEmpty {
+                existingSignatures.insert("\(normList)|\(normTitle)")
+            }
+        }
+
+        var calendarsByLowerName: [String: EKCalendar] = [:]
+        for cal in store.calendars(for: .reminder) where cal.allowsContentModifications {
+            calendarsByLowerName[cal.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = cal
+        }
+
+        func targetList(named rawName: String?) -> EKCalendar {
+            let trimmed = (rawName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return fallbackCalendar }
+            let lower = trimmed.lowercased()
+            if let existingCal = calendarsByLowerName[lower] {
+                return existingCal
+            }
+            let newCal = EKCalendar(for: .reminder, eventStore: store)
+            newCal.title = trimmed
+            newCal.source = fallbackCalendar.source
+            if (try? store.saveCalendar(newCal, commit: true)) != nil {
+                calendarsByLowerName[lower] = newCal
+                return newCal
+            }
+            return fallbackCalendar
+        }
+
+        var imported = 0
+        for rec in incoming {
+            let cleanTitle = rec.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanTitle.isEmpty else { continue }
+            let targetCal = targetList(named: rec.listName)
+            let sig = "\(targetCal.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(cleanTitle.lowercased())"
+            if existingSignatures.contains(sig) {
+                continue
+            }
+
+            let rem = EKReminder(eventStore: store)
+            rem.calendar = targetCal
+            rem.title = cleanTitle
+            rem.notes = rec.notes
+            rem.isCompleted = rec.isCompleted
+            rem.priority = rec.priority
+            if let dueMs = rec.dueEpochMillis {
+                let dueDate = Date(timeIntervalSince1970: TimeInterval(dueMs) / 1000.0)
+                rem.dueDateComponents = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute],
+                    from: dueDate
+                )
+            }
+            if (try? store.save(rem, commit: false)) != nil {
+                existingSignatures.insert(sig)
+                imported += 1
+            }
+        }
+
         if imported > 0 {
             do {
                 try store.commit()

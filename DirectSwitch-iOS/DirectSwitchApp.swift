@@ -10,6 +10,10 @@ import SwiftUI
 
 @main
 struct DirectSwitchApp: App {
+    init() {
+        iOSBackgroundTransferKeepAlive.shared.registerBackgroundTasks()
+    }
+
     var body: some Scene {
         WindowGroup {
             DirectSwitchMainView()

@@ -61,11 +61,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var speedMegabytesPerSec: Double = 0.0
     @Published var mergedContacts: Int = 0
     @Published var importedCalendars: Int = 0
+    @Published var importedReminders: Int = 0
     @Published var importedSms: Int = 0
+    @Published var savedLivePhotos: Int = 0
+    @Published var iCloudOptimizedSkippedHint: Int = 0
+    @Published var receivedPasswordsCsvCount: Int = 0
     @Published var skippedDuplicates: Int = 0
     @Published var gatedPreviewCount: Int = 0
     @Published var isSessionConnected: Bool = false
     @Published var isTransferring: Bool = false
+    @Published var isBackgroundKeepAliveActive: Bool = false
+    @Published var canResumeInterruptedTransfer: Bool = false
     @Published var currentItemName: String = ""
     @Published var isCompleted: Bool = false
     @Published var pendingNativeWhatsAppMigration: Bool = false
@@ -95,8 +101,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var requestedWhatsAppMigration: Bool = false
     private var manifestItems: [String: ManifestItem] = [:]
     private var completedItemIds: Set<String> = []
+    private var pendingLiveVideoTempURLs: [String: URL] = [:]
     private var transferredBytes: Int64 = 0
     private var transferStartDate: Date = Date()
+
+    private func cleanupPendingLiveVideos() {
+        for (_, url) in pendingLiveVideoTempURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
+        pendingLiveVideoTempURLs.removeAll()
+    }
 
     /// Aggancia automaticamente l'iPhone all'Hotspot 5GHz generato da Android nel QR Code.
     /// Se installato con Apple ID gratuito (`Free-Install.ipa`, privo della capability a pagamento `HotspotConfiguration`),
@@ -140,6 +154,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         handshakeAuthenticated = false
         manifestItems.removeAll()
         completedItemIds.removeAll()
+        cleanupPendingLiveVideos()
         peerName = ""
         peerPlatform = nil
         licenseTier = nil
@@ -150,12 +165,18 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         speedMegabytesPerSec = 0.0
         mergedContacts = 0
         importedCalendars = 0
+        importedReminders = 0
         importedSms = 0
+        savedLivePhotos = 0
+        iCloudOptimizedSkippedHint = 0
+        receivedPasswordsCsvCount = 0
         skippedDuplicates = 0
         gatedPreviewCount = 0
         transferredBytes = 0
         isSessionConnected = false
         isTransferring = false
+        isBackgroundKeepAliveActive = true
+        canResumeInterruptedTransfer = false
         currentItemName = ""
         isCompleted = false
         pendingNativeWhatsAppMigration = false
@@ -166,6 +187,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         receivedInstalledApps = []
         errorMessage = nil
 
+        iOSBackgroundTransferKeepAlive.shared.beginActiveSession(roleLabel: "Ricezione dati su questo iPhone")
         startHttpListener(port: port, advertiseBonjour: true)
 
         let ips = Self.localIPv4Addresses()
@@ -263,6 +285,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
     func stopReceiverServer() {
         UIApplication.shared.isIdleTimerDisabled = false
+        cleanupPendingLiveVideos()
         beaconBroadcastTask?.cancel()
         beaconBroadcastTask = nil
         listener?.cancel()
@@ -272,11 +295,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         bootstrapSecretToken = nil
         bootstrapPortalUrl = nil
         handshakeAuthenticated = false
+        if !isTransferring {
+            isBackgroundKeepAliveActive = false
+            iOSBackgroundTransferKeepAlive.shared.endActiveSession(completed: isCompleted)
+        }
     }
 
     func resetSession() {
         stopReceiverServer()
         stopUdpAutoDiscovery()
+        cleanupPendingLiveVideos()
         peerName = ""
         peerPlatform = nil
         licenseTier = nil
@@ -287,12 +315,18 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         speedMegabytesPerSec = 0.0
         mergedContacts = 0
         importedCalendars = 0
+        importedReminders = 0
         importedSms = 0
+        savedLivePhotos = 0
+        iCloudOptimizedSkippedHint = 0
+        receivedPasswordsCsvCount = 0
         skippedDuplicates = 0
         gatedPreviewCount = 0
         transferredBytes = 0
         isSessionConnected = false
         isTransferring = false
+        isBackgroundKeepAliveActive = false
+        canResumeInterruptedTransfer = false
         currentItemName = ""
         isCompleted = false
         pendingNativeWhatsAppMigration = false
@@ -303,6 +337,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         receivedInstalledApps = []
         errorMessage = nil
         statusLabel = "Pronto al trasferimento diretto"
+        iOSBackgroundTransferKeepAlive.shared.endActiveSession(completed: false)
     }
 
     /// Apre direttamente la schermata di DirectSwitch nelle Impostazioni iOS (dove attivare lo switch «Rete locale»).
@@ -403,7 +438,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         }
                         state.headersParsed = true
 
-                        let isStreamingItem = state.method == "PUT" && state.path.hasPrefix("/v1/item/")
+                        let isStreamingItem = state.method == "PUT"
+                            && (state.path.hasPrefix("/v1/item/") || state.path.hasPrefix("/v1/item-live-video/"))
                         let maxAllowed = isStreamingItem ? Self.maxStreamItemBytes : Self.maxControlBodyBytes
                         if state.expectedBodyLength < 0 || state.expectedBodyLength > maxAllowed {
                             state.cleanupTempFile()
@@ -698,6 +734,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 _ = await iOSCalendarMigrator.requestAccessIfNeeded()
             }
             let insCal = fullAllowed ? iOSCalendarMigrator.importEvents(manifest.calendarsPayload) : 0
+
+            let incomingReminders = manifest.remindersPayload ?? []
+            if fullAllowed && !incomingReminders.isEmpty {
+                _ = await iOSRemindersMigrator.requestAccessIfNeeded()
+            }
+            let insRem = fullAllowed ? await iOSRemindersMigrator.importReminders(incomingReminders) : 0
             let insSms = fullAllowed ? iOSSmsArchiveStore.saveIncomingSmsArchive(manifest.smsPayload) : 0
 
             let (tierFiltered, gated) = LicensePolicyEvaluator.filterItemsForTier(manifest.items, tier: currentTier)
@@ -717,12 +759,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             let totalSkipped = skipContacts + skippedMediaDuplicates
-            totalItems = acceptedItems.count
-            totalBytesCount = acceptedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
-            mergedContacts = insContacts
+            let previouslyCompletedInSession = completedItemIds.count
+            completedItems = previouslyCompletedInSession
+            totalItems = previouslyCompletedInSession + acceptedItems.count
+            totalBytesCount = transferredBytes + acceptedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            mergedContacts += insContacts
             contactsAlreadyPresentCount = skipContacts
-            importedCalendars = insCal
-            importedSms = insSms
+            importedCalendars += insCal
+            importedReminders += insRem
+            importedSms += insSms
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
             receivedInstalledApps = fullAllowed ? (manifest.installedAppsPayload ?? []) : []
@@ -730,10 +775,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let resp = ManifestResponse(
                 acceptedItemIds: acceptedItems.map(\.id),
                 skippedDuplicateCount: totalSkipped,
-                contactsMergedCount: insContacts,
+                contactsMergedCount: mergedContacts,
                 contactsSkippedDuplicates: skipContacts,
-                calendarsImportedCount: insCal,
-                smsImportedCount: insSms,
+                calendarsImportedCount: importedCalendars,
+                remindersImportedCount: importedReminders,
+                smsImportedCount: importedSms,
                 gatedByCrossOsPreviewCount: gated
             )
             if let encoded = try? JSONEncoder().encode(resp),
@@ -743,8 +789,52 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             return
         }
 
+        // Componente video accoppiata (.MOV) di una Live Photo iPhone -> iPhone
+        if method == "PUT" && path.hasPrefix("/v1/item-live-video/") {
+            let itemId = String(path.dropFirst("/v1/item-live-video/".count))
+            guard let item = manifestItems[itemId], let encryptedFileURL = bodyFileURL else {
+                sendPlainJson(connection: connection, status: 404, json: #"{"error":"item_not_found"}"#)
+                return
+            }
+            let rawLiveExt = URL(fileURLWithPath: item.livePhotoVideoFileName ?? "live.mov").pathExtension
+            let liveExt = rawLiveExt.isEmpty ? "mov" : rawLiveExt
+            let tempLivePlainURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ds_live_dec_\(UUID().uuidString).\(liveExt)")
+
+            let decryptResult = await Task.detached(priority: .userInitiated) {
+                try? DirectSwitchCrypto.decryptFileCSGCM1(inputURL: encryptedFileURL, outputURL: tempLivePlainURL, key: key)
+            }.value
+
+            guard let (plainBytes, actualSha) = decryptResult else {
+                try? FileManager.default.removeItem(at: tempLivePlainURL)
+                sendPlainJson(connection: connection, status: 401, json: #"{"error":"csgcm1_decrypt_failed"}"#)
+                return
+            }
+
+            let expectedLen = Int64(headers["x-ds-plain-length"] ?? "")
+            let expectedSha = headers["x-ds-sha256"]?.lowercased()
+            if (expectedLen != nil && plainBytes != expectedLen) || (expectedSha != nil && expectedSha != actualSha) {
+                try? FileManager.default.removeItem(at: tempLivePlainURL)
+                sendPlainJson(connection: connection, status: 422, json: #"{"error":"sha256_or_length_mismatch"}"#)
+                return
+            }
+
+            if let prev = pendingLiveVideoTempURLs[itemId] {
+                try? FileManager.default.removeItem(at: prev)
+            }
+            pendingLiveVideoTempURLs[itemId] = tempLivePlainURL
+            sendPlainJson(connection: connection, status: 200, json: #"{"ok":true}"#)
+            return
+        }
+
         if method == "PUT" && path.hasPrefix("/v1/item/") {
             let itemId = String(path.dropFirst("/v1/item/".count))
+            let pairedLiveURL = pendingLiveVideoTempURLs.removeValue(forKey: itemId)
+            defer {
+                if let pairedLiveURL {
+                    try? FileManager.default.removeItem(at: pairedLiveURL)
+                }
+            }
             guard let item = manifestItems[itemId], let encryptedFileURL = bodyFileURL else {
                 sendPlainJson(connection: connection, status: 404, json: #"{"error":"item_not_found"}"#)
                 return
@@ -774,11 +864,22 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let savedOk: Bool
             var saveErrorCode: String? = nil
             if item.category == .PHOTOS || item.category == .VIDEOS {
-                let res = await iOSPhotoKitMigrator.saveMediaFileToLibraryWithReason(item: item, fileURL: tempPlainURL)
+                let res = await iOSPhotoKitMigrator.saveMediaFileToLibraryWithReason(
+                    item: item,
+                    fileURL: tempPlainURL,
+                    pairedLiveVideoURL: pairedLiveURL
+                )
                 savedOk = res.saved
                 saveErrorCode = res.errorCode
+                if res.savedAsLivePhoto {
+                    savedLivePhotos += 1
+                }
             } else {
+                let isPasswordsCsv = iOSDocumentsSandboxBridge.isPasswordsCsvFile(item.fileName)
                 savedOk = iOSDocumentsSandboxBridge.saveDocumentFile(item: item, sourceFileURL: tempPlainURL)
+                if savedOk && isPasswordsCsv {
+                    receivedPasswordsCsvCount += 1
+                }
             }
             guard savedOk else {
                 if saveErrorCode == "photo_permission_denied" {
@@ -798,6 +899,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let elapsed = max(0.25, Date().timeIntervalSince(transferStartDate))
             speedMegabytesPerSec = (Double(transferredBytes) / (1024.0 * 1024.0)) / elapsed
             statusLabel = "Ricevuto \(item.fileName) (\(completedItems)/\(totalItems))"
+            let pct = totalItems > 0 ? Int((Double(completedItems) / Double(totalItems)) * 100.0) : 50
+            iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: statusLabel)
             sendPlainJson(connection: connection, status: 200, json: #"{"ok":true}"#)
             return
         }
@@ -809,11 +912,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     return
                 }
             }
+            cleanupPendingLiveVideos()
             isTransferring = false
+            isBackgroundKeepAliveActive = false
             currentItemName = ""
             pendingNativeWhatsAppMigration = requestedWhatsAppMigration
             isCompleted = true
             statusLabel = "Trasferimento su iPhone completato!"
+            iOSBackgroundTransferKeepAlive.shared.endActiveSession(
+                completed: true,
+                completionSummary: "Ricevuti \(completedItems) file e \(mergedContacts) contatti su questo iPhone."
+            )
             let elapsedMs = Int64(max(1.0, Date().timeIntervalSince(transferStartDate) * 1000.0))
             let report = TransferCompletionReport(
                 sessionId: activeSessionId,
@@ -822,6 +931,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 transferredBytes: transferredBytes,
                 mergedContactsCount: mergedContacts,
                 importedCalendarsCount: importedCalendars,
+                remindersImportedCount: importedReminders,
+                livePhotosSavedCount: savedLivePhotos,
                 importedSmsCount: importedSms,
                 skippedDuplicatesCount: skippedDuplicates,
                 elapsedMillis: elapsedMs
@@ -1012,20 +1123,23 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         )
     }
 
-    /// Modalità Mittente (iPhone -> Android oppure iPhone -> iPhone) con cifratura e upload streaming su disco.
+    /// Modalità Mittente (iPhone -> Android oppure iPhone -> iPhone) con cifratura, Live Photos, Promemoria, Keep-Alive in background e Resume automatico.
     func executeSenderTransfer(
         qrPayload: QrPairingPayload,
         includeContacts: Bool,
         includePhotos: Bool = true,
         includeVideos: Bool = true,
         includeCalendars: Bool,
+        includeReminders: Bool = true,
         includeDocuments: Bool = true,
         includeWhatsAppVault: Bool = true,
         pickedDocuments: [(ManifestItem, URL)] = []
     ) async {
+        var didAuthenticateSession = false
         do {
             errorMessage = nil
             needsLocalNetworkRedirect = false
+            canResumeInterruptedTransfer = false
             failedItemsCount = 0
             contactsAlreadyPresentCount = 0
             receivedInstalledApps = []
@@ -1033,6 +1147,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             pendingNativeWhatsAppMigration = false
             isSessionConnected = true
             isTransferring = true
+            isBackgroundKeepAliveActive = true
             currentItemName = ""
             peerName = qrPayload.receiverName
             peerPlatform = qrPayload.receiverPlatform
@@ -1043,13 +1158,25 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             speedMegabytesPerSec = 0.0
             mergedContacts = 0
             importedCalendars = 0
+            importedReminders = 0
             importedSms = 0
+            savedLivePhotos = 0
+            iCloudOptimizedSkippedHint = 0
+            receivedPasswordsCsvCount = 0
             skippedDuplicates = 0
             gatedPreviewCount = 0
             UIApplication.shared.isIdleTimerDisabled = true
+            iOSBackgroundTransferKeepAlive.shared.beginActiveSession(
+                roleLabel: "Invio dati a \(qrPayload.receiverName)"
+            )
             defer {
                 isTransferring = false
+                isBackgroundKeepAliveActive = false
                 UIApplication.shared.isIdleTimerDisabled = false
+                iOSBackgroundTransferKeepAlive.shared.endActiveSession(
+                    completed: isCompleted,
+                    completionSummary: isCompleted ? "Trasferimento completato verso \(peerName)." : nil
+                )
             }
 
             let hotspotFallbackHint = await joinAndroidHotspotIfPresent(payload: qrPayload)
@@ -1068,13 +1195,18 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             if includeContacts { _ = await iOSContactsSmartMerger.requestAccessIfNeeded() }
             if includeCalendars { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
+            if includeReminders { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
 
             let contacts = includeContacts ? iOSContactsSmartMerger.readAllContacts() : []
             let calendars = includeCalendars ? iOSCalendarMigrator.readEvents() : []
-            let scannedAssets = await iOSPhotoKitMigrator.scanLibraryAssets(
+            let reminders = includeReminders ? await iOSRemindersMigrator.readReminders() : []
+            let scanResult = await iOSPhotoKitMigrator.scanLibraryAssetsWithMetadata(
                 includePhotos: includePhotos,
                 includeVideos: includeVideos
             )
+            let scannedAssets = scanResult.items
+            iCloudOptimizedSkippedHint = scanResult.iCloudOptimizedCount
+
             let filteredPickedDocs = pickedDocuments.filter { pair in
                 switch pair.0.category {
                 case .WHATSAPP_VAULT: return includeWhatsAppVault
@@ -1106,6 +1238,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 statusLabel = "Trasferimento annullato: spazio insufficiente sul ricevente."
                 return
             }
+            didAuthenticateSession = true
 
             let wantNativeWa = includeWhatsAppVault && LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
             let manifest = TransferManifest(
@@ -1114,6 +1247,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 items: allItems,
                 contactsPayload: contacts,
                 calendarsPayload: calendars,
+                remindersPayload: reminders.isEmpty ? nil : reminders,
                 requestNativeWhatsAppMigration: wantNativeWa
             )
             let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
@@ -1121,6 +1255,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             mergedContacts = mfResp.contactsMergedCount
             contactsAlreadyPresentCount = mfResp.contactsSkippedDuplicates
             importedCalendars = mfResp.calendarsImportedCount
+            importedReminders = mfResp.remindersImportedCount ?? 0
             importedSms = mfResp.smsImportedCount
             skippedDuplicates = mfResp.skippedDuplicateCount
             gatedPreviewCount = mfResp.gatedByCrossOsPreviewCount
@@ -1144,7 +1279,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let uploadSession = URLSession(configuration: uploadConfig)
             defer { uploadSession.finishTasksAndInvalidate() }
 
-            // 1. Upload streaming Foto & Video 4K (con retry per singolo file e avanzamento resiliente: 1 foto illeggibile non blocca mai le altre!)
+            // 1. Upload streaming Foto, Live Photos (.HEIC + .MOV) & Video 4K
             for (item, phAsset) in assetsToUpload {
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
@@ -1153,6 +1288,21 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     continue
                 }
                 defer { try? FileManager.default.removeItem(at: plainTempURL) }
+
+                // Se il destinatario è un altro iPhone e lo scatto è una Live Photo, invia prima la clip .MOV accoppiata (best-effort)
+                if hsResp.receiverPlatform == .IOS && item.isLivePhoto == true {
+                    if let liveTempURL = await iOSPhotoKitMigrator.exportLivePairedVideoToTempFile(phAsset) {
+                        defer { try? FileManager.default.removeItem(at: liveTempURL) }
+                        _ = try? await encryptAndStreamToEndpoint(
+                            endpointPath: "/v1/item-live-video/\(item.id)",
+                            itemLabel: item.livePhotoVideoFileName ?? item.fileName,
+                            plainFileURL: liveTempURL,
+                            baseUrl: baseUrl,
+                            key: key,
+                            session: uploadSession
+                        )
+                    }
+                }
 
                 var itemUploadedBytes: Int64? = nil
                 var fatalPermissionError: Error? = nil
@@ -1187,12 +1337,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     transferredBytesCount = uploadedBytes
                     let elapsed = max(0.25, Date().timeIntervalSince(startTime))
                     speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                    let pct = totalItems > 0 ? Int((Double(completedItems) / Double(totalItems)) * 100.0) : 50
+                    iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: statusLabel)
                 } else {
                     failedItemsCount += 1
                 }
             }
 
-            // 2. Upload streaming Documenti & Archivi WhatsApp selezionati dall'utente o ricevuti da Share Sheet
+            // 2. Upload streaming Documenti, Cartelle «Su iPhone», Password .csv & Archivi WhatsApp
+            var succeededDocURLs: [URL] = []
             for (item, docURL) in docsToUpload {
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
@@ -1218,8 +1371,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     completedItems += 1
                     uploadedBytes += sentBytes
                     transferredBytesCount = uploadedBytes
+                    succeededDocURLs.append(docURL)
                     let elapsed = max(0.25, Date().timeIntervalSince(startTime))
                     speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                    let pct = totalItems > 0 ? Int((Double(completedItems) / Double(totalItems)) * 100.0) : 50
+                    iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: statusLabel)
                 } else {
                     failedItemsCount += 1
                 }
@@ -1233,23 +1389,49 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if let report = try? JSONDecoder().decode(TransferCompletionReport.self, from: completeData) {
                 mergedContacts = report.mergedContactsCount
                 importedCalendars = report.importedCalendarsCount
+                if let rem = report.remindersImportedCount { importedReminders = rem }
+                if let live = report.livePhotosSavedCount { savedLivePhotos = live }
                 importedSms = report.importedSmsCount
                 skippedDuplicates = report.skippedDuplicatesCount
             }
-            for (_, docURL) in docsToUpload {
+            for docURL in succeededDocURLs {
                 try? FileManager.default.removeItem(at: docURL)
             }
             currentItemName = ""
+            if failedItemsCount > 0 {
+                canResumeInterruptedTransfer = true
+            }
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
             pendingNativeWhatsAppMigration = wantNativeWa
             isCompleted = true
         } catch {
+            if didAuthenticateSession {
+                canResumeInterruptedTransfer = true
+            }
             errorMessage = error.localizedDescription
         }
     }
 
     private func encryptAndStreamFileItem(
         item: ManifestItem,
+        plainFileURL: URL,
+        baseUrl: String,
+        key: SymmetricKey,
+        session: URLSession
+    ) async throws -> Int64 {
+        try await encryptAndStreamToEndpoint(
+            endpointPath: "/v1/item/\(item.id)",
+            itemLabel: item.fileName,
+            plainFileURL: plainFileURL,
+            baseUrl: baseUrl,
+            key: key,
+            session: session
+        )
+    }
+
+    private func encryptAndStreamToEndpoint(
+        endpointPath: String,
+        itemLabel: String,
         plainFileURL: URL,
         baseUrl: String,
         key: SymmetricKey,
@@ -1265,7 +1447,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             try DirectSwitchCrypto.encryptFileCSGCM1(inputURL: plainFileURL, outputURL: tempEncURL, key: key)
         }.value
 
-        guard let putUrl = URL(string: "\(baseUrl)/v1/item/\(item.id)") else {
+        guard let putUrl = URL(string: "\(baseUrl)\(endpointPath)") else {
             throw NSError(domain: "DirectSwitch", code: -13, userInfo: [NSLocalizedDescriptionKey: "URL upload non valido"])
         }
         let encAttrs = try? FileManager.default.attributesOfItem(atPath: tempEncURL.path)
@@ -1283,7 +1465,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
         let (_, resp) = try await session.upload(for: putReq, fromFile: tempEncURL)
         guard let httpResp = resp as? HTTPURLResponse else {
-            throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(item.fileName)"])
+            throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(itemLabel)"])
         }
         if httpResp.statusCode == 403 {
             throw NSError(
@@ -1295,7 +1477,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             )
         }
         guard httpResp.statusCode == 200 else {
-            throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(item.fileName) (HTTP \(httpResp.statusCode))"])
+            throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(itemLabel) (HTTP \(httpResp.statusCode))"])
         }
         return plainBytes
     }

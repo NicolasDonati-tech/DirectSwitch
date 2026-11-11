@@ -35,6 +35,7 @@ struct SendConnectStepView: View {
     var onOpenAppSettings: () -> Void
 
     @State private var showManualField: Bool = false
+    @State private var showWifiQrSheet: Bool = false
 
     private var headerTitle: String {
         "Invia"
@@ -276,6 +277,23 @@ struct SendConnectStepView: View {
                 }
                 .appleCard()
 
+                // Card 3: Condividi Wi-Fi via QR (per collegare subito il nuovo iPhone al Wi-Fi senza iCloud)
+                HStack(spacing: 12) {
+                    AppleSettingsIcon(systemName: "wifi.circle.fill", color: AppleTheme.teal)
+                    Button(action: { showWifiQrSheet = true }) {
+                        Text("Condividi Wi-Fi al nuovo telefono via QR")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    InfoCircleButton(
+                        title: "Condividi Wi-Fi senza iCloud",
+                        message: "Se il nuovo iPhone non è ancora collegato al tuo Wi-Fi di casa, genera qui un codice QR Wi-Fi standard: basterà inquadrarlo con l'app Fotocamera del nuovo iPhone per connetterlo in 1 tocco senza digitare la password."
+                    )
+                }
+                .appleCard(padding: 13)
+
                 if let err = errorNote, !err.isEmpty, !(isLocalNetworkDenied || needsLocalNetworkRedirect) {
                     HStack(spacing: 10) {
                         Image(systemName: "exclamationmark.circle.fill")
@@ -291,11 +309,116 @@ struct SendConnectStepView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
+        .sheet(isPresented: $showWifiQrSheet) {
+            WiFiShareQrSheetView()
+        }
         .onAppear {
             if selectedBeacon == nil, let first = discoveredBeacons.first {
                 selectedBeacon = first
             }
         }
+    }
+}
+
+// MARK: - Generatore QR Wi-Fi standard (inquadrabile dalla Fotocamera nativa iOS senza iCloud)
+
+private struct WiFiShareQrSheetView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var ssid: String = ""
+    @State private var password: String = ""
+
+    private static func escapeWifiField(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: ";", with: "\\;")
+            .replacingOccurrences(of: ",", with: "\\,")
+            .replacingOccurrences(of: ":", with: "\\:")
+    }
+
+    private var wifiPayload: String {
+        let s = Self.escapeWifiField(ssid.trimmingCharacters(in: .whitespacesAndNewlines))
+        let p = Self.escapeWifiField(password)
+        if p.isEmpty {
+            return "WIFI:T:nopass;S:\(s);;"
+        }
+        return "WIFI:T:WPA;S:\(s);P:\(p);;"
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("QR Wi-Fi Rapido")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
+                Button("Chiudi") { dismiss() }
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(AppleTheme.blue)
+            }
+            .padding(.top, 6)
+
+            Text("Inserisci il nome della rete Wi-Fi e la password: sul nuovo iPhone apri l'app Fotocamera e inquadra il QR per collegarti subito.")
+                .font(.system(size: 13))
+                .foregroundColor(AppleTheme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(spacing: 10) {
+                TextField("Nome rete Wi-Fi (SSID)", text: $ssid)
+                    .font(.system(size: 15))
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .padding(.horizontal, 12)
+                    .frame(height: 44)
+                    .background(AppleTheme.inputSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                SecureField("Password Wi-Fi", text: $password)
+                    .font(.system(size: 15))
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .padding(.horizontal, 12)
+                    .frame(height: 44)
+                    .background(AppleTheme.inputSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            if !ssid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let qrImg = DirectSwitchUIHelpers.generateQrImage(from: wifiPayload) {
+                Image(uiImage: qrImg)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 190, height: 190)
+                    .padding(12)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(AppleTheme.cardBorder, lineWidth: 0.8)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(AppleTheme.inputSurface)
+                    .frame(width: 190, height: 190)
+                    .overlay(
+                        VStack(spacing: 8) {
+                            Image(systemName: "qrcode")
+                                .font(.system(size: 36))
+                                .foregroundColor(AppleTheme.textTertiary)
+                            Text("Digita il nome Wi-Fi")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(AppleTheme.textTertiary)
+                        }
+                    )
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .background(AppleTheme.backgroundGradient.ignoresSafeArea())
+        .presentationDetents([.height(470), .large])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.light)
     }
 }
 
@@ -312,6 +435,7 @@ struct SendCategoriesStepView: View {
     @Binding var includePhotos: Bool
     @Binding var includeVideos: Bool
     @Binding var includeCalendars: Bool
+    @Binding var includeReminders: Bool
     @Binding var includeDocuments: Bool
     @Binding var includeWhatsApp: Bool
 
@@ -326,15 +450,15 @@ struct SendCategoriesStepView: View {
 
     private var hasAnyPermissionDenied: Bool {
         guard let s = scanSummary else { return false }
-        return s.contactsDenied || s.photosDenied || s.calendarsDenied
+        return s.contactsDenied || s.photosDenied || s.calendarsDenied || s.remindersDenied
     }
 
     private var allSelected: Bool {
-        includeContacts && includePhotos && includeVideos && includeCalendars && includeDocuments && includeWhatsApp
+        includeContacts && includePhotos && includeVideos && includeCalendars && includeReminders && includeDocuments && includeWhatsApp
     }
 
     private var anySelected: Bool {
-        includeContacts || includePhotos || includeVideos || includeCalendars || includeDocuments || includeWhatsApp
+        includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeDocuments || includeWhatsApp
     }
 
     private var isCrossOs: Bool {
@@ -367,6 +491,7 @@ struct SendCategoriesStepView: View {
                         includePhotos = target
                         includeVideos = target
                         includeCalendars = target
+                        includeReminders = target
                         includeDocuments = target
                         includeWhatsApp = target
                     }) {
@@ -487,7 +612,7 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.blue,
                         title: "Rubrica contatti",
                         countBadge: badgeForCount(scanSummary?.contactsCount, unit: "contatti"),
-                        infoMessage: "Trasferisce tutti i contatti con numeri di telefono, email e note unendo eventuali duplicati.",
+                        infoMessage: "Trasferisce tutti i contatti completi di foto profilo, compleanni, indirizzi di casa/lavoro, azienda, siti web ed etichette dei numeri unendo eventuali duplicati.",
                         isOn: $includeContacts
                     )
 
@@ -496,9 +621,13 @@ struct SendCategoriesStepView: View {
                     CleanCategoryToggleRow(
                         icon: "photo.fill",
                         iconColor: AppleTheme.orange,
-                        title: "Foto e Album",
-                        countBadge: badgeForMedia(count: scanSummary?.photosCount, bytes: scanSummary?.photosBytes, unit: "foto"),
-                        infoMessage: "Copia tutte le foto nella qualità originale preservando data di scatto, posizione GPS e album.",
+                        title: "Foto, Live Photos e Album",
+                        countBadge: badgeForPhotos(
+                            count: scanSummary?.photosCount,
+                            liveCount: scanSummary?.livePhotosCount,
+                            bytes: scanSummary?.photosBytes
+                        ),
+                        infoMessage: "Copia tutte le foto nella qualità originale HEIC/RAW preservando Live Photos animate (.HEIC + .MOV), Preferiti (❤️), data di scatto, posizione GPS e Album utente.",
                         isOn: $includePhotos
                     )
 
@@ -509,7 +638,7 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.red,
                         title: "Video originali",
                         countBadge: badgeForMedia(count: scanSummary?.videosCount, bytes: scanSummary?.videosBytes, unit: "video"),
-                        infoMessage: "Copia tutti i video in risoluzione originale (inclusi 4K 60fps) senza compressione.",
+                        infoMessage: "Copia tutti i video in risoluzione originale (inclusi 4K 60fps e Slow-Motion) in streaming su disco senza compressione.",
                         isOn: $includeVideos
                     )
 
@@ -520,8 +649,19 @@ struct SendCategoriesStepView: View {
                         iconColor: AppleTheme.slate,
                         title: "Calendari",
                         countBadge: badgeForCount(scanSummary?.calendarEventsCount, unit: "eventi"),
-                        infoMessage: "Importa tutti gli appuntamenti, promemoria ed eventi del calendario.",
+                        infoMessage: "Importa lo storico completo degli appuntamenti (-10/+10 anni) con ricorrenze annuali/settimanali e avvisi.",
                         isOn: $includeCalendars
+                    )
+
+                    Divider().padding(.leading, 58)
+
+                    CleanCategoryToggleRow(
+                        icon: "checklist",
+                        iconColor: AppleTheme.blue,
+                        title: "Promemoria",
+                        countBadge: badgeForCount(scanSummary?.remindersCount, unit: "promemoria"),
+                        infoMessage: "Trasferisce le tue liste di Promemoria Apple con scadenze, note, priorità e stato di completamento senza usare iCloud.",
+                        isOn: $includeReminders
                     )
 
                     Divider().padding(.leading, 58)
@@ -529,9 +669,9 @@ struct SendCategoriesStepView: View {
                     CleanCategoryToggleRow(
                         icon: "doc.fill",
                         iconColor: AppleTheme.teal,
-                        title: "Documenti e File",
-                        countBadge: docsCount > 0 ? "\(docsCount) file selezionati" : "Da app File",
-                        infoMessage: "Trasferisce i documenti, PDF e cartelle selezionati dall'app File di iPhone.",
+                        title: "Documenti, Cartelle e Password",
+                        countBadge: docsCount > 0 ? "\(docsCount) file pronti" : "File e Cartelle",
+                        infoMessage: "Trasferisce documenti, PDF, Memo Vocali salvati in File, intere cartelle «Su iPhone» (mantenendo tutte le sottocartelle) e file Password .csv esportati.",
                         isOn: $includeDocuments
                     )
 
@@ -545,8 +685,8 @@ struct SendCategoriesStepView: View {
                             ? "Cronologia QR + \(whatsAppCount) .zip"
                             : (isCrossOs ? "Senza cavo via QR (Android Switch)" : "Cronologia diretta via QR"),
                         infoMessage: isCrossOs
-                            ? "Al termine della copia, DirectSwitch apre automaticamente il modulo Android Switch senza cavo sul telefono Android per mostrare il codice QR: su questo iPhone ti basterà aprire WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadrare il QR. Eventuali archivi .zip allegati vengono trasferiti insieme ai file."
-                            : "Al termine della copia, DirectSwitch ti guida a trasferire l'intera cronologia chat sul nuovo iPhone senza usare spazio iCloud: sul nuovo iPhone inserisci il tuo numero in WhatsApp e inquadra il codice QR da questo iPhone (Impostazioni → Chat → Trasferisci chat su iPhone).",
+                            ? "Al termine della copia, DirectSwitch apre automaticamente il modulo Android Switch senza cavo sul telefono Android per mostrare il codice QR: su questo iPhone ti basterà aprire WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadrare il QR."
+                            : "Al termine della copia, DirectSwitch ti guida passo-passo a trasferire il 100% di chat, foto e vocali sul nuovo iPhone via Wi-Fi diretto senza usare 1 MB di iCloud.",
                         isOn: $includeWhatsApp
                     )
                 }
@@ -554,21 +694,21 @@ struct SendCategoriesStepView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Documenti o archivi extra da allegare")
+                        Text("Cartelle «Su iPhone», File o Password .csv")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
                         Spacer()
                         InfoCircleButton(
-                            title: "Documenti e archivi opzionali",
-                            message: "• L'intera cronologia chat di WhatsApp viene trasferita senza cavo tramite codice QR al termine della copia.\n• Qui puoi inoltre allegare PDF, cartelle dall'app File o singoli archivi .zip esportati."
+                            title: "Cartelle «Su iPhone» e Password senza iCloud",
+                            message: "• Puoi selezionare singoli file oppure INTERE CARTELLE da «Su iPhone» nell'app File (inclusi Memo Vocali salvati in File e PDF): DirectSwitch ricrea automaticamente tutte le sottocartelle sul nuovo iPhone.\n\n• Vuoi passare anche le Password salvate senza Portachiavi iCloud? Apri Impostazioni → App → Password (o Safari) → Esporta password (.csv), salva il file e allegalo qui: sul nuovo iPhone comparirà il tasto rapido per reimportarle tutte!"
                         )
                     }
 
                     AppleSecondaryButton(
                         title: pickedDocuments.isEmpty
-                            ? "Scegli da File o allega .zip WhatsApp"
-                            : "Aggiungi altri file (\(pickedDocuments.count) pronti)",
-                        icon: "plus.circle.fill",
+                            ? "Scegli file, cartelle «Su iPhone» o Password .csv"
+                            : "Aggiungi altri file o cartelle (\(pickedDocuments.count) pronti)",
+                        icon: "folder.badge.plus",
                         tint: AppleTheme.blue,
                         action: onAddFilesOrWhatsApp
                     )
@@ -589,16 +729,16 @@ struct SendCategoriesStepView: View {
                 }
                 .appleCard(padding: 14)
 
-                // Card informativa pulita: App, Account Mail e Impostazioni (confronto con Passa a Android / Passa a iOS)
+                // Card informativa pulita: App, Account Mail, Password e Background
                 HStack(spacing: 12) {
                     AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.slate)
-                    Text("App, Account Mail e Impostazioni")
+                    Text("App, Mail, Password e Background")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(AppleTheme.textPrimary)
                     Spacer()
                     InfoCircleButton(
-                        title: "App, Mail e Impostazioni",
-                        message: "Come funziona rispetto a «Passa a Android» / «Passa a iOS»:\n\n• App installate: né Android Switch né Passa a iOS copiano gli eseguibili .ipa/.apk (incompatibili tra sistemi), ma riscaricano le app dallo Store. Da Android, DirectSwitch invia automaticamente il catalogo delle tue app con link 1-tap allo Store; da iPhone, Apple blocca per privacy la lettura delle altre app installate.\n\n• Account Mail (Gmail, iCloud, Outlook, PEC): per sicurezza i token e le password del Portachiavi Apple non sono esportabili da nessuna app senza riautenticazione. A fine copia trovi sul ricevente il pulsante rapido «Configura Account Mail».\n\n• Impostazioni telefono (Wi-Fi, Face ID, Sveglie, Home): sono riservate al reset di fabbrica iniziale. DirectSwitch invece unisce tutti i tuoi dati personali su telefoni già configurati senza cancellare nulla!"
+                        title: "Passaggio completo senza iCloud",
+                        message: "• App senza iCloud: al termine della copia, sul nuovo iPhone trovi il pulsante diretto ad App Store («App → Non su questo iPhone») che elenca gratuitamente il 100% delle tue app legate all'ID Apple (0 GB su iCloud) più i pulsanti rapidi 1-tap per le app principali.\n\n• Account Mail e Password: sul nuovo iPhone trovi i collegamenti rapidi 1-tap per Gmail, Outlook, Yahoo e Apple Mail, e il supporto all'importazione del file Password (.csv).\n\n• Esecuzione in Background e Resume: DirectSwitch mantiene attivo il trasferimento anche se passi brevemente a un'altra app o ricevi una chiamata, avvisandoti con una notifica se iOS sta per mettere in pausa il Wi-Fi e riprendendo esattamente dal file interrotto!"
                     )
                 }
                 .appleCard(padding: 14)
@@ -626,6 +766,15 @@ struct SendCategoriesStepView: View {
     private func badgeForCount(_ count: Int?, unit: String) -> String? {
         guard let c = count, c > 0 else { return nil }
         return "\(c) \(unit)"
+    }
+
+    private func badgeForPhotos(count: Int?, liveCount: Int?, bytes: Int64?) -> String? {
+        guard let c = count, c > 0 else { return nil }
+        let livePart = (liveCount ?? 0) > 0 ? " (\(liveCount!) Live)" : ""
+        if let b = bytes, b > 0 {
+            return "\(c) foto\(livePart) • \(DirectSwitchUIHelpers.formatBytes(b))"
+        }
+        return "\(c) foto\(livePart)"
     }
 
     private func badgeForMedia(count: Int?, bytes: Int64?, unit: String) -> String? {

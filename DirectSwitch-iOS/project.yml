@@ -44,20 +44,32 @@ targets:
         NSCalendarsUsageDescription: "DirectSwitch trasferisce gli appuntamenti del Calendario sul nuovo telefono."
         NSCalendarsFullAccessUsageDescription: "DirectSwitch legge e importa gli appuntamenti del Calendario evitando eventi duplicati sul nuovo telefono."
         NSCalendarsWriteOnlyAccessUsageDescription: "DirectSwitch salva gli appuntamenti ricevuti nel Calendario del nuovo telefono."
+        NSRemindersUsageDescription: "DirectSwitch trasferisce le liste e i promemoria sul nuovo iPhone senza usare iCloud."
+        NSRemindersFullAccessUsageDescription: "DirectSwitch legge e importa tutti i promemoria sul nuovo iPhone evitando duplicati."
         NSCameraUsageDescription: "DirectSwitch utilizza la fotocamera per inquadrare il codice QR del telefono ricevente."
+        UIBackgroundModes:
+          - processing
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.directswitch.ios.transfer.keepalive
         LSApplicationQueriesSchemes:
           - com.cloudsave.ios
           - whatsapp
           - whatsapp-smb
+          - googlegmail
+          - ms-outlook
+          - ymail
         CFBundleDocumentTypes:
-          - CFBundleTypeName: "Archivio WhatsApp o Documento DirectSwitch"
+          - CFBundleTypeName: "Archivio WhatsApp, Cartella o Documento DirectSwitch"
             LSHandlerRank: Alternate
             LSItemContentTypes:
               - public.zip-archive
               - com.pkware.zip-archive
               - com.adobe.pdf
+              - public.comma-separated-values-text
               - public.plain-text
               - public.text
+              - public.audio
               - public.data
               - public.content
         CFBundleURLTypes:

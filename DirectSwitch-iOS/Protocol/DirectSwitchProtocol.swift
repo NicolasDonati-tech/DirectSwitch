@@ -142,6 +142,20 @@ struct HandshakeResponse: Codable, Sendable {
     let statusMessage: String
 }
 
+struct LabeledValueRecord: Codable, Equatable, Sendable {
+    let label: String
+    let value: String
+}
+
+struct PostalAddressTransferRecord: Codable, Equatable, Sendable {
+    var label: String? = nil
+    var street: String = ""
+    var city: String = ""
+    var state: String = ""
+    var postalCode: String = ""
+    var country: String = ""
+}
+
 struct ContactTransferRecord: Codable, Identifiable, Sendable {
     let id: String
     let displayName: String
@@ -149,6 +163,18 @@ struct ContactTransferRecord: Codable, Identifiable, Sendable {
     var emails: [String] = []
     var organization: String? = nil
     var note: String? = nil
+    var givenName: String? = nil
+    var familyName: String? = nil
+    var nickname: String? = nil
+    var jobTitle: String? = nil
+    var birthdayYear: Int? = nil
+    var birthdayMonth: Int? = nil
+    var birthdayDay: Int? = nil
+    var labeledPhones: [LabeledValueRecord]? = nil
+    var labeledEmails: [LabeledValueRecord]? = nil
+    var urls: [String]? = nil
+    var postalAddresses: [PostalAddressTransferRecord]? = nil
+    var avatarJpegBase64: String? = nil
 }
 
 struct CalendarEventRecord: Codable, Identifiable, Sendable {
@@ -160,6 +186,20 @@ struct CalendarEventRecord: Codable, Identifiable, Sendable {
     let endEpochMillis: Int64
     var allDay: Bool = false
     var rrule: String? = nil
+    var calendarTitle: String? = nil
+    var recurrenceFrequency: String? = nil
+    var recurrenceInterval: Int? = nil
+    var alarmOffsetSeconds: Double? = nil
+}
+
+struct ReminderTransferRecord: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    var notes: String? = nil
+    var listName: String? = nil
+    var isCompleted: Bool = false
+    var priority: Int = 0
+    var dueEpochMillis: Int64? = nil
 }
 
 struct SmsTransferRecord: Codable, Identifiable, Sendable {
@@ -185,6 +225,11 @@ struct ManifestItem: Codable, Identifiable, Sendable {
     var capturedEpochMillis: Int64 = 0
     let dedupKey: String
     var mimeType: String = "application/octet-stream"
+    var isFavorite: Bool? = nil
+    var latitude: Double? = nil
+    var longitude: Double? = nil
+    var isLivePhoto: Bool? = nil
+    var livePhotoVideoFileName: String? = nil
 }
 
 struct TransferManifest: Codable, Sendable {
@@ -193,6 +238,7 @@ struct TransferManifest: Codable, Sendable {
     let items: [ManifestItem]
     var contactsPayload: [ContactTransferRecord] = []
     var calendarsPayload: [CalendarEventRecord] = []
+    var remindersPayload: [ReminderTransferRecord]? = nil
     var smsPayload: [SmsTransferRecord] = []
     var installedAppsPayload: [InstalledAppRecord]? = nil
     var requestNativeWhatsAppMigration: Bool? = nil
@@ -204,6 +250,7 @@ struct ManifestResponse: Codable, Sendable {
     let contactsMergedCount: Int
     let contactsSkippedDuplicates: Int
     let calendarsImportedCount: Int
+    var remindersImportedCount: Int? = nil
     var smsImportedCount: Int = 0
     var gatedByCrossOsPreviewCount: Int = 0
 }
@@ -215,6 +262,8 @@ struct TransferCompletionReport: Codable, Sendable {
     let transferredBytes: Int64
     let mergedContactsCount: Int
     let importedCalendarsCount: Int
+    var remindersImportedCount: Int? = nil
+    var livePhotosSavedCount: Int? = nil
     var importedSmsCount: Int = 0
     let skippedDuplicatesCount: Int
     let elapsedMillis: Int64

@@ -238,4 +238,135 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(decoded.installedAppsPayload, apps)
         XCTAssertEqual(DirectSwitchUIHelpers.formatBytes(0), "0 MB")
     }
+
+    func testRichZeroCloudiOSPayloadRoundTrip() throws {
+        let richContact = ContactTransferRecord(
+            id: "c_1",
+            displayName: "Mario Rossi",
+            phones: ["+393331112233"],
+            emails: ["mario@example.it"],
+            organization: "Studio Rossi",
+            givenName: "Mario",
+            familyName: "Rossi",
+            nickname: "Marietto",
+            jobTitle: "Architetto",
+            birthdayYear: 1988,
+            birthdayMonth: 5,
+            birthdayDay: 14,
+            labeledPhones: [LabeledValueRecord(label: "iphone", value: "+393331112233")],
+            labeledEmails: [LabeledValueRecord(label: "work", value: "mario@example.it")],
+            urls: ["https://studiorossi.it"],
+            postalAddresses: [
+                PostalAddressTransferRecord(
+                    label: "work",
+                    street: "Via Roma 10",
+                    city: "Milano",
+                    state: "MI",
+                    postalCode: "20121",
+                    country: "Italia"
+                )
+            ],
+            avatarJpegBase64: Data([0xff, 0xd8, 0xff, 0xd9]).base64EncodedString()
+        )
+
+        let richCalendar = CalendarEventRecord(
+            id: "ev_1",
+            title: "Compleanno Giulia",
+            description: "Festa",
+            location: "Milano",
+            startEpochMillis: 1_760_000_000_000,
+            endEpochMillis: 1_760_003_600_000,
+            allDay: true,
+            calendarTitle: "Famiglia",
+            recurrenceFrequency: "yearly",
+            recurrenceInterval: 1,
+            alarmOffsetSeconds: -3600
+        )
+
+        let reminder = ReminderTransferRecord(
+            id: "rem_1",
+            title: "Pagare F24",
+            notes: "Entro il 16",
+            listName: " Casa ",
+            isCompleted: false,
+            priority: 1,
+            dueEpochMillis: 1_760_500_000_000
+        )
+
+        let livePhotoItem = ManifestItem(
+            id: "photos_0",
+            category: .PHOTOS,
+            fileName: "IMG_2048.HEIC",
+            relativeAlbumOrFolder: "Vacanze Sardegna",
+            sizeBytes: 3_145_728,
+            capturedEpochMillis: 1_755_000_000_000,
+            dedupKey: "img_2048.heic_3145728_1755000000000",
+            mimeType: "image/heic",
+            isFavorite: true,
+            latitude: 41.1171,
+            longitude: 9.5332,
+            isLivePhoto: true,
+            livePhotoVideoFileName: "IMG_2048.MOV"
+        )
+
+        let manifest = TransferManifest(
+            sessionId: "ds_ios_full",
+            senderPlatform: .IOS,
+            items: [livePhotoItem],
+            contactsPayload: [richContact],
+            calendarsPayload: [richCalendar],
+            remindersPayload: [reminder],
+            requestNativeWhatsAppMigration: true
+        )
+
+        let data = try JSONEncoder().encode(manifest)
+        let decoded = try JSONDecoder().decode(TransferManifest.self, from: data)
+
+        XCTAssertEqual(decoded.contactsPayload.first?.birthdayYear, 1988)
+        XCTAssertEqual(decoded.contactsPayload.first?.postalAddresses?.first?.city, "Milano")
+        XCTAssertEqual(decoded.contactsPayload.first?.labeledPhones?.first?.label, "iphone")
+        XCTAssertEqual(decoded.calendarsPayload.first?.recurrenceFrequency, "yearly")
+        XCTAssertEqual(decoded.calendarsPayload.first?.alarmOffsetSeconds, -3600)
+        XCTAssertEqual(decoded.remindersPayload, [reminder])
+        XCTAssertEqual(decoded.items.first?.isLivePhoto, true)
+        XCTAssertEqual(decoded.items.first?.livePhotoVideoFileName, "IMG_2048.MOV")
+        XCTAssertEqual(decoded.items.first?.isFavorite, true)
+        XCTAssertEqual(decoded.items.first?.latitude, 41.1171)
+    }
+
+    func testRecursiveFolderImportAndPasswordCsvDetection() throws {
+        XCTAssertTrue(iOSDocumentsSandboxBridge.isPasswordsCsvFile("SafariPasswords.csv"))
+        XCTAssertTrue(iOSDocumentsSandboxBridge.isPasswordsCsvFile("PASSWORDS_APPLE.CSV"))
+        XCTAssertFalse(iOSDocumentsSandboxBridge.isPasswordsCsvFile("contratto.pdf"))
+
+        XCTAssertEqual(
+            iOSDocumentsSandboxBridge.sanitizedRelativeComponents("../Progetti/2026\\Fatture/./"),
+            ["Progetti", "2026", "Fatture"]
+        )
+
+        let rootFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DirectSwitchFolderTest_\(UUID().uuidString)", isDirectory: true)
+        let nestedSub = rootFolder.appendingPathComponent("Fatture/2026", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedSub, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: rootFolder)
+            iOSDocumentsSandboxBridge.clearStagedVault()
+        }
+
+        let pdfURL = nestedSub.appendingPathComponent("fattura_01.pdf")
+        let audioURL = rootFolder.appendingPathComponent("memo_vocale.m4a")
+        try Data("PDF_CONTENT".utf8).write(to: pdfURL)
+        try Data("AUDIO_CONTENT".utf8).write(to: audioURL)
+
+        let staged = iOSDocumentsSandboxBridge.importPickedDocumentURLs([rootFolder])
+        XCTAssertEqual(staged.count, 2)
+
+        let byName = Dictionary(uniqueKeysWithValues: staged.map { ($0.0.fileName, $0.0) })
+        XCTAssertNotNil(byName["fattura_01.pdf"])
+        XCTAssertNotNil(byName["memo_vocale.m4a"])
+        XCTAssertTrue(byName["fattura_01.pdf"]?.relativeAlbumOrFolder.hasSuffix("Fatture/2026") == true)
+        XCTAssertEqual(byName["memo_vocale.m4a"]?.mimeType, "audio/mp4")
+
+        XCTAssertEqual(iOSBackgroundTransferKeepAlive.bgTaskIdentifier, "com.directswitch.ios.transfer.keepalive")
+    }
 }
