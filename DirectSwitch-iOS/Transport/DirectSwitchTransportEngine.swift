@@ -132,7 +132,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         var rl = rlimit()
         guard getrlimit(RLIMIT_NOFILE, &rl) == 0 else { return }
         let desired: rlim_t = 4096
-        let target = rl.rlim_max == RLIM_INFINITY ? desired : min(rl.rlim_max, desired)
+        let target = min(rl.rlim_max, desired)
         if rl.rlim_cur < target {
             rl.rlim_cur = target
             _ = setrlimit(RLIMIT_NOFILE, &rl)
