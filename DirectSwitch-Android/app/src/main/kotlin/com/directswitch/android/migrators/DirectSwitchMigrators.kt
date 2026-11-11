@@ -15,6 +15,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -32,6 +33,7 @@ import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.protocol.CalendarEventRecord
 import com.directswitch.android.protocol.ContactTransferRecord
 import com.directswitch.android.protocol.DirectSwitchJson
+import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.PhoneNormalizer
 import com.directswitch.android.protocol.SmsTransferRecord
@@ -53,6 +55,7 @@ data class LocalDeviceScanSummary(
     val smsCount: Int,
     val documentsCount: Int = 0,
     val whatsappArchivesCount: Int = 0,
+    val installedAppsCount: Int = 0,
     val freeStorageBytes: Long,
     val totalStorageBytes: Long
 )
@@ -549,19 +552,27 @@ object MediaExifScannerAndImporter {
                     }
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
-                val uri = resolver.insert(collection, values) ?: return false
-                val ok = resolver.openOutputStream(uri)?.use { out ->
+                var uri = resolver.insert(collection, values)
+                if (uri == null) {
+                    val dot = item.fileName.lastIndexOf('.')
+                    val stem = if (dot > 0) item.fileName.substring(0, dot) else item.fileName
+                    val ext = if (dot > 0) item.fileName.substring(dot) else ""
+                    values.put(MediaStore.MediaColumns.DISPLAY_NAME, "${stem}_${System.currentTimeMillis() % 10000}$ext")
+                    uri = resolver.insert(collection, values)
+                }
+                val targetUri = uri ?: return false
+                val ok = resolver.openOutputStream(targetUri)?.use { out ->
                     plainInputStream.copyTo(out, bufferSize = 256 * 1024)
                     true
                 } ?: false
                 if (!ok) {
-                    resolver.delete(uri, null, null)
+                    resolver.delete(targetUri, null, null)
                     return false
                 }
                 val doneValues = ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
                 }
-                resolver.update(uri, doneValues, null, null)
+                resolver.update(targetUri, doneValues, null, null)
                 true
             } else {
                 @Suppress("DEPRECATION")
@@ -1144,6 +1155,67 @@ object DocumentsAndWhatsAppScanner {
     }
 }
 
+/**
+ * Scanner delle App installate dall'utente e Assistente Configurazione Account Mail / Cloud
+ * (parità pratica con il catalogo app di Android Switch su telefoni già configurati).
+ */
+object InstalledAppsScanner {
+    fun scanUserInstalledApps(context: Context): List<InstalledAppRecord> {
+        return try {
+            val pm = context.packageManager
+            val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
+            val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(mainIntent, PackageManager.ResolveInfoFlags.of(0L))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(mainIntent, 0)
+            }
+            val seen = HashSet<String>()
+            val out = mutableListOf<InstalledAppRecord>()
+            for (info in resolved) {
+                val ai = info.activityInfo?.applicationInfo ?: continue
+                val pkg = ai.packageName ?: continue
+                if (pkg == context.packageName || !seen.add(pkg)) continue
+                val isPureSystem = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                    (ai.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
+                if (isPureSystem) continue
+                val label = ai.loadLabel(pm)?.toString()?.trim().orEmpty()
+                if (label.isNotEmpty()) {
+                    out.add(InstalledAppRecord(packageName = pkg, appName = label))
+                }
+            }
+            out.sortedBy { it.appName.lowercase() }
+        } catch (t: Throwable) {
+            DirectSwitchLog.warn("Scansione app installate fallita", t)
+            emptyList()
+        }
+    }
+
+    fun openAppOnPlayStore(context: Context, record: InstalledAppRecord) {
+        val marketIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("market://details?id=${Uri.encode(record.packageName)}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val webIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("https://play.google.com/store/apps/details?id=${Uri.encode(record.packageName)}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(marketIntent) }.isFailure) {
+            runCatching { context.startActivity(webIntent) }
+        }
+    }
+
+    fun openAddAccountSettings(context: Context) {
+        val addAcc = Intent(Settings.ACTION_ADD_ACCOUNT).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val syncAcc = Intent(Settings.ACTION_SYNC_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(addAcc) }.isFailure) {
+            runCatching { context.startActivity(syncAcc) }
+        }
+    }
+}
+
 /** Aggrega i conteggi locali per la dashboard iniziale e di selezione categorie. */
 object DeviceDataAnalyzer {
     fun scanSummary(context: Context): LocalDeviceScanSummary {
@@ -1160,6 +1232,7 @@ object DeviceDataAnalyzer {
         )
         val docsCount = docsAndWa.count { it.manifestItem.category == TransferCategory.DOCUMENTS }
         val waCount = docsAndWa.count { it.manifestItem.category == TransferCategory.WHATSAPP_VAULT }
+        val appsCount = InstalledAppsScanner.scanUserInstalledApps(context).size
         val (freeBytes, totalBytes) = StorageCapacityChecker.getFreeAndTotalBytes(context)
 
         return LocalDeviceScanSummary(
@@ -1172,6 +1245,7 @@ object DeviceDataAnalyzer {
             smsCount = sms,
             documentsCount = docsCount,
             whatsappArchivesCount = waCount,
+            installedAppsCount = appsCount,
             freeStorageBytes = freeBytes,
             totalStorageBytes = totalBytes
         )

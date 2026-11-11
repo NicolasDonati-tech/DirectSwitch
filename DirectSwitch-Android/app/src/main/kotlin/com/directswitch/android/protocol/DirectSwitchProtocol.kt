@@ -103,6 +103,23 @@ data class DiscoveryBeaconPayload(
 ) {
     fun toCompactJson(): String = DirectSwitchJson.instance.encodeToString(this)
 
+    /**
+     * Determina se due beacon provengono dallo stesso dispositivo fisico sulla rete locale,
+     * evitando voci duplicate quando il ricevente riavvia 'Ricevi' con un nuovo `sessionId`.
+     */
+    fun representsSameDevice(other: DiscoveryBeaconPayload): Boolean {
+        if (sessionId == other.sessionId) return true
+        val myIps = ips.filter { it.isNotBlank() }.toSet()
+        val otherIps = other.ips.filter { it.isNotBlank() }.toSet()
+        if (myIps.isNotEmpty() && otherIps.isNotEmpty() && myIps.intersect(otherIps).isNotEmpty()) {
+            return true
+        }
+        return receiverPlatform == other.receiverPlatform &&
+            receiverName == other.receiverName &&
+            port == other.port &&
+            (myIps.isEmpty() || otherIps.isEmpty())
+    }
+
     companion object {
         fun fromJson(raw: String): DiscoveryBeaconPayload {
             val trimmed = raw.trim()
@@ -176,6 +193,12 @@ data class SmsTransferRecord(
 )
 
 @Serializable
+data class InstalledAppRecord(
+    val packageName: String,
+    val appName: String
+)
+
+@Serializable
 data class ManifestItem(
     val id: String,
     val category: TransferCategory,
@@ -195,6 +218,7 @@ data class TransferManifest(
     val contactsPayload: List<ContactTransferRecord> = emptyList(),
     val calendarsPayload: List<CalendarEventRecord> = emptyList(),
     val smsPayload: List<SmsTransferRecord> = emptyList(),
+    val installedAppsPayload: List<InstalledAppRecord> = emptyList(),
     val requestNativeWhatsAppMigration: Boolean = false
 )
 

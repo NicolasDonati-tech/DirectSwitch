@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -242,88 +243,86 @@ fun AppleTopNavigationBar(
             .background(DirectSwitchTheme.headerBg)
             .statusBarsPadding()
     ) {
-        Box(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(50.dp)
                 .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.Center
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (showBackButton) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onBack)
+                        .padding(vertical = 4.dp, horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBackIos,
+                        contentDescription = "Indietro",
+                        tint = DirectSwitchTheme.blue,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Indietro",
+                        fontSize = 16.sp,
+                        color = DirectSwitchTheme.blue
+                    )
+                }
+
                 Text(
                     text = title,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = DirectSwitchTheme.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            } else {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    DirectSwitchAppleEmblem(size = 26.dp)
+                    Text(
+                        text = "DirectSwitch",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+            Surface(
+                onClick = onTapPassBadge,
+                shape = RoundedCornerShape(20.dp),
+                color = DirectSwitchTheme.premiumSurface,
+                border = BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
             ) {
-                if (showBackButton) {
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable(onClick = onBack)
-                            .padding(vertical = 4.dp, horizontal = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBackIos,
-                            contentDescription = "Indietro",
-                            tint = DirectSwitchTheme.blue,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Indietro",
-                            fontSize = 16.sp,
-                            color = DirectSwitchTheme.blue
-                        )
-                    }
-                } else {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DirectSwitchAppleEmblem(size = 26.dp)
-                        Text(
-                            text = "DirectSwitch",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DirectSwitchTheme.textPrimary
-                        )
-                    }
-                }
-
-                Surface(
-                    onClick = onTapPassBadge,
-                    shape = RoundedCornerShape(20.dp),
-                    color = DirectSwitchTheme.premiumSurface,
-                    border = BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
+                Row(
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Verified,
-                            contentDescription = null,
-                            tint = DirectSwitchTheme.premiumAmber,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Text(
-                            text = if (isProUnlocked) "Premium Attivo" else "Premium Direct",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DirectSwitchTheme.premiumGold
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Filled.Verified,
+                        contentDescription = null,
+                        tint = DirectSwitchTheme.premiumAmber,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = if (isProUnlocked) "Premium Attivo" else "Premium Direct",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.premiumGold
+                    )
                 }
             }
         }

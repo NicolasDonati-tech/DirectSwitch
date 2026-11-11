@@ -192,5 +192,50 @@ final class DirectSwitchTests: XCTestCase {
         let legacyJson = Data(#"{"sessionId":"ds_old","senderPlatform":"ANDROID","items":[]}"#.utf8)
         let legacyDecoded = try JSONDecoder().decode(TransferManifest.self, from: legacyJson)
         XCTAssertNil(legacyDecoded.requestNativeWhatsAppMigration)
+        XCTAssertNil(legacyDecoded.installedAppsPayload)
+    }
+
+    func testDiscoveryBeaconDeduplicatesSamePhysicalDeviceAcrossSessionRotation() {
+        let oldBeacon = DiscoveryBeaconPayload(
+            sessionId: "ds_session_old",
+            receiverName: "iPhone",
+            receiverPlatform: .IOS,
+            ips: ["192.168.1.42"],
+            port: 49443
+        )
+        let rotatedBeacon = DiscoveryBeaconPayload(
+            sessionId: "ds_session_new",
+            receiverName: "iPhone",
+            receiverPlatform: .IOS,
+            ips: ["192.168.1.42"],
+            port: 49443
+        )
+        let distinctPhoneBeacon = DiscoveryBeaconPayload(
+            sessionId: "ds_session_second_phone",
+            receiverName: "iPhone",
+            receiverPlatform: .IOS,
+            ips: ["192.168.1.99"],
+            port: 49443
+        )
+
+        XCTAssertTrue(rotatedBeacon.representsSameDevice(as: oldBeacon))
+        XCTAssertFalse(distinctPhoneBeacon.representsSameDevice(as: oldBeacon))
+    }
+
+    func testInstalledAppsCatalogManifestRoundTripAndZeroBytesFormat() throws {
+        let apps = [
+            InstalledAppRecord(packageName: "com.whatsapp", appName: "WhatsApp"),
+            InstalledAppRecord(packageName: "com.spotify.music", appName: "Spotify")
+        ]
+        let manifest = TransferManifest(
+            sessionId: "ds_apps_sync",
+            senderPlatform: .ANDROID,
+            items: [],
+            installedAppsPayload: apps
+        )
+        let encoded = try JSONEncoder().encode(manifest)
+        let decoded = try JSONDecoder().decode(TransferManifest.self, from: encoded)
+        XCTAssertEqual(decoded.installedAppsPayload, apps)
+        XCTAssertEqual(DirectSwitchUIHelpers.formatBytes(0), "0 MB")
     }
 }

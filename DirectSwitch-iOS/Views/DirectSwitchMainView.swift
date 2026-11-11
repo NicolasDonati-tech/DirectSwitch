@@ -19,6 +19,7 @@ private enum DirectSwitchWizardStep: Equatable {
 }
 
 struct DirectSwitchMainView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var transport = DirectSwitchTransportViewModel()
 
     @State private var activeStep: DirectSwitchWizardStep = .home
@@ -27,6 +28,7 @@ struct DirectSwitchMainView: View {
 
     // Stato accoppiamento Ricevente / Mittente
     @State private var receiverQrPayload: QrPairingPayload? = nil
+    @State private var receiverDeniedSummary: String? = nil
     @State private var pairedTargetPayload: QrPairingPayload? = nil
     @State private var selectedBeacon: DiscoveryBeaconPayload? = nil
     @State private var pinCodeInput: String = ""
@@ -66,7 +68,7 @@ struct DirectSwitchMainView: View {
         case .sendSelectCategories:
             return "Cosa inviare"
         case .transferProgress:
-            return transport.isCompleted ? "Completato" : "Trasferimento"
+            return transport.isCompleted ? "Completato" : "Copia dati"
         }
     }
 
@@ -126,7 +128,12 @@ struct DirectSwitchMainView: View {
                                 ReceivePairingStepView(
                                     qrPayload: qr,
                                     pairingPin: transport.activePairingPin,
+                                    isLocalNetworkDenied: transport.isLocalNetworkDenied,
+                                    deniedPermissionsNote: receiverDeniedSummary,
                                     errorMessage: transport.errorMessage,
+                                    onOpenAppSettings: {
+                                        DirectSwitchTransportViewModel.openAppSettings()
+                                    },
                                     onCancel: {
                                         transport.resetSession()
                                         receiverQrPayload = nil
@@ -146,10 +153,15 @@ struct DirectSwitchMainView: View {
                                 showCameraScanner: $showCameraScanner,
                                 manualCodeInput: $manualCodeInput,
                                 isPairingBusy: isPairingBusy,
+                                isLocalNetworkDenied: transport.isLocalNetworkDenied,
+                                needsLocalNetworkRedirect: transport.needsLocalNetworkRedirect,
                                 errorNote: pairingErrorNote,
                                 onConfirmPin: confirmPinPairing,
                                 onScannedQrCode: handleScannedQrString,
-                                onApplyManualCode: { handleScannedQrString(manualCodeInput) }
+                                onApplyManualCode: { handleScannedQrString(manualCodeInput) },
+                                onOpenAppSettings: {
+                                    DirectSwitchTransportViewModel.openAppSettings()
+                                }
                             )
 
                         case .sendSelectCategories:
@@ -220,6 +232,15 @@ struct DirectSwitchMainView: View {
                 }
             }
         }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                refreshAuthorizedSummary()
+                receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
+                if activeStep == .sendConnect {
+                    transport.startUdpAutoDiscovery()
+                }
+            }
+        }
         .onOpenURL { incomingURL in
             handleIncomingURL(incomingURL)
         }
@@ -249,8 +270,14 @@ struct DirectSwitchMainView: View {
         isReceiverMode = true
         pairingErrorNote = nil
         receiverQrPayload = transport.startReceiverServer()
+        receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .receiveWaitCode
+        }
+        Task {
+            await iOSPermissionsHelper.requestAllTransferPermissions()
+            receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
+            refreshAuthorizedSummary()
         }
     }
 
@@ -506,15 +533,26 @@ private struct DirectSwitchTransferProgressView: View {
     var onRetryIfFailed: () -> Void
     var onFinish: () -> Void
 
+    @State private var showAllReceivedApps: Bool = false
+
     private var progressFraction: Double {
         if transport.isCompleted { return 1.0 }
         if transport.totalBytesCount > 0 {
-            return min(1.0, max(0.02, Double(transport.transferredBytesCount) / Double(transport.totalBytesCount)))
+            guard transport.transferredBytesCount > 0 else { return 0.0 }
+            return min(1.0, max(0.01, Double(transport.transferredBytesCount) / Double(transport.totalBytesCount)))
         }
         if transport.totalItems > 0 {
-            return min(1.0, max(0.02, Double(transport.completedItems) / Double(transport.totalItems)))
+            guard transport.completedItems > 0 else { return 0.0 }
+            return min(1.0, max(0.01, Double(transport.completedItems) / Double(transport.totalItems)))
         }
-        return transport.isTransferring ? 0.08 : 0.0
+        return 0.0
+    }
+
+    private var contactsSummaryValue: String {
+        if transport.mergedContacts == 0 && transport.contactsAlreadyPresentCount > 0 {
+            return "0 (\(transport.contactsAlreadyPresentCount) già presenti)"
+        }
+        return "\(transport.mergedContacts)"
     }
 
     private var percentageInt: Int {
@@ -638,7 +676,7 @@ private struct DirectSwitchTransferProgressView: View {
                         icon: "person.crop.circle.fill",
                         color: AppleTheme.blue,
                         title: "Contatti uniti",
-                        value: "\(transport.mergedContacts)"
+                        value: contactsSummaryValue
                     )
                     Divider().padding(.leading, 56)
                     summaryRow(
@@ -674,11 +712,29 @@ private struct DirectSwitchTransferProgressView: View {
                             value: "\(transport.skippedDuplicates)"
                         )
                     }
+
+                    if transport.failedItemsCount > 0 {
+                        Divider().padding(.leading, 56)
+                        summaryRow(
+                            icon: "exclamationmark.circle",
+                            color: AppleTheme.orange,
+                            title: "File non leggibili saltati",
+                            value: "\(transport.failedItemsCount)"
+                        )
+                    }
                 }
                 .appleCard(padding: 0)
 
                 if transport.isCompleted && transport.pendingNativeWhatsAppMigration {
                     whatsAppWirelessMigrationCard
+                }
+
+                if isReceiverMode && transport.isCompleted && !transport.receivedInstalledApps.isEmpty {
+                    receivedAppsCatalogCard
+                }
+
+                if isReceiverMode && transport.isCompleted {
+                    mailAndAccountsHelperCard
                 }
 
                 if isReceiverMode && transport.isCompleted && (transport.importedSms > 0 || transport.completedItems > 0) {
@@ -716,7 +772,23 @@ private struct DirectSwitchTransferProgressView: View {
                     .buttonStyle(.plain)
                 }
 
-                if let err = transport.errorMessage, !err.isEmpty {
+                if transport.needsLocalNetworkRedirect || transport.isLocalNetworkDenied {
+                    VStack(spacing: 10) {
+                        LocalNetworkRedirectBanner(
+                            detailMessage: transport.errorMessage
+                        ) {
+                            DirectSwitchTransportViewModel.openAppSettings()
+                        }
+                        if !isReceiverMode {
+                            AppleSecondaryButton(
+                                title: "Riprova copia",
+                                icon: "arrow.clockwise",
+                                tint: AppleTheme.blue,
+                                action: onRetryIfFailed
+                            )
+                        }
+                    }
+                } else if let err = transport.errorMessage, !err.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
@@ -724,6 +796,15 @@ private struct DirectSwitchTransferProgressView: View {
                             Text(err)
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(AppleTheme.red)
+                        }
+                        if err.contains("Impostazioni") {
+                            AppleSecondaryButton(
+                                title: "Apri Impostazioni DirectSwitch",
+                                icon: "gearshape.fill",
+                                tint: AppleTheme.orange
+                            ) {
+                                DirectSwitchTransportViewModel.openAppSettings()
+                            }
                         }
                         if !isReceiverMode {
                             AppleSecondaryButton(
@@ -830,6 +911,94 @@ private struct DirectSwitchTransferProgressView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(AppleTheme.green.opacity(0.48), lineWidth: 1.2)
         )
+    }
+
+    @ViewBuilder
+    private var receivedAppsCatalogCard: some View {
+        let apps = transport.receivedInstalledApps
+        let visibleApps = showAllReceivedApps ? apps : Array(apps.prefix(8))
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.blue)
+                Text("App dal vecchio telefono (\(apps.count))")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
+                InfoCircleButton(
+                    title: "Riscarica le tue App da App Store",
+                    message: "Proprio come «Passa a iOS», le app non vengono copiate come file eseguibili ma riscaricate in versione nativa iOS dall'App Store.\n\nTocca «Scarica» accanto a ogni app rilevata sul tuo Android per aprirla subito su App Store."
+                )
+            }
+
+            VStack(spacing: 8) {
+                ForEach(visibleApps) { app in
+                    HStack(spacing: 10) {
+                        Text(app.appName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button(action: {
+                            iOSPermissionsHelper.searchAppOnAppStore(appName: app.appName)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.down.app.fill")
+                                    .font(.system(size: 12))
+                                Text("App Store")
+                                    .font(.system(size: 12, weight: .bold))
+                            }
+                            .foregroundColor(AppleTheme.blue)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(AppleTheme.cardSelected)
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if apps.count > 8 {
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showAllReceivedApps.toggle()
+                    }
+                }) {
+                    Text(showAllReceivedApps ? "Mostra meno" : "Mostra tutte le \(apps.count) app")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(AppleTheme.blue)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .appleCard(padding: 14)
+    }
+
+    private var mailAndAccountsHelperCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "envelope.fill", color: AppleTheme.teal)
+                Text("Account Mail e Cloud")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
+                InfoCircleButton(
+                    title: "Configurare Mail (Gmail, iCloud, Outlook, PEC)",
+                    message: "Per sicurezza Apple non consente a nessuna app esterna di esportare le password o i token OAuth delle caselle email.\n\nTocca qui sotto per aprire Impostazioni, poi vai in App → Mail → Account Mail → Aggiungi account per collegare in pochi secondi Gmail, Outlook, iCloud o PEC."
+                )
+            }
+
+            AppleSecondaryButton(
+                title: "Configura Account Mail in Impostazioni",
+                icon: "envelope.badge.fill",
+                tint: AppleTheme.teal
+            ) {
+                DirectSwitchTransportViewModel.openAppSettings()
+            }
+        }
+        .appleCard(padding: 14)
     }
 
     private func summaryRow(icon: String, color: Color, title: String, value: String) -> some View {

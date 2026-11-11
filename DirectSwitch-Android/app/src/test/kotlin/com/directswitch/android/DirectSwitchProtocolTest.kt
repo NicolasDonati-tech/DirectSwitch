@@ -5,6 +5,7 @@ import com.directswitch.android.protocol.DirectSwitchCrypto
 import com.directswitch.android.protocol.DirectSwitchJson
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
 import com.directswitch.android.protocol.HandshakeRequest
+import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.PhoneNormalizer
@@ -368,5 +369,51 @@ class DirectSwitchProtocolTest {
         val legacyRaw = """{"sessionId":"ds_legacy","senderPlatform":"IOS","items":[]}"""
         val legacyDecoded = DirectSwitchJson.instance.decodeFromString<TransferManifest>(legacyRaw)
         assertEquals(false, legacyDecoded.requestNativeWhatsAppMigration)
+        assertTrue(legacyDecoded.installedAppsPayload.isEmpty())
+    }
+
+    @Test
+    fun discoveryBeaconDeduplicatesSamePhysicalDeviceAcrossSessionRotation() {
+        val oldBeacon = DiscoveryBeaconPayload(
+            sessionId = "ds_old_01",
+            receiverName = "iPhone",
+            receiverPlatform = DevicePlatform.IOS,
+            ips = listOf("192.168.1.42"),
+            port = 49443
+        )
+        val rotatedBeacon = DiscoveryBeaconPayload(
+            sessionId = "ds_new_02",
+            receiverName = "iPhone",
+            receiverPlatform = DevicePlatform.IOS,
+            ips = listOf("192.168.1.42"),
+            port = 49443
+        )
+        val otherPhoneBeacon = DiscoveryBeaconPayload(
+            sessionId = "ds_other_03",
+            receiverName = "iPhone",
+            receiverPlatform = DevicePlatform.IOS,
+            ips = listOf("192.168.1.99"),
+            port = 49443
+        )
+
+        assertTrue(rotatedBeacon.representsSameDevice(oldBeacon))
+        assertFalse(otherPhoneBeacon.representsSameDevice(oldBeacon))
+    }
+
+    @Test
+    fun transferManifestPreservesInstalledAppsCatalog() {
+        val apps = listOf(
+            InstalledAppRecord(packageName = "com.whatsapp", appName = "WhatsApp"),
+            InstalledAppRecord(packageName = "com.instagram.android", appName = "Instagram")
+        )
+        val manifest = TransferManifest(
+            sessionId = "ds_apps_01",
+            senderPlatform = DevicePlatform.ANDROID,
+            items = emptyList(),
+            installedAppsPayload = apps
+        )
+        val raw = DirectSwitchJson.instance.encodeToString(manifest)
+        val decoded = DirectSwitchJson.instance.decodeFromString<TransferManifest>(raw)
+        assertEquals(apps, decoded.installedAppsPayload)
     }
 }

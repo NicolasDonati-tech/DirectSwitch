@@ -13,7 +13,10 @@ import SwiftUI
 struct ReceivePairingStepView: View {
     let qrPayload: QrPairingPayload
     let pairingPin: String
+    let isLocalNetworkDenied: Bool
+    let deniedPermissionsNote: String?
     let errorMessage: String?
+    var onOpenAppSettings: () -> Void
     var onCancel: () -> Void
 
     private enum DisplayMode: Int {
@@ -37,9 +40,35 @@ struct ReceivePairingStepView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "Come ricevere i dati",
-                            message: "1. Tieni i due telefoni sotto la stessa rete Wi-Fi (o Hotspot).\n2. Sull'altro telefono apri DirectSwitch e tocca 'Invia'.\n3. Seleziona questo iPhone (\(qrPayload.receiverName)) e inserisci il codice a 6 cifre, oppure inquadra il codice QR."
+                            message: "1. Tieni i due telefoni sotto la stessa rete Wi-Fi (o Hotspot).\n2. Sull'altro telefono apri DirectSwitch e tocca 'Invia'.\n3. Seleziona questo iPhone (\(qrPayload.receiverName)) e inserisci il codice a 6 cifre, oppure inquadra il codice QR.\n4. Se il collegamento non parte, verifica che la voce «Rete locale» sia attiva in Impostazioni → DirectSwitch."
                         )
                     }
+                }
+
+                if isLocalNetworkDenied {
+                    LocalNetworkRedirectBanner(onOpenSettings: onOpenAppSettings)
+                }
+
+                if let permWarning = deniedPermissionsNote, !permWarning.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "photo.badge.exclamationmark.fill")
+                                .foregroundColor(AppleTheme.orange)
+                            Text("Abilita Foto e Contatti per salvare i dati")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                        }
+                        Text(permWarning)
+                            .font(.system(size: 13))
+                            .foregroundColor(AppleTheme.textSecondary)
+                        AppleSecondaryButton(
+                            title: "Apri Impostazioni DirectSwitch",
+                            icon: "gearshape.fill",
+                            tint: AppleTheme.orange,
+                            action: onOpenAppSettings
+                        )
+                    }
+                    .appleCard(padding: 14)
                 }
 
                 // Card principale perla con selettore Codice 6 cifre / QR
@@ -81,7 +110,19 @@ struct ReceivePairingStepView: View {
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(AppleTheme.textSecondary)
                     }
-                    .padding(.bottom, 2)
+
+                    if !isLocalNetworkDenied {
+                        Button(action: onOpenAppSettings) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "gearshape")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Non si avvia il trasferimento? Attiva «Rete locale»")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundColor(AppleTheme.blue)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .appleCard()
 

@@ -26,6 +26,60 @@ struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     let freeStorageBytes: Int64
     let totalStorageBytes: Int64
     let hasFullPermissions: Bool
+    var contactsDenied: Bool = false
+    var photosDenied: Bool = false
+    var calendarsDenied: Bool = false
+}
+
+enum iOSPermissionsHelper {
+    /// Richiede in anticipo i permessi di Contatti, Libreria Foto e Calendari (usato sia in Invia che in Ricevi)
+    /// evitando che i popup di sistema compaiano a metà di una connessione HTTP attiva.
+    static func requestAllTransferPermissions() async {
+        _ = await iOSContactsSmartMerger.requestAccessIfNeeded()
+        _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        _ = await iOSCalendarMigrator.requestAccessIfNeeded()
+    }
+
+    static func receiverDeniedSummaryText() -> String? {
+        var missing: [String] = []
+        let cStatus = CNContactStore.authorizationStatus(for: .contacts)
+        if cStatus == .denied || cStatus == .restricted {
+            missing.append("Contatti")
+        }
+        let pStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if pStatus == .denied || pStatus == .restricted {
+            missing.append("Foto")
+        }
+        let eStatus = EKEventStore.authorizationStatus(for: .event)
+        if eStatus == .denied || eStatus == .restricted {
+            missing.append("Calendari")
+        }
+        guard !missing.isEmpty else { return nil }
+        return "Permessi disattivati su questo iPhone: \(missing.joined(separator: ", ")). Attivali in Impostazioni → DirectSwitch per salvare tutti i dati ricevuti."
+    }
+
+    /// Apre direttamente la schermata di DirectSwitch nelle Impostazioni iOS (dove si trovano lo switch «Rete locale», Foto e Contatti).
+    @MainActor
+    static func openDirectSwitchSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    /// Cerca un'app proveniente da Android direttamente sull'App Store di iPhone.
+    @MainActor
+    static func searchAppOnAppStore(appName: String) {
+        let trimmed = appName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+        if let nativeURL = URL(string: "itms-apps://itunes.apple.com/search?term=\(encoded)"),
+           UIApplication.shared.canOpenURL(nativeURL) {
+            UIApplication.shared.open(nativeURL)
+            return
+        }
+        if let webURL = URL(string: "https://apps.apple.com/it/search?term=\(encoded)") {
+            UIApplication.shared.open(webURL)
+        }
+    }
 }
 
 enum iOSStorageCapacityChecker {
@@ -60,10 +114,17 @@ enum iOSDeviceDataAnalyzer {
     /// Legge subito spazio libero/totale e i conteggi delle sole categorie già autorizzate (nessun popup a freddo).
     static func scanAuthorizedSummary(stagedItems: [ManifestItem] = []) -> iOSLocalDeviceScanSummary {
         let (freeBytes, totalBytes) = iOSStorageCapacityChecker.freeAndTotalStorageBytes()
-        let contactsAuth = CNContactStore.authorizationStatus(for: .contacts) == .authorized
+        let rawContactsStatus = CNContactStore.authorizationStatus(for: .contacts)
+        let contactsAuth = iOSContactsSmartMerger.isAuthorized()
+        let contactsDenied = (rawContactsStatus == .denied || rawContactsStatus == .restricted)
+
         let photoStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         let photosAuth = (photoStatus == .authorized || photoStatus == .limited)
+        let photosDenied = (photoStatus == .denied || photoStatus == .restricted)
+
+        let rawCalStatus = EKEventStore.authorizationStatus(for: .event)
         let calAuth = iOSCalendarMigrator.isAuthorized()
+        let calendarsDenied = (rawCalStatus == .denied || rawCalStatus == .restricted)
 
         let contactsCount = contactsAuth ? iOSContactsSmartMerger.readAllContacts().count : 0
         let calendarCount = calAuth ? iOSCalendarMigrator.readEvents().count : 0
@@ -100,7 +161,10 @@ enum iOSDeviceDataAnalyzer {
             whatsappArchivesCount: waCount,
             freeStorageBytes: freeBytes,
             totalStorageBytes: totalBytes,
-            hasFullPermissions: contactsAuth && photosAuth && calAuth
+            hasFullPermissions: contactsAuth && photosAuth && calAuth,
+            contactsDenied: contactsDenied,
+            photosDenied: photosDenied,
+            calendarsDenied: calendarsDenied
         )
     }
 
@@ -193,15 +257,23 @@ enum iOSLicenseStore {
 }
 
 /// Smart Merger Rubrica iOS (`CNContactStore`): unisce i contatti in entrata evitando qualsiasi duplicato.
+/// Supporta sia `.authorized` sia `CNAuthorizationStatus.limited` (`rawValue == 4`) introdotto in iOS 18+.
 enum iOSContactsSmartMerger {
+    static func isAuthorized() -> Bool {
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        return status == .authorized || status.rawValue == 4
+    }
+
     static func requestAccessIfNeeded() async -> Bool {
+        if isAuthorized() { return true }
         let store = CNContactStore()
-        return (try? await store.requestAccess(for: .contacts)) ?? false
+        _ = try? await store.requestAccess(for: .contacts)
+        return isAuthorized()
     }
 
     static func readAllContacts() -> [ContactTransferRecord] {
         let store = CNContactStore()
-        guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else { return [] }
+        guard isAuthorized() else { return [] }
         let keys: [CNKeyDescriptor] = [
             CNContactIdentifierKey as CNKeyDescriptor,
             CNContactGivenNameKey as CNKeyDescriptor,
@@ -223,7 +295,7 @@ enum iOSContactsSmartMerger {
             let fallbackLabel = !orgTrimmed.isEmpty ? orgTrimmed : (phones.first ?? emails.first ?? "")
             let effectiveName = name.isEmpty ? fallbackLabel : name
 
-            if !effectiveName.isEmpty && (!phones.isEmpty || !emails.isEmpty) {
+            if !effectiveName.isEmpty {
                 out.append(
                     ContactTransferRecord(
                         id: contact.identifier,
@@ -239,22 +311,34 @@ enum iOSContactsSmartMerger {
     }
 
     static func mergeIncomingContacts(_ incoming: [ContactTransferRecord]) -> (inserted: Int, skipped: Int) {
-        guard CNContactStore.authorizationStatus(for: .contacts) == .authorized,
-              !incoming.isEmpty else { return (0, 0) }
+        guard isAuthorized(), !incoming.isEmpty else { return (0, 0) }
         let store = CNContactStore()
         let existing = readAllContacts()
         var existingPhones = Set(existing.flatMap { $0.phones }.map { PhoneNormalizer.normalizeKey($0) }.filter { !$0.isEmpty })
         var existingEmails = Set(existing.flatMap { $0.emails }.map { $0.lowercased() })
+        var existingNameOnly = Set(
+            existing
+                .filter { $0.phones.isEmpty && $0.emails.isEmpty }
+                .map { $0.displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        )
 
-        var inserted = 0
         var skipped = 0
-        let saveReq = CNSaveRequest()
+        var toInsert: [CNMutableContact] = []
 
         for record in incoming {
             let normPhones = record.phones.map { PhoneNormalizer.normalizeKey($0) }.filter { !$0.isEmpty }
             let normEmails = record.emails.map { $0.lowercased() }
-            if normPhones.contains(where: { existingPhones.contains($0) }) ||
-                normEmails.contains(where: { existingEmails.contains($0) }) {
+            let normName = record.displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+            let isDuplicate: Bool
+            if !normPhones.isEmpty || !normEmails.isEmpty {
+                isDuplicate = normPhones.contains(where: { existingPhones.contains($0) }) ||
+                    normEmails.contains(where: { existingEmails.contains($0) })
+            } else {
+                isDuplicate = normName.isEmpty || existingNameOnly.contains(normName)
+            }
+
+            if isDuplicate {
                 skipped += 1
                 continue
             }
@@ -272,20 +356,35 @@ enum iOSContactsSmartMerger {
             mutable.emailAddresses = record.emails.map {
                 CNLabeledValue(label: CNLabelOther, value: $0 as NSString)
             }
-            saveReq.add(mutable, toContainerWithIdentifier: nil)
-            inserted += 1
+            toInsert.append(mutable)
             normPhones.forEach { existingPhones.insert($0) }
             normEmails.forEach { existingEmails.insert($0) }
-        }
-
-        if inserted > 0 {
-            do {
-                try store.execute(saveReq)
-            } catch {
-                return (0, skipped)
+            if normPhones.isEmpty && normEmails.isEmpty && !normName.isEmpty {
+                existingNameOnly.insert(normName)
             }
         }
-        return (inserted, skipped)
+
+        guard !toInsert.isEmpty else { return (0, skipped) }
+
+        let batchSaveReq = CNSaveRequest()
+        for mutable in toInsert {
+            batchSaveReq.add(mutable, toContainerWithIdentifier: nil)
+        }
+        do {
+            try store.execute(batchSaveReq)
+            return (toInsert.count, skipped)
+        } catch {
+            // Fallback singolo per contatto: evita che 1 contatto malformato annulli l'intera rubrica
+            var singleSaved = 0
+            for mutable in toInsert {
+                let singleReq = CNSaveRequest()
+                singleReq.add(mutable, toContainerWithIdentifier: nil)
+                if (try? store.execute(singleReq)) != nil {
+                    singleSaved += 1
+                }
+            }
+            return (singleSaved, skipped)
+        }
     }
 
     /// Genera un pacchetto `.vcf` RFC 2426 per il Portale Web di Bootstrap rapido.
@@ -363,61 +462,89 @@ enum iOSPhotoKitMigrator {
     }
 
     static func saveMediaFileToLibrary(item: ManifestItem, fileURL: URL) async -> Bool {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-        guard status == .authorized || status == .limited else { return false }
+        let (saved, _) = await saveMediaFileToLibraryWithReason(item: item, fileURL: fileURL)
+        return saved
+    }
+
+    /// Salva una foto o un video nel Rullino iOS in due fasi isolate:
+    /// 1) Salva prima il file nel Rullino principale con `PHAssetResourceCreationOptions` (funziona anche in modalità `.limited` / `.addOnly`).
+    /// 2) Solo dopo il salvataggio, collega opzionalmente l'asset all'Album utente (`subtype: .albumRegular`), così un vincolo sugli album non annulla mai il salvataggio della foto.
+    static func saveMediaFileToLibraryWithReason(item: ManifestItem, fileURL: URL) async -> (saved: Bool, errorCode: String?) {
+        let rwStatus = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        var isFullReadWrite = (rwStatus == .authorized)
+        var canSaveToLibrary = (rwStatus == .authorized || rwStatus == .limited)
+        if !canSaveToLibrary {
+            let addStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            canSaveToLibrary = (addStatus == .authorized || addStatus == .limited)
+            isFullReadWrite = false
+        }
+        guard canSaveToLibrary else {
+            return (false, "photo_permission_denied")
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return (false, "missing_temp_file")
+        }
 
         let safeName = URL(fileURLWithPath: item.fileName).lastPathComponent
         let fallbackExt = item.category == .VIDEOS ? "mp4" : "jpg"
         let finalName = safeName.isEmpty ? "media_\(UUID().uuidString).\(fallbackExt)" : safeName
-        let importURL: URL
-        var cleanupImportURL = false
 
-        if fileURL.lastPathComponent == finalName {
-            importURL = fileURL
-        } else {
-            let renamedURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(UUID().uuidString)_\(finalName)")
-            try? FileManager.default.removeItem(at: renamedURL)
-            if (try? FileManager.default.linkItem(at: fileURL, to: renamedURL)) != nil ||
-                (try? FileManager.default.copyItem(at: fileURL, to: renamedURL)) != nil {
-                importURL = renamedURL
-                cleanupImportURL = true
-            } else {
-                importURL = fileURL
-            }
+        final class LocalIdBox: @unchecked Sendable {
+            var value: String?
         }
-        defer {
-            if cleanupImportURL {
-                try? FileManager.default.removeItem(at: importURL)
-            }
-        }
-
+        let idBox = LocalIdBox()
         do {
-            let albumTitle = item.relativeAlbumOrFolder.trimmingCharacters(in: .whitespacesAndNewlines)
-            let targetAlbum = (albumTitle.isEmpty || albumTitle == "iPhone_Camera")
-                ? nil
-                : fetchOrCreateAlbum(named: albumTitle)
-
             try await PHPhotoLibrary.shared().performChanges {
                 let req = PHAssetCreationRequest.forAsset()
+                let resOpts = PHAssetResourceCreationOptions()
+                resOpts.originalFilename = finalName
+                resOpts.shouldMoveFile = false
                 if item.category == .VIDEOS {
-                    req.addResource(with: .video, fileURL: importURL, options: nil)
+                    req.addResource(with: .video, fileURL: fileURL, options: resOpts)
                 } else {
-                    req.addResource(with: .photo, fileURL: importURL, options: nil)
+                    req.addResource(with: .photo, fileURL: fileURL, options: resOpts)
                 }
                 if item.capturedEpochMillis > 0 {
                     req.creationDate = Date(timeIntervalSince1970: TimeInterval(item.capturedEpochMillis) / 1000.0)
                 }
-                if let album = targetAlbum,
-                   let placeholder = req.placeholderForCreatedAsset,
-                   let albumChangeReq = PHAssetCollectionChangeRequest(for: album) {
-                    albumChangeReq.addAssets([placeholder] as NSArray)
+                idBox.value = req.placeholderForCreatedAsset?.localIdentifier
+            }
+        } catch {
+            // Secondo tentativo minimale tramite URL immagine/video standard (senza opzioni custom)
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    let fallbackReq = item.category == .VIDEOS
+                        ? PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+                        : PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+                    if item.capturedEpochMillis > 0 {
+                        fallbackReq?.creationDate = Date(timeIntervalSince1970: TimeInterval(item.capturedEpochMillis) / 1000.0)
+                    }
+                    idBox.value = fallbackReq?.placeholderForCreatedAsset?.localIdentifier
+                }
+            } catch {
+                return (false, "photokit_save_failed")
+            }
+        }
+
+        // Associazione opzionale all'album utente in una transazione separata (non fallisce mai il salvataggio principale)
+        let albumTitle = item.relativeAlbumOrFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let skipAlbumNames: Set<String> = ["", "iPhone_Camera", "Camera", "Recenti", "Recent"]
+        if isFullReadWrite,
+           !skipAlbumNames.contains(albumTitle),
+           let assetId = idBox.value,
+           let targetAlbum = fetchOrCreateAlbum(named: albumTitle),
+           targetAlbum.canPerform(.addContent) {
+            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil)
+            if assets.count > 0 {
+                try? await PHPhotoLibrary.shared().performChanges {
+                    if let albumChangeReq = PHAssetCollectionChangeRequest(for: targetAlbum) {
+                        albumChangeReq.addAssets(assets)
+                    }
                 }
             }
-            return true
-        } catch {
-            return false
         }
+
+        return (true, nil)
     }
 
     static func saveMediaToLibrary(item: ManifestItem, plainData: Data) async -> Bool {
@@ -454,8 +581,8 @@ enum iOSPhotoKitMigrator {
     private static func fetchOrCreateAlbum(named title: String) -> PHAssetCollection? {
         let fetchOptions = PHFetchOptions()
         fetchOptions.predicate = NSPredicate(format: "title = %@", title)
-        let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: fetchOptions)
-        if let existing = collections.firstObject {
+        let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: fetchOptions)
+        if let existing = collections.firstObject, existing.canPerform(.addContent) {
             return existing
         }
         var placeholderId: String?

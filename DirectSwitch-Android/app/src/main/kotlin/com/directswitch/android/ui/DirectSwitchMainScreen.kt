@@ -46,11 +46,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -60,6 +62,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.CircularProgressIndicator
@@ -109,6 +112,7 @@ import com.directswitch.android.migrators.DeviceDataAnalyzer
 import com.directswitch.android.migrators.DirectSwitchBillingManager
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.GoogleSetupBridge
+import com.directswitch.android.migrators.InstalledAppsScanner
 import com.directswitch.android.migrators.LocalDeviceScanSummary
 import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.findHostActivity
@@ -164,7 +168,8 @@ private data class CategorySelectionState(
     val calendars: Boolean = true,
     val sms: Boolean = true,
     val documents: Boolean = true,
-    val whatsAppVault: Boolean = true
+    val whatsAppVault: Boolean = true,
+    val installedApps: Boolean = true
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -373,7 +378,7 @@ fun DirectSwitchMainScreen(
         WizardStep.SENDER_SELECT_CATEGORIES -> "Cosa copiare"
         WizardStep.TRANSFER_PROGRESS -> {
             val done = if (isReceiverFlow) serverProgress.isCompleted else clientProgress.isCompleted
-            if (done) "Completato" else "Copia dei dati"
+            if (done) "Completato" else "Copia dati"
         }
         WizardStep.QUICK_PORTAL -> "QR Rapido"
     }
@@ -608,7 +613,8 @@ fun DirectSwitchMainScreen(
                                         includeCalendars = categories.calendars,
                                         includeSms = categories.sms,
                                         includeDocuments = categories.documents,
-                                        includeWhatsAppVault = categories.whatsAppVault
+                                        includeWhatsAppVault = categories.whatsAppVault,
+                                        includeInstalledApps = categories.installedApps
                                     )
                                 }
                             }
@@ -1025,9 +1031,17 @@ private fun SenderConnectWizardView(
 ) {
     var showManualInput by remember { mutableStateOf(false) }
 
-    LaunchedEffect(discoveredDevices.size) {
-        if (selectedBeacon == null && discoveredDevices.isNotEmpty()) {
-            onSelectBeacon(discoveredDevices.first())
+    LaunchedEffect(discoveredDevices) {
+        val current = selectedBeacon
+        if (current == null) {
+            if (discoveredDevices.isNotEmpty()) {
+                onSelectBeacon(discoveredDevices.first())
+            }
+        } else {
+            val updated = discoveredDevices.firstOrNull { it.representsSameDevice(current) }
+            if (updated != null && updated.sessionId != current.sessionId) {
+                onSelectBeacon(updated)
+            }
         }
     }
 
@@ -1062,7 +1076,8 @@ private fun SenderConnectWizardView(
             if (discoveredDevices.isEmpty()) {
                 CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = DirectSwitchTheme.blue)
             } else {
-                Text("${discoveredDevices.size} trovato", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.green)
+                val countLabel = if (discoveredDevices.size == 1) "1 trovato" else "${discoveredDevices.size} trovati"
+                Text(countLabel, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.green)
             }
         }
 
@@ -1200,9 +1215,11 @@ private fun SenderCategoriesWizardView(
     onStartTransfer: () -> Unit
 ) {
     val allSelected = categories.contacts && categories.photos && categories.videos &&
-        categories.calendars && categories.sms && categories.documents && categories.whatsAppVault
+        categories.calendars && categories.sms && categories.documents &&
+        categories.whatsAppVault && categories.installedApps
     val anySelected = categories.contacts || categories.photos || categories.videos ||
-        categories.calendars || categories.sms || categories.documents || categories.whatsAppVault
+        categories.calendars || categories.sms || categories.documents ||
+        categories.whatsAppVault || categories.installedApps
 
     val isCrossOs = pairedPayload.receiverPlatform == DevicePlatform.IOS
     val isFullUnlocked = !isCrossOs || isLocalPro || pairedPayload.receiverHasPro
@@ -1221,7 +1238,7 @@ private fun SenderCategoriesWizardView(
             modifier = Modifier.clickable {
                 val next = !allSelected
                 onUpdateCategories(
-                    CategorySelectionState(next, next, next, next, next, next, next)
+                    CategorySelectionState(next, next, next, next, next, next, next, next)
                 )
             }
         )
@@ -1362,6 +1379,42 @@ private fun SenderCategoriesWizardView(
             checked = categories.whatsAppVault,
             onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
         )
+        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+
+        CleanCategoryToggleRow(
+            icon = Icons.Filled.Apps,
+            iconColor = DirectSwitchTheme.blue,
+            title = "App installate (catalogo Store)",
+            subtitle = summary?.let { "${it.installedAppsCount} app rilevabili" },
+            checked = categories.installedApps,
+            onCheckedChange = { onUpdateCategories(categories.copy(installedApps = it)) }
+        )
+    }
+
+    DirectSwitchCard(padding = 12.dp, spacing = 6.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.Email, color = DirectSwitchTheme.slate, size = 26.dp)
+                Text(
+                    text = "App, Account Mail e Impostazioni",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = DirectSwitchTheme.textPrimary
+                )
+            }
+            InfoCircleButton(
+                title = "Confronto con Passa a Android / Passa a iOS",
+                message = "• App installate: DirectSwitch trasferisce l'elenco completo delle tue app per riscaricarle con 1 tocco da App Store o Play Store sul telefono ricevente.\n• Account Mail (Gmail, iCloud, Outlook): per sicurezza Apple/Google le password non viaggiano mai in chiaro; a fine copia trovi il pulsante rapido per collegare il tuo account e riavere tutte le email.\n• Impostazioni di sistema: non vengono sovrascritte, così il telefono ricevente non viene né formattato né alterato."
+            )
+        }
     }
 
     DirectSwitchSecondaryButton(
@@ -1416,9 +1469,10 @@ private fun TransferProgressWizardView(
 
     val ratio = when {
         progress.isCompleted -> 1f
-        progress.totalBytes > 0L -> (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0.02f, 1f)
-        progress.totalItems > 0 -> (progress.completedItems.toFloat() / progress.totalItems.toFloat()).coerceIn(0.02f, 1f)
-        else -> 0.06f
+        progress.transferredBytes == 0L && progress.completedItems == 0 -> 0f
+        progress.totalBytes > 0L -> (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0f, 1f)
+        progress.totalItems > 0 -> (progress.completedItems.toFloat() / progress.totalItems.toFloat()).coerceIn(0f, 1f)
+        else -> 0f
     }
     val pct = (ratio * 100f).toInt()
 
@@ -1512,7 +1566,12 @@ private fun TransferProgressWizardView(
     }
 
     DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
-        SummaryItemRow(Icons.Filled.Contacts, DirectSwitchTheme.blue, "Contatti uniti", "${progress.mergedContacts}")
+        val contactsValue = if (progress.mergedContacts == 0 && progress.contactsAlreadyPresent > 0) {
+            "0 (${progress.contactsAlreadyPresent} già presenti)"
+        } else {
+            "${progress.mergedContacts}"
+        }
+        SummaryItemRow(Icons.Filled.Contacts, DirectSwitchTheme.blue, "Contatti uniti", contactsValue)
         HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
         SummaryItemRow(
             Icons.Filled.Image,
@@ -1529,6 +1588,93 @@ private fun TransferProgressWizardView(
         if (progress.skippedDuplicates > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.CheckCircle, DirectSwitchTheme.teal, "Doppioni ignorati", "${progress.skippedDuplicates}")
+        }
+        if (progress.failedItemsCount > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.Warning, DirectSwitchTheme.orange, "File non disponibili saltati", "${progress.failedItemsCount}")
+        }
+    }
+
+    if (isReceiver && progress.isCompleted && progress.receivedInstalledApps.isNotEmpty()) {
+        DirectSwitchCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AppleSettingsIcon(icon = Icons.Filled.Apps, color = DirectSwitchTheme.blue)
+                    Text(
+                        text = "App dal vecchio telefono (${progress.receivedInstalledApps.size})",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                }
+                InfoCircleButton(
+                    title = "Reinstallazione rapida App",
+                    message = "Tocca 'Play Store' accanto a ciascuna app trasferita per scaricare subito la versione ufficiale compatibile con questo Android."
+                )
+            }
+            for (app in progress.receivedInstalledApps.take(15)) {
+                HorizontalDivider(color = DirectSwitchTheme.hairline)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = app.appName,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = DirectSwitchTheme.textPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = {
+                            InstalledAppsScanner.openAppOnPlayStore(context, app.packageName, app.appName)
+                        }
+                    ) {
+                        Text("Play Store", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+                    }
+                }
+            }
+        }
+    }
+
+    if (isReceiver && progress.isCompleted) {
+        DirectSwitchCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AppleSettingsIcon(icon = Icons.Filled.Email, color = DirectSwitchTheme.slate)
+                    Text(
+                        text = "Account Mail e Cloud",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                }
+                InfoCircleButton(
+                    title = "Sincronizza Email e Account",
+                    message = "Come su Android Switch, per motivi di sicurezza le password delle caselle email non viaggiano tra dispositivi. Accedi qui al tuo account Google, iCloud o Outlook per sincronizzare istantaneamente tutte le email."
+                )
+            }
+            DirectSwitchSecondaryButton(
+                text = "Aggiungi account Mail / Google",
+                onClick = { InstalledAppsScanner.openAddAccountSettings(context) }
+            )
         }
     }
 

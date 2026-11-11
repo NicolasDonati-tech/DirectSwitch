@@ -25,11 +25,14 @@ struct SendConnectStepView: View {
     @Binding var showCameraScanner: Bool
     @Binding var manualCodeInput: String
     let isPairingBusy: Bool
+    let isLocalNetworkDenied: Bool
+    let needsLocalNetworkRedirect: Bool
     let errorNote: String?
 
     var onConfirmPin: () -> Void
     var onScannedQrCode: (String) -> Void
     var onApplyManualCode: () -> Void
+    var onOpenAppSettings: () -> Void
 
     @State private var showManualField: Bool = false
 
@@ -50,9 +53,16 @@ struct SendConnectStepView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "Come inviare i dati",
-                            message: "Sull'altro telefono (iPhone o Android) apri DirectSwitch e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR."
+                            message: "Sull'altro telefono (iPhone o Android) apri DirectSwitch e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR.\n\nSe il collegamento non parte, assicurati che la voce «Rete locale» sia attiva in Impostazioni → DirectSwitch."
                         )
                     }
+                }
+
+                if isLocalNetworkDenied || needsLocalNetworkRedirect {
+                    LocalNetworkRedirectBanner(
+                        detailMessage: errorNote,
+                        onOpenSettings: onOpenAppSettings
+                    )
                 }
 
                 // Card 1: Rilevamento automatico + Codice a 6 cifre (stile Passa a iOS / Passa a Android, sottotitoli dentro ⓘ)
@@ -63,7 +73,7 @@ struct SendConnectStepView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "Rilevamento automatico",
-                            message: "Assicurati che sull'altro telefono sia aperta la schermata 'Ricevi' di DirectSwitch sulla stessa rete Wi-Fi o Hotspot."
+                            message: "Assicurati che sull'altro telefono sia aperta la schermata 'Ricevi' di DirectSwitch sulla stessa rete Wi-Fi o Hotspot e che «Rete locale» sia attiva."
                         )
                         Spacer()
                         if discoveredBeacons.isEmpty {
@@ -71,7 +81,7 @@ struct SendConnectStepView: View {
                                 .scaleEffect(0.85)
                                 .tint(AppleTheme.blue)
                         } else {
-                            Text("\(discoveredBeacons.count) pronto")
+                            Text(discoveredBeacons.count == 1 ? "1 pronto" : "\(discoveredBeacons.count) pronti")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(AppleTheme.green)
                                 .padding(.horizontal, 8)
@@ -82,12 +92,27 @@ struct SendConnectStepView: View {
                     }
 
                     if discoveredBeacons.isEmpty {
-                        HStack(spacing: 12) {
-                            AppleSettingsIcon(systemName: "wifi", color: AppleTheme.blue)
-                            Text("Ricerca dell'altro telefono...")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundColor(AppleTheme.textPrimary)
-                            Spacer()
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 12) {
+                                AppleSettingsIcon(systemName: "wifi", color: AppleTheme.blue)
+                                Text("Ricerca dell'altro telefono...")
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                Spacer()
+                            }
+
+                            if !isLocalNetworkDenied && !needsLocalNetworkRedirect {
+                                Button(action: onOpenAppSettings) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "gearshape")
+                                            .font(.system(size: 12, weight: .semibold))
+                                        Text("Non trova il telefono? Verifica «Rete locale» in Impostazioni")
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .foregroundColor(AppleTheme.blue)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                         .padding(.vertical, 4)
                     } else {
@@ -158,8 +183,16 @@ struct SendConnectStepView: View {
                     }
                 }
                 .appleCard()
-                .onChange(of: discoveredBeacons.count) { _ in
-                    if selectedBeacon == nil, let first = discoveredBeacons.first {
+                .onChange(of: discoveredBeacons) { updatedList in
+                    if let current = selectedBeacon {
+                        if let refreshed = updatedList.first(where: { $0.representsSameDevice(as: current) }) {
+                            if refreshed != current {
+                                selectedBeacon = refreshed
+                            }
+                        } else {
+                            selectedBeacon = updatedList.first
+                        }
+                    } else if let first = updatedList.first {
                         selectedBeacon = first
                     }
                 }
@@ -243,7 +276,7 @@ struct SendConnectStepView: View {
                 }
                 .appleCard()
 
-                if let err = errorNote, !err.isEmpty {
+                if let err = errorNote, !err.isEmpty, !(isLocalNetworkDenied || needsLocalNetworkRedirect) {
                     HStack(spacing: 10) {
                         Image(systemName: "exclamationmark.circle.fill")
                             .foregroundColor(AppleTheme.red)
@@ -288,6 +321,13 @@ struct SendCategoriesStepView: View {
     var onOpenProSheet: () -> Void
     var onChangePairedDevice: () -> Void
     var onStartCopy: () -> Void
+
+    @State private var didAutoRequestPermissions: Bool = false
+
+    private var hasAnyPermissionDenied: Bool {
+        guard let s = scanSummary else { return false }
+        return s.contactsDenied || s.photosDenied || s.calendarsDenied
+    }
 
     private var allSelected: Bool {
         includeContacts && includePhotos && includeVideos && includeCalendars && includeDocuments && includeWhatsApp
@@ -417,6 +457,29 @@ struct SendCategoriesStepView: View {
                     }
                 }
 
+                if hasAnyPermissionDenied {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.shield.fill")
+                                .foregroundColor(AppleTheme.orange)
+                            Text("Alcuni permessi sono disattivati su questo iPhone")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                        }
+                        Text("Per caricare tutti i Contatti, le Foto/Video e i Calendari senza blocchi, attiva tutti i permessi nella pagina di DirectSwitch in Impostazioni.")
+                            .font(.system(size: 13))
+                            .foregroundColor(AppleTheme.textSecondary)
+                        AppleSecondaryButton(
+                            title: "Abilita Contatti e Foto in Impostazioni",
+                            icon: "gearshape.fill",
+                            tint: AppleTheme.orange
+                        ) {
+                            iOSPermissionsHelper.openDirectSwitchSettings()
+                        }
+                    }
+                    .appleCard(padding: 14)
+                }
+
                 // Lista pulita con sottotitoli racchiusi in ⓘ
                 VStack(spacing: 0) {
                     CleanCategoryToggleRow(
@@ -526,6 +589,20 @@ struct SendCategoriesStepView: View {
                 }
                 .appleCard(padding: 14)
 
+                // Card informativa pulita: App, Account Mail e Impostazioni (confronto con Passa a Android / Passa a iOS)
+                HStack(spacing: 12) {
+                    AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.slate)
+                    Text("App, Account Mail e Impostazioni")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Spacer()
+                    InfoCircleButton(
+                        title: "App, Mail e Impostazioni",
+                        message: "Come funziona rispetto a «Passa a Android» / «Passa a iOS»:\n\n• App installate: né Android Switch né Passa a iOS copiano gli eseguibili .ipa/.apk (incompatibili tra sistemi), ma riscaricano le app dallo Store. Da Android, DirectSwitch invia automaticamente il catalogo delle tue app con link 1-tap allo Store; da iPhone, Apple blocca per privacy la lettura delle altre app installate.\n\n• Account Mail (Gmail, iCloud, Outlook, PEC): per sicurezza i token e le password del Portachiavi Apple non sono esportabili da nessuna app senza riautenticazione. A fine copia trovi sul ricevente il pulsante rapido «Configura Account Mail».\n\n• Impostazioni telefono (Wi-Fi, Face ID, Sveglie, Home): sono riservate al reset di fabbrica iniziale. DirectSwitch invece unisce tutti i tuoi dati personali su telefoni già configurati senza cancellare nulla!"
+                    )
+                }
+                .appleCard(padding: 14)
+
                 ApplePrimaryButton(
                     title: "Copia i dati",
                     icon: "arrow.right",
@@ -537,6 +614,12 @@ struct SendCategoriesStepView: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
+        }
+        .onAppear {
+            if !didAutoRequestPermissions && !(scanSummary?.hasFullPermissions ?? false) {
+                didAutoRequestPermissions = true
+                onScanExactCounts()
+            }
         }
     }
 

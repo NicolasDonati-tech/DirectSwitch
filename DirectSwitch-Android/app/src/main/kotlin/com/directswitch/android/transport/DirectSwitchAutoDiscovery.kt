@@ -45,8 +45,11 @@ class DirectSwitchAutoDiscovery(private val context: Context) {
 
     private var udpListenerSocket: DatagramSocket? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
+    @Volatile
+    private var activeAdvertisingSessionId: String = ""
 
     private val discoveredMap = ConcurrentHashMap<String, DiscoveryBeaconPayload>()
+    private val lastSeenMillisMap = ConcurrentHashMap<String, Long>()
     private val _discoveredDevices = MutableStateFlow<List<DiscoveryBeaconPayload>>(emptyList())
     val discoveredDevices: StateFlow<List<DiscoveryBeaconPayload>> = _discoveredDevices
 
@@ -56,6 +59,7 @@ class DirectSwitchAutoDiscovery(private val context: Context) {
     fun startAdvertisingReceiver(payload: QrPairingPayload) {
         stopAdvertising()
         broadcasting.set(true)
+        activeAdvertisingSessionId = payload.sessionId
         val publicBeacon = payload.toPublicBeacon()
 
         // 1. Registrazione mDNS / Bonjour (_directswitch._tcp.)
@@ -112,6 +116,7 @@ class DirectSwitchAutoDiscovery(private val context: Context) {
 
     fun stopAdvertising() {
         broadcasting.set(false)
+        activeAdvertisingSessionId = ""
         try {
             val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
             registrationListener?.let { nsdManager?.unregisterService(it) }
@@ -129,7 +134,33 @@ class DirectSwitchAutoDiscovery(private val context: Context) {
     fun startScanningForNewDevices() {
         if (listening.getAndSet(true)) return
         discoveredMap.clear()
+        lastSeenMillisMap.clear()
         _discoveredDevices.value = emptyList()
+
+        // Thread di pulizia dei beacon inattivi (> 8,5 secondi)
+        executor.execute {
+            while (listening.get()) {
+                try {
+                    Thread.sleep(2500)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (!listening.get()) break
+                val cutoff = System.currentTimeMillis() - 8_500L
+                var changed = false
+                for ((sid, seenAt) in lastSeenMillisMap.entries) {
+                    if (seenAt < cutoff) {
+                        lastSeenMillisMap.remove(sid)
+                        if (discoveredMap.remove(sid) != null) {
+                            changed = true
+                        }
+                    }
+                }
+                if (changed) {
+                    _discoveredDevices.value = discoveredMap.values.toList()
+                }
+            }
+        }
 
         executor.execute {
             try {
@@ -155,9 +186,24 @@ class DirectSwitchAutoDiscovery(private val context: Context) {
                             localIps
                         }
                         if (enrichedIps.isNotEmpty()) {
-                            val updated = beacon.copy(ips = enrichedIps)
-                            discoveredMap[updated.sessionId] = updated
-                            _discoveredDevices.value = discoveredMap.values.toList()
+                            val myLocalIps = LocalNetworkAddresses.listPrivateIpv4Addresses().toSet()
+                            val isSelfSession = activeAdvertisingSessionId.isNotEmpty() &&
+                                beacon.sessionId == activeAdvertisingSessionId
+                            val isSelfIp = myLocalIps.isNotEmpty() && enrichedIps.toSet().all { it in myLocalIps }
+                            if (!isSelfSession && !isSelfIp) {
+                                val updated = beacon.copy(ips = enrichedIps)
+                                // Rimuove eventuali vecchi sessionId dello stesso telefono fisico (stesso IP)
+                                val staleSameDeviceIds = discoveredMap.values
+                                    .filter { it.sessionId != updated.sessionId && it.representsSameDevice(updated) }
+                                    .map { it.sessionId }
+                                for (oldId in staleSameDeviceIds) {
+                                    discoveredMap.remove(oldId)
+                                    lastSeenMillisMap.remove(oldId)
+                                }
+                                discoveredMap[updated.sessionId] = updated
+                                lastSeenMillisMap[updated.sessionId] = System.currentTimeMillis()
+                                _discoveredDevices.value = discoveredMap.values.toList()
+                            }
                         }
                     }
                 }

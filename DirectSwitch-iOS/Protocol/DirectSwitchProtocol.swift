@@ -89,6 +89,23 @@ struct DiscoveryBeaconPayload: Codable, Equatable, Sendable {
         return str
     }
 
+    /// Determina se due beacon appartengono allo stesso dispositivo fisico sulla rete locale,
+    /// evitando duplicati quando la schermata 'Ricevi' viene riavviata con un nuovo `sessionId`.
+    func representsSameDevice(as other: DiscoveryBeaconPayload) -> Bool {
+        if sessionId == other.sessionId {
+            return true
+        }
+        let myIps = Set(ips.filter { !$0.isEmpty })
+        let otherIps = Set(other.ips.filter { !$0.isEmpty })
+        if !myIps.isEmpty && !otherIps.isEmpty && !myIps.isDisjoint(with: otherIps) {
+            return true
+        }
+        return receiverPlatform == other.receiverPlatform
+            && receiverName == other.receiverName
+            && port == other.port
+            && (myIps.isEmpty || otherIps.isEmpty)
+    }
+
     static func fromJson(_ raw: String) throws -> DiscoveryBeaconPayload {
         guard let data = raw.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8) else {
             throw NSError(domain: "DirectSwitch", code: -2, userInfo: [NSLocalizedDescriptionKey: "Beacon non valido"])
@@ -153,6 +170,12 @@ struct SmsTransferRecord: Codable, Identifiable, Sendable {
     var messageType: Int = 1
 }
 
+struct InstalledAppRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: String { packageName }
+    let packageName: String
+    let appName: String
+}
+
 struct ManifestItem: Codable, Identifiable, Sendable {
     let id: String
     let category: TransferCategory
@@ -171,6 +194,7 @@ struct TransferManifest: Codable, Sendable {
     var contactsPayload: [ContactTransferRecord] = []
     var calendarsPayload: [CalendarEventRecord] = []
     var smsPayload: [SmsTransferRecord] = []
+    var installedAppsPayload: [InstalledAppRecord]? = nil
     var requestNativeWhatsAppMigration: Bool? = nil
 }
 

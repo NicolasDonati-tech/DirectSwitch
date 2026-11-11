@@ -69,6 +69,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var currentItemName: String = ""
     @Published var isCompleted: Bool = false
     @Published var pendingNativeWhatsAppMigration: Bool = false
+    @Published var isLocalNetworkDenied: Bool = false
+    @Published var needsLocalNetworkRedirect: Bool = false
+    @Published var failedItemsCount: Int = 0
+    @Published var contactsAlreadyPresentCount: Int = 0
+    @Published var receivedInstalledApps: [InstalledAppRecord] = []
     @Published var errorMessage: String? = nil
     @Published var activePairingPin: String = ""
     @Published var discoveredBeacons: [DiscoveryBeaconPayload] = []
@@ -76,7 +81,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
     private var listener: NWListener?
     private var udpDiscoveryListener: NWListener?
+    private var bonjourBrowser: NWBrowser?
     private var beaconBroadcastTask: Task<Void, Never>?
+    private var beaconPruneTask: Task<Void, Never>?
+    private var beaconLastSeen: [String: Date] = [:]
     private var activeSessionId: String = ""
     private var activeQrPayloadSnapshot: QrPairingPayload?
     private var bootstrapSecretToken: String? = nil
@@ -152,6 +160,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         isCompleted = false
         pendingNativeWhatsAppMigration = false
         requestedWhatsAppMigration = false
+        needsLocalNetworkRedirect = false
+        failedItemsCount = 0
+        contactsAlreadyPresentCount = 0
+        receivedInstalledApps = []
         errorMessage = nil
 
         startHttpListener(port: port, advertiseBonjour: true)
@@ -215,6 +227,23 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         if advertiseBonjour {
             nwListener.service = NWListener.Service(name: UIDevice.current.name, type: "_directswitch._tcp")
         }
+        nwListener.stateUpdateHandler = { [weak self] newState in
+            switch newState {
+            case .ready:
+                Task { @MainActor [weak self] in
+                    self?.isLocalNetworkDenied = false
+                }
+            case .waiting(let err), .failed(let err):
+                if Self.isLocalNetworkPolicyDenied(err) {
+                    Task { @MainActor [weak self] in
+                        self?.isLocalNetworkDenied = true
+                        self?.needsLocalNetworkRedirect = true
+                    }
+                }
+            default:
+                break
+            }
+        }
         nwListener.newConnectionHandler = { [weak self] conn in
             guard let self else {
                 conn.cancel()
@@ -268,8 +297,25 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         isCompleted = false
         pendingNativeWhatsAppMigration = false
         requestedWhatsAppMigration = false
+        needsLocalNetworkRedirect = false
+        failedItemsCount = 0
+        contactsAlreadyPresentCount = 0
+        receivedInstalledApps = []
         errorMessage = nil
         statusLabel = "Pronto al trasferimento diretto"
+    }
+
+    /// Apre direttamente la schermata di DirectSwitch nelle Impostazioni iOS (dove attivare lo switch «Rete locale»).
+    @MainActor
+    static func openAppSettings() {
+        iOSPermissionsHelper.openDirectSwitchSettings()
+    }
+
+    private nonisolated static func isLocalNetworkPolicyDenied(_ error: NWError) -> Bool {
+        if case .dns(let code) = error, Int(code) == -65570 {
+            return true
+        }
+        return false
     }
 
     /// Apre direttamente WhatsApp (o WhatsApp Business, oppure la pagina ufficiale App Store se non ancora installato).
@@ -365,6 +411,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                             return
                         }
 
+                        if let expectHeader = state.headers["expect"]?.lowercased(),
+                           expectHeader.contains("100-continue") {
+                            connection.send(content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8), completion: .idempotent)
+                        }
+
                         if isStreamingItem {
                             let tempURL = FileManager.default.temporaryDirectory
                                 .appendingPathComponent("ds_rx_\(UUID().uuidString).enc")
@@ -401,7 +452,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             }
 
-            if state.headersParsed && (state.receivedBodyBytes >= state.expectedBodyLength || isComplete) {
+            if state.headersParsed && state.receivedBodyBytes >= state.expectedBodyLength {
                 state.closeHandle()
                 let method = state.method
                 let rawTarget = state.rawTarget
@@ -669,10 +720,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             totalItems = acceptedItems.count
             totalBytesCount = acceptedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
             mergedContacts = insContacts
+            contactsAlreadyPresentCount = skipContacts
             importedCalendars = insCal
             importedSms = insSms
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
+            receivedInstalledApps = fullAllowed ? (manifest.installedAppsPayload ?? []) : []
 
             let resp = ManifestResponse(
                 acceptedItemIds: acceptedItems.map(\.id),
@@ -719,13 +772,21 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             let savedOk: Bool
+            var saveErrorCode: String? = nil
             if item.category == .PHOTOS || item.category == .VIDEOS {
-                savedOk = await iOSPhotoKitMigrator.saveMediaFileToLibrary(item: item, fileURL: tempPlainURL)
+                let res = await iOSPhotoKitMigrator.saveMediaFileToLibraryWithReason(item: item, fileURL: tempPlainURL)
+                savedOk = res.saved
+                saveErrorCode = res.errorCode
             } else {
                 savedOk = iOSDocumentsSandboxBridge.saveDocumentFile(item: item, sourceFileURL: tempPlainURL)
             }
             guard savedOk else {
-                sendPlainJson(connection: connection, status: 500, json: #"{"error":"save_failed"}"#)
+                if saveErrorCode == "photo_permission_denied" {
+                    errorMessage = "Permesso Foto disattivato su questo iPhone: tocca il pulsante qui sotto per aprire Impostazioni → DirectSwitch → Foto."
+                    sendPlainJson(connection: connection, status: 403, json: #"{"error":"photo_permission_denied"}"#)
+                } else {
+                    sendPlainJson(connection: connection, status: 500, json: #"{"error":"save_failed"}"#)
+                }
                 return
             }
 
@@ -775,20 +836,59 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         sendPlainJson(connection: connection, status: 404, json: #"{"error":"not_found"}"#)
     }
 
-    /// Avvia l'ascolto automatico UDP sulla porta 49444 per rilevare i beacon pubblici (`DiscoveryBeaconPayload`)
-    /// del telefono ricevente senza esporre alcuna chiave segreta sulla rete.
+    /// Avvia l'ascolto automatico UDP sulla porta 49444 e il browser Bonjour `_directswitch._tcp` per:
+    /// 1) Far comparire e verificare subito il permesso iOS «Rete locale» (`kDNSServiceErr_PolicyDenied`).
+    /// 2) Rilevare i dispositivi riceventi senza mai duplicare lo stesso telefono fisico sulla rete.
     func startUdpAutoDiscovery() {
         stopUdpAutoDiscovery()
         discoveredBeacons.removeAll()
+        beaconLastSeen.removeAll()
+        needsLocalNetworkRedirect = false
+
+        // Browser Bonjour: attiva la voce «Rete locale» di DirectSwitch in Impostazioni iOS e ne rileva l'eventuale blocco
+        let browser = NWBrowser(for: .bonjour(type: "_directswitch._tcp", domain: nil), using: .tcp)
+        browser.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                Task { @MainActor [weak self] in
+                    self?.isLocalNetworkDenied = false
+                }
+            case .waiting(let err), .failed(let err):
+                if Self.isLocalNetworkPolicyDenied(err) {
+                    Task { @MainActor [weak self] in
+                        self?.isLocalNetworkDenied = true
+                        self?.needsLocalNetworkRedirect = true
+                    }
+                }
+            default:
+                break
+            }
+        }
+        browser.start(queue: .global(qos: .utility))
+        bonjourBrowser = browser
+
         guard let port = Network.NWEndpoint.Port(rawValue: 49444),
               let udpListener = try? NWListener(using: .udp, on: port) else { return }
+
+        udpListener.stateUpdateHandler = { [weak self] state in
+            if case .waiting(let err) = state, Self.isLocalNetworkPolicyDenied(err) {
+                Task { @MainActor [weak self] in
+                    self?.isLocalNetworkDenied = true
+                }
+            }
+        }
+
         udpListener.newConnectionHandler = { [weak self] conn in
+            let remoteIp = Self.extractIPv4FromEndpoint(conn.endpoint)
             conn.start(queue: .global(qos: .userInitiated))
             conn.receiveMessage { [weak self] data, _, _, _ in
                 if let d = data,
                    let str = String(data: d, encoding: .utf8),
                    let rawBeacon = try? DiscoveryBeaconPayload.fromJson(str) {
-                    let safeIps = rawBeacon.ips.filter { DirectSwitchLocalNetwork.isLocalIPv4($0) }
+                    var safeIps = rawBeacon.ips.filter { DirectSwitchLocalNetwork.isLocalIPv4($0) }
+                    if let rIp = remoteIp, DirectSwitchLocalNetwork.isLocalIPv4(rIp), !safeIps.contains(rIp) {
+                        safeIps.insert(rIp, at: 0)
+                    }
                     if !safeIps.isEmpty {
                         let sanitized = DiscoveryBeaconPayload(
                             proto: rawBeacon.proto,
@@ -801,7 +901,23 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         )
                         Task { @MainActor [weak self] in
                             guard let self else { return }
-                            if let idx = self.discoveredBeacons.firstIndex(where: { $0.sessionId == sanitized.sessionId }) {
+                            // Ignora eventuali pacchetti broadcast provenienti da questo stesso iPhone
+                            if !self.activeSessionId.isEmpty && sanitized.sessionId == self.activeSessionId {
+                                return
+                            }
+                            let myLocalIps = Set(Self.localIPv4Addresses())
+                            if !myLocalIps.isEmpty && Set(sanitized.ips).isSubset(of: myLocalIps) {
+                                return
+                            }
+                            self.isLocalNetworkDenied = false
+                            self.beaconLastSeen[sanitized.sessionId] = Date()
+
+                            // Deduplicazione per stesso dispositivo fisico (anche se Ricevi ha rigenerato sessionId)
+                            if let idx = self.discoveredBeacons.firstIndex(where: { $0.representsSameDevice(as: sanitized) }) {
+                                let previousId = self.discoveredBeacons[idx].sessionId
+                                if previousId != sanitized.sessionId {
+                                    self.beaconLastSeen.removeValue(forKey: previousId)
+                                }
                                 self.discoveredBeacons[idx] = sanitized
                             } else {
                                 self.discoveredBeacons.append(sanitized)
@@ -814,11 +930,43 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         }
         udpListener.start(queue: .global(qos: .userInitiated))
         udpDiscoveryListener = udpListener
+
+        // Pulizia automatica dei dispositivi non più attivi (> 8,5 secondi senza beacon)
+        beaconPruneTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard let self, !Task.isCancelled else { break }
+                let cutoff = Date().addingTimeInterval(-8.5)
+                self.discoveredBeacons.removeAll { beacon in
+                    guard let seen = self.beaconLastSeen[beacon.sessionId] else { return false }
+                    if seen < cutoff {
+                        self.beaconLastSeen.removeValue(forKey: beacon.sessionId)
+                        return true
+                    }
+                    return false
+                }
+            }
+        }
     }
 
     func stopUdpAutoDiscovery() {
+        beaconPruneTask?.cancel()
+        beaconPruneTask = nil
+        bonjourBrowser?.cancel()
+        bonjourBrowser = nil
         udpDiscoveryListener?.cancel()
         udpDiscoveryListener = nil
+        beaconLastSeen.removeAll()
+    }
+
+    private nonisolated static func extractIPv4FromEndpoint(_ endpoint: Network.NWEndpoint) -> String? {
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        let raw = "\(host)"
+        let clean = raw.components(separatedBy: "%").first ?? raw
+        if !clean.contains(":") && DirectSwitchLocalNetwork.isLocalIPv4(clean) {
+            return clean
+        }
+        return nil
     }
 
     /// Scambia in modo autenticato il PIN a 6 cifre mostrato sul ricevente con il `QrPairingPayload` completo.
@@ -828,8 +976,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             throw NSError(domain: "DirectSwitch", code: -20, userInfo: [NSLocalizedDescriptionKey: "Inserisci il codice PIN a 6 cifre mostrato sul nuovo telefono."])
         }
         guard let reachableIp = await findReachableIp(ips: beacon.ips, port: beacon.port) else {
-            throw NSError(domain: "DirectSwitch", code: -21, userInfo: [NSLocalizedDescriptionKey: "Impossibile raggiungere \(beacon.receiverName) sulla rete Wi-Fi locale."])
+            needsLocalNetworkRedirect = true
+            throw NSError(
+                domain: "DirectSwitch",
+                code: -21,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Il trasferimento non si avvia perché DirectSwitch non è abilitata per le reti locali (oppure i due telefoni sono su reti Wi-Fi diverse). Tocca il pulsante qui sotto per attivare la voce «Rete locale» nelle Impostazioni di DirectSwitch."
+                ]
+            )
         }
+        isLocalNetworkDenied = false
+        needsLocalNetworkRedirect = false
         let pinKey = try DirectSwitchCrypto.derivePinSymmetricKey(sessionId: beacon.sessionId, pin: cleanPin)
         let req = PinPairingRequest(sessionId: beacon.sessionId, senderName: UIDevice.current.name)
         let respData = try await postEncryptedJson(url: "http://\(reachableIp):\(beacon.port)/v1/pair-pin", payload: req, key: pinKey)
@@ -868,6 +1025,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     ) async {
         do {
             errorMessage = nil
+            needsLocalNetworkRedirect = false
+            failedItemsCount = 0
+            contactsAlreadyPresentCount = 0
+            receivedInstalledApps = []
             isCompleted = false
             pendingNativeWhatsAppMigration = false
             isSessionConnected = true
@@ -895,10 +1056,13 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             statusLabel = "Ricerca canale diretto verso \(qrPayload.receiverName)..."
 
             guard let reachableIp = await findReachableIp(ips: qrPayload.ips, port: qrPayload.port) else {
+                needsLocalNetworkRedirect = (hotspotFallbackHint == nil)
                 errorMessage = hotspotFallbackHint
-                    ?? "Impossibile raggiungere \(qrPayload.receiverName). Verifica che i due telefoni siano sulla stessa rete Wi-Fi o Hotspot."
+                    ?? "Il trasferimento non parte perché DirectSwitch non è abilitata per le reti locali (oppure \(qrPayload.receiverName) non è sulla stessa rete Wi-Fi / Hotspot). Tocca il pulsante qui sotto per attivare la voce «Rete locale» nelle Impostazioni di DirectSwitch."
                 return
             }
+            isLocalNetworkDenied = false
+            needsLocalNetworkRedirect = false
             let baseUrl = "http://\(reachableIp):\(qrPayload.port)"
             let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qrPayload.sessionKeyHex)
 
@@ -955,6 +1119,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
             let mfResp = try JSONDecoder().decode(ManifestResponse.self, from: mfRespData)
             mergedContacts = mfResp.contactsMergedCount
+            contactsAlreadyPresentCount = mfResp.contactsSkippedDuplicates
             importedCalendars = mfResp.calendarsImportedCount
             importedSms = mfResp.smsImportedCount
             skippedDuplicates = mfResp.skippedDuplicateCount
@@ -971,41 +1136,93 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let startTime = Date()
             var uploadedBytes: Int64 = 0
 
-            // 1. Upload streaming Foto & Video 4K (esportati e cifrati su file temporanei a blocchi da 4 MiB)
+            let uploadConfig = URLSessionConfiguration.ephemeral
+            uploadConfig.timeoutIntervalForRequest = 180.0
+            uploadConfig.timeoutIntervalForResource = 900.0
+            uploadConfig.httpMaximumConnectionsPerHost = 2
+            uploadConfig.waitsForConnectivity = false
+            let uploadSession = URLSession(configuration: uploadConfig)
+            defer { uploadSession.finishTasksAndInvalidate() }
+
+            // 1. Upload streaming Foto & Video 4K (con retry per singolo file e avanzamento resiliente: 1 foto illeggibile non blocca mai le altre!)
             for (item, phAsset) in assetsToUpload {
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
-                guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(phAsset) else { continue }
-                let sentBytes = try await encryptAndStreamFileItem(
-                    item: item,
-                    plainFileURL: plainTempURL,
-                    deletePlainAfter: true,
-                    baseUrl: baseUrl,
-                    key: key
-                )
-                completedItems += 1
-                uploadedBytes += sentBytes
-                transferredBytesCount = uploadedBytes
-                let elapsed = max(0.25, Date().timeIntervalSince(startTime))
-                speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(phAsset) else {
+                    failedItemsCount += 1
+                    continue
+                }
+                defer { try? FileManager.default.removeItem(at: plainTempURL) }
+
+                var itemUploadedBytes: Int64? = nil
+                var fatalPermissionError: Error? = nil
+                for attempt in 0..<2 {
+                    do {
+                        let sent = try await encryptAndStreamFileItem(
+                            item: item,
+                            plainFileURL: plainTempURL,
+                            baseUrl: baseUrl,
+                            key: key,
+                            session: uploadSession
+                        )
+                        itemUploadedBytes = sent
+                        break
+                    } catch {
+                        let nsErr = error as NSError
+                        if nsErr.code == 403 {
+                            fatalPermissionError = error
+                            break
+                        }
+                        if attempt == 0 {
+                            try? await Task.sleep(nanoseconds: 350_000_000)
+                        }
+                    }
+                }
+                if let fatalErr = fatalPermissionError {
+                    throw fatalErr
+                }
+                if let sentBytes = itemUploadedBytes {
+                    completedItems += 1
+                    uploadedBytes += sentBytes
+                    transferredBytesCount = uploadedBytes
+                    let elapsed = max(0.25, Date().timeIntervalSince(startTime))
+                    speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                } else {
+                    failedItemsCount += 1
+                }
             }
 
             // 2. Upload streaming Documenti & Archivi WhatsApp selezionati dall'utente o ricevuti da Share Sheet
             for (item, docURL) in docsToUpload {
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
-                let sentBytes = try await encryptAndStreamFileItem(
-                    item: item,
-                    plainFileURL: docURL,
-                    deletePlainAfter: false,
-                    baseUrl: baseUrl,
-                    key: key
-                )
-                completedItems += 1
-                uploadedBytes += sentBytes
-                transferredBytesCount = uploadedBytes
-                let elapsed = max(0.25, Date().timeIntervalSince(startTime))
-                speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                var itemUploadedBytes: Int64? = nil
+                for attempt in 0..<2 {
+                    do {
+                        let sent = try await encryptAndStreamFileItem(
+                            item: item,
+                            plainFileURL: docURL,
+                            baseUrl: baseUrl,
+                            key: key,
+                            session: uploadSession
+                        )
+                        itemUploadedBytes = sent
+                        break
+                    } catch {
+                        if attempt == 0 {
+                            try? await Task.sleep(nanoseconds: 350_000_000)
+                        }
+                    }
+                }
+                if let sentBytes = itemUploadedBytes {
+                    completedItems += 1
+                    uploadedBytes += sentBytes
+                    transferredBytesCount = uploadedBytes
+                    let elapsed = max(0.25, Date().timeIntervalSince(startTime))
+                    speedMegabytesPerSec = (Double(uploadedBytes) / (1024.0 * 1024.0)) / elapsed
+                } else {
+                    failedItemsCount += 1
+                }
             }
 
             let completeData = try await postEncryptedJson(
@@ -1034,17 +1251,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private func encryptAndStreamFileItem(
         item: ManifestItem,
         plainFileURL: URL,
-        deletePlainAfter: Bool,
         baseUrl: String,
-        key: SymmetricKey
+        key: SymmetricKey,
+        session: URLSession
     ) async throws -> Int64 {
         let tempEncURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ds_tx_\(UUID().uuidString).csgcm1")
         defer {
             try? FileManager.default.removeItem(at: tempEncURL)
-            if deletePlainAfter {
-                try? FileManager.default.removeItem(at: plainFileURL)
-            }
         }
 
         let (plainBytes, sha256Hex) = try await Task.detached(priority: .userInitiated) {
@@ -1060,15 +1274,28 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         var putReq = URLRequest(url: putUrl, timeoutInterval: 600.0)
         putReq.httpMethod = "PUT"
         putReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        putReq.setValue("close", forHTTPHeaderField: "Connection")
         putReq.setValue("\(plainBytes)", forHTTPHeaderField: "X-DS-Plain-Length")
         putReq.setValue(sha256Hex, forHTTPHeaderField: "X-DS-Sha256")
         if encSize > 0 {
             putReq.setValue("\(encSize)", forHTTPHeaderField: "Content-Length")
         }
 
-        let (_, resp) = try await URLSession.shared.upload(for: putReq, fromFile: tempEncURL)
-        guard let httpResp = resp as? HTTPURLResponse, httpResp.statusCode == 200 else {
+        let (_, resp) = try await session.upload(for: putReq, fromFile: tempEncURL)
+        guard let httpResp = resp as? HTTPURLResponse else {
             throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(item.fileName)"])
+        }
+        if httpResp.statusCode == 403 {
+            throw NSError(
+                domain: "DirectSwitch",
+                code: 403,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Permesso Foto disattivato sul telefono ricevente: sull'altro iPhone apri Impostazioni → DirectSwitch → Foto e abilita l'accesso."
+                ]
+            )
+        }
+        guard httpResp.statusCode == 200 else {
+            throw NSError(domain: "DirectSwitch", code: -12, userInfo: [NSLocalizedDescriptionKey: "Errore invio \(item.fileName) (HTTP \(httpResp.statusCode))"])
         }
         return plainBytes
     }

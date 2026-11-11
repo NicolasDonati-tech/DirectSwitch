@@ -25,6 +25,7 @@ import com.directswitch.android.migrators.CalendarMigrator
 import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.ContactsSmartMerger
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
+import com.directswitch.android.migrators.InstalledAppsScanner
 import com.directswitch.android.migrators.MediaExifScannerAndImporter
 import com.directswitch.android.migrators.PublicDownloadsSaver
 import com.directswitch.android.migrators.SmsSystemScanner
@@ -36,6 +37,7 @@ import com.directswitch.android.protocol.DirectSwitchJson
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
 import com.directswitch.android.protocol.HandshakeRequest
 import com.directswitch.android.protocol.HandshakeResponse
+import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.ManifestResponse
@@ -46,6 +48,7 @@ import com.directswitch.android.protocol.TransferCategory
 import com.directswitch.android.protocol.TransferCompletionReport
 import com.directswitch.android.protocol.TransferManifest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -89,9 +92,12 @@ data class LiveTransferProgress(
     val totalBytes: Long = 0L,
     val speedMegabytesPerSec: Double = 0.0,
     val mergedContacts: Int = 0,
+    val contactsAlreadyPresent: Int = 0,
     val importedCalendars: Int = 0,
     val importedSms: Int = 0,
     val skippedDuplicates: Int = 0,
+    val failedItemsCount: Int = 0,
+    val receivedInstalledApps: List<InstalledAppRecord> = emptyList(),
     val isCompleted: Boolean = false,
     val pendingNativeWhatsAppMigration: Boolean = false,
     val errorMessage: String? = null
@@ -389,6 +395,10 @@ class DirectSwitchTransferServer(
             }
 
             val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
+            if (headers["expect"]?.lowercase()?.contains("100-continue") == true) {
+                output.write("HTTP/1.1 100 Continue\r\n\r\n".toByteArray(Charsets.US_ASCII))
+                output.flush()
+            }
 
             when {
                 method == "GET" && pathOnly == "/v1/ping" -> {
@@ -592,15 +602,22 @@ class DirectSwitchTransferServer(
                         }
                     }
 
+                    val receivedApps = if (LicensePolicyEvaluator.allowsFullCategories(activeTier)) {
+                        manifest.installedAppsPayload
+                    } else {
+                        emptyList()
+                    }
                     val totalBytesToReceive = acceptedItems.sumOf { it.sizeBytes }
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Ricezione file in streaming cifrato...",
                         totalItems = acceptedItems.size,
                         totalBytes = totalBytesToReceive,
                         mergedContacts = mergedContacts,
+                        contactsAlreadyPresent = skippedContacts,
                         importedCalendars = importedCalendars,
                         importedSms = importedSms,
-                        skippedDuplicates = skippedContacts + skippedMediaDups
+                        skippedDuplicates = skippedContacts + skippedMediaDups,
+                        receivedInstalledApps = receivedApps
                     )
 
                     val resp = ManifestResponse(
@@ -958,9 +975,15 @@ class DirectSwitchTransferClient(private val context: Context) {
         try {
             val cleanPin = pin.filter { it.isDigit() }
             require(cleanPin.length == 6) { "Inserisci il codice PIN a 6 cifre mostrato sul nuovo telefono." }
-            val channel = resolveChannel(beacon.ips, beacon.port, null, null)
+                val channel = resolveChannel(beacon.ips, beacon.port, null, null)
                 ?: return@withContext Result.failure(
-                    IllegalStateException("Impossibile raggiungere ${beacon.receiverName} sulla rete Wi-Fi locale.")
+                    IllegalStateException(
+                        if (beacon.receiverPlatform == DevicePlatform.IOS) {
+                            "Impossibile raggiungere ${beacon.receiverName}: assicurati che su iPhone sia attiva Impostazioni → App → DirectSwitch → Rete locale."
+                        } else {
+                            "Impossibile raggiungere ${beacon.receiverName} sulla rete Wi-Fi locale."
+                        }
+                    )
                 )
             try {
                 val pinAesKey = DirectSwitchCrypto.derivePinAesKey(beacon.sessionId, cleanPin)
@@ -995,7 +1018,8 @@ class DirectSwitchTransferClient(private val context: Context) {
         includeCalendars: Boolean,
         includeSms: Boolean = true,
         includeDocuments: Boolean = true,
-        includeWhatsAppVault: Boolean = true
+        includeWhatsAppVault: Boolean = true,
+        includeInstalledApps: Boolean = true
     ): Result<TransferCompletionReport> = withContext(Dispatchers.IO) {
         var boundChannel: BoundHttpChannel? = null
         DirectSwitchKeepAliveService.start(context, "Invio dati verso ${qrPayload.receiverName}...")
@@ -1008,7 +1032,13 @@ class DirectSwitchTransferClient(private val context: Context) {
                 wifiSsid = qrPayload.wifiSsid,
                 wifiPass = qrPayload.wifiPass
             ) ?: return@withContext Result.failure(
-                IllegalStateException("Impossibile raggiungere ${qrPayload.receiverName}. Verifica che entrambi i telefoni siano sulla stessa Wi-Fi o accetta la connessione all'Hotspot DirectSwitch.")
+                IllegalStateException(
+                    if (qrPayload.receiverPlatform == DevicePlatform.IOS) {
+                        "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che sull'iPhone sia attiva Impostazioni → App → DirectSwitch → Rete locale e che entrambi i telefoni siano sulla stessa Wi-Fi."
+                    } else {
+                        "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che entrambi i telefoni siano sulla stessa Wi-Fi o accetta la connessione all'Hotspot DirectSwitch."
+                    }
+                )
             )
             boundChannel = channel
             val activeClient = channel.client
@@ -1020,6 +1050,7 @@ class DirectSwitchTransferClient(private val context: Context) {
             val contacts = if (includeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
             val calendars = if (includeCalendars) CalendarMigrator.readEvents(context) else emptyList()
             val smsList = if (includeSms) SmsSystemScanner.readAllSms(context) else emptyList()
+            val installedApps = if (includeInstalledApps) InstalledAppsScanner.scanUserInstalledApps(context) else emptyList()
             val mediaEntries = MediaExifScannerAndImporter.scanMediaEntries(
                 context = context,
                 includePhotos = includePhotos,
@@ -1062,8 +1093,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                 licenseTier = handshakeResp.licenseTier
             )
 
-            // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS
-            val wantNativeWa = includeWhatsAppVault && LicensePolicyEvaluator.allowsFullCategories(handshakeResp.licenseTier)
+            // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS / Catalogo App
+            val allowFull = LicensePolicyEvaluator.allowsFullCategories(handshakeResp.licenseTier)
+            val wantNativeWa = includeWhatsAppVault && allowFull
             val manifest = TransferManifest(
                 sessionId = qrPayload.sessionId,
                 senderPlatform = DevicePlatform.ANDROID,
@@ -1071,7 +1103,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                 contactsPayload = contacts,
                 calendarsPayload = calendars,
                 smsPayload = smsList,
-                requestNativeWhatsAppMigration = wantNativeWa
+                requestNativeWhatsAppMigration = wantNativeWa,
+                installedAppsPayload = if (allowFull) installedApps else emptyList()
             )
             val manifestRespJson = postEncryptedJson(
                 client = activeClient,
@@ -1086,54 +1119,98 @@ class DirectSwitchTransferClient(private val context: Context) {
             val totalBytes = entriesToUpload.sumOf { it.manifestItem.sizeBytes }
             val startTime = System.currentTimeMillis()
             var uploadedBytes = 0L
+            var failedCount = 0
 
             _progress.value = _progress.value.copy(
                 phaseLabel = "Trasferimento diretto cifrato in corso...",
                 totalItems = entriesToUpload.size,
                 totalBytes = totalBytes,
                 mergedContacts = manifestResp.contactsMergedCount,
+                contactsAlreadyPresent = manifestResp.contactsSkippedDuplicates,
                 importedCalendars = manifestResp.calendarsImportedCount,
                 importedSms = manifestResp.smsImportedCount,
                 skippedDuplicates = manifestResp.skippedDuplicateCount
             )
 
-            // 4. Upload Streaming CSGCM1 elemento per elemento con verifica SHA-256
+            // 4. Upload Streaming CSGCM1 elemento per elemento con retry e continue-on-error
             for ((index, entry) in entriesToUpload.withIndex()) {
                 val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
                 val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
                 try {
-                    val (plainLen, sha256Hex) = context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
-                        tempEncrypted.outputStream().use { encOut ->
-                            DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                    val encPair = runCatching {
+                        context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
+                            tempEncrypted.outputStream().use { encOut ->
+                                DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                            }
                         }
-                    } ?: continue
+                    }.getOrNull()
 
-                    val body = object : RequestBody() {
-                        override fun contentType() = "application/octet-stream".toMediaType()
-                        override fun contentLength(): Long = tempEncrypted.length()
-                        override fun writeTo(sink: BufferedSink) {
-                            tempEncrypted.inputStream().use { fileIn ->
-                                val buf = ByteArray(256 * 1024)
-                                while (true) {
-                                    val r = fileIn.read(buf)
-                                    if (r <= 0) break
-                                    sink.write(buf, 0, r)
+                    if (encPair == null) {
+                        failedCount++
+                        _progress.value = _progress.value.copy(
+                            completedItems = index + 1,
+                            failedItemsCount = failedCount,
+                            phaseLabel = "Saltato file non leggibile (${entry.manifestItem.fileName}), proseguo..."
+                        )
+                        continue
+                    }
+
+                    val (plainLen, sha256Hex) = encPair
+                    var uploadedSingleOk = false
+                    var permissionDeniedMsg: String? = null
+
+                    for (attempt in 1..2) {
+                        val body = object : RequestBody() {
+                            override fun contentType() = "application/octet-stream".toMediaType()
+                            override fun contentLength(): Long = tempEncrypted.length()
+                            override fun writeTo(sink: BufferedSink) {
+                                tempEncrypted.inputStream().use { fileIn ->
+                                    val buf = ByteArray(256 * 1024)
+                                    while (true) {
+                                        val r = fileIn.read(buf)
+                                        if (r <= 0) break
+                                        sink.write(buf, 0, r)
+                                    }
                                 }
                             }
                         }
+
+                        val putReq = Request.Builder()
+                            .url("$baseUrl/v1/item/${entry.manifestItem.id}")
+                            .header("X-DS-Plain-Length", plainLen.toString())
+                            .header("X-DS-Sha256", sha256Hex)
+                            .header("Connection", "close")
+                            .put(body)
+                            .build()
+
+                        val code = runCatching {
+                            activeClient.newCall(putReq).execute().use { resp -> resp.code }
+                        }.getOrDefault(-1)
+
+                        if (code in 200..299) {
+                            uploadedSingleOk = true
+                            break
+                        } else if (code == 403) {
+                            permissionDeniedMsg = "Permesso Foto/Libreria negato sul telefono ricevente (${handshakeResp.receiverName}). Abilitalo nelle Impostazioni del ricevente."
+                            break
+                        } else if (attempt == 1) {
+                            delay(250L)
+                        }
                     }
 
-                    val putReq = Request.Builder()
-                        .url("$baseUrl/v1/item/${entry.manifestItem.id}")
-                        .header("X-DS-Plain-Length", plainLen.toString())
-                        .header("X-DS-Sha256", sha256Hex)
-                        .put(body)
-                        .build()
+                    if (permissionDeniedMsg != null) {
+                        throw IllegalStateException(permissionDeniedMsg)
+                    }
 
-                    activeClient.newCall(putReq).execute().use { resp ->
-                        if (!resp.isSuccessful) {
-                            throw IllegalStateException("Errore upload ${entry.manifestItem.fileName}: HTTP ${resp.code}")
-                        }
+                    if (!uploadedSingleOk) {
+                        failedCount++
+                        DirectSwitchLog.warn("Impossibile inviare ${entry.manifestItem.fileName}, passo al successivo")
+                        _progress.value = _progress.value.copy(
+                            completedItems = index + 1,
+                            failedItemsCount = failedCount,
+                            phaseLabel = "Saltato ${entry.manifestItem.fileName}, proseguo col resto..."
+                        )
+                        continue
                     }
 
                     uploadedBytes += plainLen
@@ -1144,7 +1221,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                         currentFileName = entry.manifestItem.fileName,
                         completedItems = index + 1,
                         transferredBytes = uploadedBytes,
-                        speedMegabytesPerSec = speedMbs
+                        speedMegabytesPerSec = speedMbs,
+                        failedItemsCount = failedCount
                     )
                 } finally {
                     tempEncrypted.delete()
@@ -1160,9 +1238,15 @@ class DirectSwitchTransferClient(private val context: Context) {
             )
             val report = DirectSwitchJson.instance.decodeFromString<TransferCompletionReport>(completeJson)
 
+            val doneLabel = if (failedCount > 0) {
+                "Trasferimento completato ($failedCount file non disponibili saltati)"
+            } else {
+                "Trasferimento completato!"
+            }
             _progress.value = _progress.value.copy(
-                phaseLabel = "Trasferimento completato!",
+                phaseLabel = doneLabel,
                 isCompleted = true,
+                failedItemsCount = failedCount,
                 pendingNativeWhatsAppMigration = wantNativeWa
             )
             Result.success(report)

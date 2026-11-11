@@ -197,58 +197,62 @@ struct AppleTopNavigationBar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack {
+            HStack(spacing: 8) {
                 if showBackButton {
-                    Text(title)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(AppleTheme.textPrimary)
-                        .lineLimit(1)
-                }
-
-                HStack {
-                    if showBackButton {
-                        Button(action: onBack) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 16, weight: .semibold))
-                                Text("Indietro")
-                                    .font(.system(size: 16, weight: .regular))
-                            }
-                            .foregroundColor(AppleTheme.blue)
+                    Button(action: onBack) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 16, weight: .semibold))
+                            Text("Indietro")
+                                .font(.system(size: 16, weight: .regular))
                         }
-                        .buttonStyle(.plain)
-                    } else {
-                        HStack(spacing: 8) {
-                            DirectSwitchAppleEmblem(size: 26)
-                            Text("DirectSwitch")
-                                .font(.system(size: 17, weight: .bold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                        }
-                    }
-
-                    Spacer()
-
-                    Button(action: onTapPassBadge) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "crown.fill")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(AppleTheme.premiumAmber)
-                            Text(isProUnlocked ? "Premium Attivo" : "Premium Direct")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(AppleTheme.premiumGold)
-                        }
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
-                        .background(AppleTheme.premiumSurface)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
-                        )
-                        .shadow(color: AppleTheme.premiumAmber.opacity(0.14), radius: 4, x: 0, y: 2)
+                        .foregroundColor(AppleTheme.blue)
                     }
                     .buttonStyle(.plain)
+                    .fixedSize()
+                } else {
+                    HStack(spacing: 8) {
+                        DirectSwitchAppleEmblem(size: 26)
+                        Text("DirectSwitch")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                    }
+                    .fixedSize()
                 }
+
+                Spacer(minLength: 4)
+
+                if showBackButton {
+                    Text(title)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+
+                    Spacer(minLength: 4)
+                }
+
+                Button(action: onTapPassBadge) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "crown.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(AppleTheme.premiumAmber)
+                        Text(isProUnlocked ? "Premium Attivo" : "Premium Direct")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(AppleTheme.premiumGold)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(AppleTheme.premiumSurface)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
+                    )
+                    .shadow(color: AppleTheme.premiumAmber.opacity(0.14), radius: 4, x: 0, y: 2)
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
             }
             .padding(.horizontal, 16)
             .frame(height: 50)
@@ -551,14 +555,60 @@ struct PassaAiOSPinInputView: View {
     }
 }
 
+// MARK: - Avviso + Redirect diretto alla voce «Rete locale» di DirectSwitch nelle Impostazioni iOS
+
+struct LocalNetworkRedirectBanner: View {
+    var detailMessage: String? = nil
+    var onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "wifi.exclamationmark", color: AppleTheme.orange, size: 32)
+                Text("Abilita «Rete locale» per avviare")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
+                InfoCircleButton(
+                    title: "Perché serve «Rete locale»",
+                    message: "Su iPhone, Apple blocca il collegamento diretto Wi-Fi / Hotspot tra due telefoni se l'interruttore «Rete locale» è spento.\n\n1. Tocca il pulsante arancione qui sotto: si aprirà direttamente la pagina di DirectSwitch in Impostazioni.\n2. Attiva l'interruttore verde alla voce «Rete locale» (su entrambi gli iPhone).\n3. Torna in DirectSwitch: il trasferimento partirà subito."
+                )
+            }
+
+            Text(
+                detailMessage
+                    ?? "Se il trasferimento non si avvia, DirectSwitch non è abilitata per le reti locali. Tocca qui sotto per aprire direttamente la scheda di DirectSwitch in Impostazioni e attivare la voce «Rete locale»."
+            )
+            .font(.system(size: 13, weight: .medium))
+            .foregroundColor(AppleTheme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            ApplePrimaryButton(
+                title: "Attiva «Rete locale» in Impostazioni",
+                icon: "gearshape.fill",
+                color: AppleTheme.orange,
+                action: onOpenSettings
+            )
+        }
+        .padding(14)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(AppleTheme.orange.opacity(0.65), lineWidth: 1.2)
+        )
+    }
+}
+
 // MARK: - Utilità grafiche condivise (QR & Byte Formatter)
 
 enum DirectSwitchUIHelpers {
     static func formatBytes(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "0 MB" }
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: max(0, bytes))
+        return formatter.string(fromByteCount: bytes)
     }
 
     static func generateQrImage(from string: String) -> UIImage? {
