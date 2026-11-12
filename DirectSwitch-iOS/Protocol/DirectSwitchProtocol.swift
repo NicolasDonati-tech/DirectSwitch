@@ -325,6 +325,7 @@ struct RemoteAppScannerStartRequest: Codable, Equatable, Sendable {
     let sessionId: String
     let senderName: String
     var seedApps: [InstalledAppRecord] = []
+    var replaceExisting: Bool? = nil
 }
 
 struct RemoteAppScannerPollRequest: Codable, Equatable, Sendable {

@@ -552,24 +552,29 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "Maps"), "Google Maps")
 
         // 2. Stabilizzatore multi-fotogramma della fotocamera live:
-        //    - conferma al 1° frame le app note
-        //    - scarta rumore transitorio da movimento (1 solo frame) e categorie/widget Home
-        //    - conferma al 2° frame le app arbitrarie senza mai riemetterle al 3° frame
+        //    - richiede SEMPRE almeno 2 fotogrammi coerenti per qualsiasi candidato (zero falsi positivi da sfocatura/movimento)
+        //    - scarta rumore transitorio da movimento (1 solo frame), categorie, date calendario, barra di stato e pulsanti 2 lettere
+        //    - conferma al 2° fotogramma coerente senza mai riemettere duplicati ai fotogrammi successivi
         var stabilizer = LiveCameraCandidateStabilizer()
         let frame1 = stabilizer.ingestFrameLines([
-            "BANCOMAT", "Instagrx", "ClasseViva", "Produttività e finanza", "18°", "Nessun evento"
+            "BANCOMAT", "Instagrx", "ClasseViva", "Produttività e finanza", "18°", "GIO 12", "Iliad IT", "Lavoro", "PRO", "Nessun evento"
         ])
-        XCTAssertEqual(frame1, ["BANCOMAT"])
+        XCTAssertTrue(frame1.isEmpty)
 
         let frame2 = stabilizer.ingestFrameLines([
-            "ClasseViva", "Ryanair", "Giochi", "21°C"
+            "BANCOMAT", "ClasseViva", "Ryanair", "Giochi", "21°C", "OK", "A B C"
         ])
-        XCTAssertEqual(frame2, ["ClasseViva", "Ryanair"])
+        XCTAssertEqual(frame2, ["BANCOMAT", "ClasseViva"])
 
         let frame3 = stabilizer.ingestFrameLines([
             "BANCOMAT", "ClasseViva", "Ryanair"
         ])
-        XCTAssertTrue(frame3.isEmpty)
+        XCTAssertEqual(frame3, ["Ryanair"])
+
+        let frame4 = stabilizer.ingestFrameLines([
+            "BANCOMAT", "ClasseViva", "Ryanair"
+        ])
+        XCTAssertTrue(frame4.isEmpty)
 
         // 3. Protocollo cifrato AES-GCM per apertura/sincronizzazione fotocamera live sul nuovo iPhone + deduplica
         let keyHex = DirectSwitchCrypto.generateSessionKeyHex()
@@ -579,7 +584,8 @@ final class DirectSwitchTests: XCTestCase {
         let startReq = RemoteAppScannerStartRequest(
             sessionId: "sess-live-scan",
             senderName: "iPhone Vecchio",
-            seedApps: [seedApp]
+            seedApps: [seedApp],
+            replaceExisting: true
         )
         let startJson = String(data: try JSONEncoder().encode(startReq), encoding: .utf8)!
         let sealedStart = try DirectSwitchCrypto.sealJsonEnvelope(startJson, key: symKey)
@@ -611,5 +617,104 @@ final class DirectSwitchTests: XCTestCase {
         installer.appendAdditionalApps([scannedApp, duplicateSeed])
         XCTAssertEqual(installer.apps.count, 2)
         XCTAssertTrue(installer.selectedIds.contains(scannedApp.id))
+    }
+
+    func testZeroHallucinationTitleMatcherAndSpatialBoundingBoxParser() {
+        // 1. Verifica rigorosa titoli App Store: rifiuta parole generiche/sottotitoli, accetta titoli veri e troncamenti Home
+        XCTAssertFalse(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "IO",
+                wasTruncated: false,
+                storeAppName: "Pioggia prevista"
+            )
+        )
+        XCTAssertFalse(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Lavoro",
+                wasTruncated: false,
+                storeAppName: "InfoJobs - Offerte di Lavoro"
+            )
+        )
+        XCTAssertFalse(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "PRO",
+                wasTruncated: false,
+                storeAppName: "PRO - Fitness Tracker"
+            )
+        )
+        XCTAssertFalse(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Condividi",
+                wasTruncated: false,
+                storeAppName: "Condividi Spese"
+            )
+        )
+
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Subito",
+                wasTruncated: false,
+                storeAppName: "Subito - Annunci e shopping"
+            )
+        )
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Banca Mediol",
+                wasTruncated: true,
+                storeAppName: "Banca Mediolanum"
+            )
+        )
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Too Good To",
+                wasTruncated: true,
+                storeAppName: "Too Good To Go: End Food Waste"
+            )
+        )
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "ClasseViva",
+                wasTruncated: false,
+                storeAppName: "ClasseViva Studenti"
+            )
+        )
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Claude",
+                wasTruncated: false,
+                storeAppName: "Claude by Anthropic"
+            )
+        )
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Disney+",
+                wasTruncated: false,
+                storeAppName: "Disney+"
+            )
+        )
+
+        // 2. Filtro candidati: accetta etichette vere incluse sigle note (`IO`, `H&M`, `N26`), scarta date/UI/A-Z bar
+        let parsed = iOSInstalledAppsScanner.parsePlausibleAppCandidates([
+            "Aruba PEC", "Intesa Sanpa…", "IO", "H&M", "N26",
+            "GIO 12", "GIO 12 NOV", "12 NOV", "OK", "AM", "PM", "A B C",
+            "Iliad IT", "TIM 5G", "Raccolta smart", "Cerca app", "Istruzione"
+        ])
+        XCTAssertEqual(parsed.map(\.cleaned), ["Aruba PEC", "Intesa Sanpa", "IO", "H&M", "N26"])
+        XCTAssertEqual(parsed.first(where: { $0.cleaned == "Intesa Sanpa" })?.wasTruncated, true)
+
+        // 3. OCR spaziale: taglia barra di stato (y > 0.942), unisce etichette centrate su 2 righe sotto la stessa icona,
+        //    mantiene separate icone affiancate e NON fonde righe consecutive allineate a sinistra dell'elenco A–Z
+        let boxes: [RecognizedAppTextBox] = [
+            RecognizedAppTextBox(text: "Iliad IT", boundingBox: CGRect(x: 0.06, y: 0.96, width: 0.14, height: 0.016), confidence: 0.99),
+            RecognizedAppTextBox(text: "Intesa", boundingBox: CGRect(x: 0.11, y: 0.78, width: 0.08, height: 0.015), confidence: 0.98),
+            RecognizedAppTextBox(text: "Sanpaolo", boundingBox: CGRect(x: 0.09, y: 0.758, width: 0.12, height: 0.015), confidence: 0.98),
+            RecognizedAppTextBox(text: "Subito", boundingBox: CGRect(x: 0.35, y: 0.78, width: 0.09, height: 0.015), confidence: 0.98),
+            RecognizedAppTextBox(text: "Vinted", boundingBox: CGRect(x: 0.60, y: 0.78, width: 0.09, height: 0.015), confidence: 0.98),
+            RecognizedAppTextBox(text: "Aruba PEC", boundingBox: CGRect(x: 0.20, y: 0.50, width: 0.16, height: 0.018), confidence: 0.99),
+            RecognizedAppTextBox(text: "ASOS", boundingBox: CGRect(x: 0.20, y: 0.468, width: 0.08, height: 0.018), confidence: 0.99)
+        ]
+        let spatialLines = iOSInstalledAppsScanner.mergeAndSplitSpatialTextBoxes(boxes, stripTopStatusBar: true)
+        XCTAssertFalse(spatialLines.contains("Iliad IT"))
+        XCTAssertEqual(spatialLines, ["Intesa Sanpaolo", "Subito", "Vinted", "Aruba PEC", "ASOS"])
     }
 }

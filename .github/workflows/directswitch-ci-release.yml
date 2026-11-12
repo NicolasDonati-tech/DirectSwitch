@@ -86,6 +86,28 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             clean build 2>&1 | tee "$GITHUB_WORKSPACE/xcodebuild.log"
 
+      - name: Run DirectSwitch iOS Unit Tests
+        run: |
+          set -o pipefail
+          IOS_DIR="DirectSwitch-iOS"
+          if [ -d "DirectSwitch/DirectSwitch-iOS" ]; then
+            IOS_DIR="DirectSwitch/DirectSwitch-iOS"
+          fi
+          cd "$IOS_DIR"
+          SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; devs=[x for k,v in sorted(d.items(), reverse=True) if 'iOS' in k for x in v if 'iPhone' in x.get('name','') and x.get('isAvailable')]; print(devs[0]['udid'] if devs else '')")
+          echo "Using iOS Simulator UDID: $SIM_UDID"
+          test -n "$SIM_UDID"
+          xcodebuild test \
+            -project DirectSwitch.xcodeproj \
+            -scheme DirectSwitch \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -derivedDataPath build_sim_test \
+            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$GITHUB_WORKSPACE/xctest.log"
+
       - name: Verify Bundle & Package Free-Install + Release IPAs
         run: |
           set -o pipefail
@@ -134,11 +156,14 @@ jobs:
           cp DirectSwitch-Free-Install.ipa "$TMP_DIR/DirectSwitch-Free-Install.ipa"
           cp DirectSwitch-Release.ipa "$TMP_DIR/DirectSwitch-Release.ipa"
           echo "${GITHUB_SHA}" > "$TMP_DIR/commit.txt"
+          if [ -f "$GITHUB_WORKSPACE/xctest.log" ]; then
+            grep -E "(Test Case|Test Suite|Executed [0-9]+ tests|TEST SUCCEEDED)" "$GITHUB_WORKSPACE/xctest.log" | tail -n 80 > "$TMP_DIR/xctest-summary.txt" || true
+          fi
           cd "$TMP_DIR"
           git init -b latest-directswitch-ipa
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add DirectSwitch-Free-Install.ipa DirectSwitch-Release.ipa commit.txt
+          git add .
           git commit -m "Build DirectSwitch IPAs for ${GITHUB_SHA}"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" latest-directswitch-ipa
 
@@ -152,6 +177,10 @@ jobs:
           if [ -f "$GITHUB_WORKSPACE/xcodebuild.log" ]; then
             grep -E "(error:|warning:.*error|fatal error|BUILD FAILED)" -B 2 -A 5 "$GITHUB_WORKSPACE/xcodebuild.log" | tail -n 250 > "$TMP_DIR/errors.log" || true
             tail -n 250 "$GITHUB_WORKSPACE/xcodebuild.log" > "$TMP_DIR/tail.log" || true
+          fi
+          if [ -f "$GITHUB_WORKSPACE/xctest.log" ]; then
+            grep -E "(error:|failed|Test Case|TEST FAILED)" -B 2 -A 5 "$GITHUB_WORKSPACE/xctest.log" | tail -n 250 > "$TMP_DIR/xctest-errors.log" || true
+            tail -n 250 "$GITHUB_WORKSPACE/xctest.log" > "$TMP_DIR/xctest-tail.log" || true
           fi
           cd "$TMP_DIR"
           git init -b latest-directswitch-ipa

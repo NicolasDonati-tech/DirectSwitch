@@ -76,10 +76,8 @@ struct LiveCameraAppScannerSheet: View {
     @State private var didConfirmExplicitly: Bool = false
 
     private var subtitleText: String {
-        if !senderPhoneLabel.isEmpty {
-            return "Inquadra la schermata Home di \(senderPhoneLabel) e sfoglia con il dito le pagine delle sue App: vengono lette e aggiunte qui in tempo reale!"
-        }
-        return "Inquadra la schermata Home (o la Libreria App) del vecchio telefono e sfoglia le pagine con il dito: DirectSwitch legge tutte le app in tempo reale!"
+        let phoneRef = senderPhoneLabel.isEmpty ? "il vecchio telefono" : senderPhoneLabel
+        return "Per non saltare le app dentro le cartelle: su \(phoneRef) scorri fino all'ultima pagina a destra («Libreria app»), tira verso il basso per aprire l'elenco alfabetico A–Z e scorri piano davanti alla fotocamera!"
     }
 
     var body: some View {
@@ -170,7 +168,7 @@ struct LiveCameraAppScannerSheet: View {
                                     .clipShape(Capsule())
                                     .padding(.bottom, 12)
                                 } else {
-                                    Text("Sfoglia le pagine Home sul vecchio telefono")
+                                    Text("Scorri l'elenco A–Z in Libreria App (o le pagine Home)")
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundColor(.white)
                                         .padding(.horizontal, 12)
@@ -190,7 +188,7 @@ struct LiveCameraAppScannerSheet: View {
                             .stroke(AppleTheme.blue.opacity(0.45), lineWidth: 1.3)
                     )
 
-                    // Striscia live delle app rilevate (rimovibili con un tocco su x)
+                    // Striscia live delle app rilevate (rimovibili con un tocco su x o azzerabili)
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("App registrate (\(scanner.discoveredApps.count))")
@@ -198,9 +196,16 @@ struct LiveCameraAppScannerSheet: View {
                                 .foregroundColor(AppleTheme.textPrimary)
                             Spacer()
                             if scanner.newlyScannedCount > 0 {
-                                Text("+\(scanner.newlyScannedCount) dallo schermo")
+                                Text("+\(scanner.newlyScannedCount) lette")
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundColor(AppleTheme.green)
+                                Button("Azzera") {
+                                    scanner.resetToSeedApps()
+                                }
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(AppleTheme.orange)
+                                .buttonStyle(.plain)
+                                .padding(.leading, 4)
                             }
                         }
 
@@ -331,7 +336,7 @@ struct AutoAppScrollCaptureGuideSheet: View {
                                     }
                                 }
 
-                                Text("Senza attivare alcuna registrazione schermo: tocca il pulsante qui sotto per aprire automaticamente la fotocamera su **\(targetPhoneLabel)**, poi vai sulla schermata Home di questo telefono e sfoglia le pagine delle tue app!")
+                                Text("Senza attivare alcuna registrazione schermo: tocca il pulsante qui sotto per aprire la fotocamera su **\(targetPhoneLabel)**, poi su questo telefono vai all'ultima pagina a destra (**Libreria app**), scorri verso il basso per aprire l'**elenco A–Z** (così includi anche tutte le app nelle cartelle!) e scorri piano fino a Z.")
                                     .font(.system(size: 13))
                                     .foregroundColor(AppleTheme.textSecondary)
 
@@ -351,10 +356,10 @@ struct AutoAppScrollCaptureGuideSheet: View {
                             HStack(spacing: 10) {
                                 AppleSettingsIcon(systemName: "rectangle.stack.fill", color: AppleTheme.teal)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(canUsePairedNewIPhoneCamera ? "Alternativa su questo iPhone" : "Cattura rapida senza impostazioni")
+                                    Text(canUsePairedNewIPhoneCamera ? "Alternativa su questo iPhone" : "Cattura completa senza impostazioni")
                                         .font(.system(size: 12, weight: .bold))
                                         .foregroundColor(AppleTheme.teal)
-                                    Text("Screenshot rapidi alle pagine Home")
+                                    Text("Screenshot all'elenco A–Z in Libreria App")
                                         .font(.system(size: 17, weight: .bold))
                                         .foregroundColor(AppleTheme.textPrimary)
                                 }
@@ -362,20 +367,20 @@ struct AutoAppScrollCaptureGuideSheet: View {
 
                             guideStepRow(
                                 number: "1",
-                                title: "Vai sulla schermata Home di questo iPhone",
-                                detail: "Tocca il pulsante qui sotto e scorri dal basso verso l'alto per uscire sulla tua schermata Home con le icone delle app."
+                                title: "Apri l'elenco alfabetico A–Z in Libreria App",
+                                detail: "Vai sulla Home, scorri fino all'ultima pagina a destra («Libreria app») e tira con un dito verso il basso: vedrai il 100% delle tue app dalla A alla Z (incluse quelle chiuse nelle cartelle!)."
                             )
                             Divider()
                             guideStepRow(
                                 number: "2",
-                                title: "Fai uno screenshot a ogni pagina delle tue App",
-                                detail: "Premi «Tasto Laterale + Volume Su» sulle 2–4 pagine della tua Home (oppure nella «Libreria app» in fondo a destra)."
+                                title: "Fai uno screenshot mentre scorri dalla A alla Z",
+                                detail: "Premi «Tasto Laterale + Volume Su» sulle schermate dell'elenco A–Z (oppure sulle pagine della Home)."
                             )
                             Divider()
                             guideStepRow(
                                 number: "3",
                                 title: "Riapri DirectSwitch: lettura automatica!",
-                                detail: "Appena torni qui, DirectSwitch legge da sola tutte le app dagli screenshot appena fatti e ti permette di cancellarli dal Rullino con 1 tocco."
+                                detail: "Appena torni qui, DirectSwitch legge con precisione solo le app realmente presenti e ti permette di eliminare gli screenshot dal Rullino con 1 tocco."
                             )
 
                             if canUsePairedNewIPhoneCamera {
@@ -493,6 +498,7 @@ struct SenderAppsSelectionSheet: View {
     var pairedIPhoneName: String = ""
     var onTriggerPairedIPhoneScanner: (() -> Void)? = nil
     var onStartGuidedAutoCapture: (() -> Void)? = nil
+    var onResetAllCustomApps: (() -> Void)? = nil
 
     @State private var searchQuery: String = ""
     @State private var searchResults: [InstalledAppRecord] = []
@@ -677,11 +683,22 @@ struct SenderAppsSelectionSheet: View {
 
                         // PASSO 2: Elenco completo app rilevate e selezionate su questo iPhone
                         VStack(alignment: .leading, spacing: 10) {
-                            HStack {
+                            HStack(spacing: 10) {
                                 Text("Passo 2: App selezionate (\(selectedCount)/\(appsCatalog.count))")
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundColor(AppleTheme.textPrimary)
                                 Spacer()
+                                Button(action: resetToVerifiedInstalledOnly) {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "arrow.counterclockwise")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text("Rileva da zero")
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .foregroundColor(AppleTheme.orange)
+                                }
+                                .buttonStyle(.plain)
+
                                 if !appsCatalog.isEmpty {
                                     Button(action: {
                                         if deselectedAppIds.isEmpty {
@@ -953,8 +970,9 @@ struct SenderAppsSelectionSheet: View {
     }
 
     private func mergeDiscoveredAppsIntoCatalog(_ discovered: [InstalledAppRecord], generatedFramesCount: Int) {
+        let verified = iOSInstalledAppsScanner.filterFalsePositiveProbesOnSender(discovered)
         var newlyAdded = 0
-        for app in discovered {
+        for app in verified {
             let exists = appsCatalog.contains {
                 $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
                     || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
@@ -965,16 +983,32 @@ struct SenderAppsSelectionSheet: View {
             }
             deselectedAppIds.remove(app.id)
         }
-        if !discovered.isEmpty {
-            iOSInstalledAppsScanner.appendCustomApps(discovered)
+        if !verified.isEmpty {
+            iOSInstalledAppsScanner.appendCustomApps(verified)
         }
         isScanningScreenshots = false
         if newlyAdded > 0 {
             ocrStatusNote = "Estratti \(generatedFramesCount) screenshot automatici: aggiunte \(newlyAdded) nuove app (totale \(appsCatalog.count))!"
-        } else if !discovered.isEmpty {
+        } else if !verified.isEmpty {
             ocrStatusNote = "Analizzati \(generatedFramesCount) fotogrammi: tutte le app trovate sono già selezionate."
         } else {
             ocrStatusNote = "Analizzati \(generatedFramesCount) fotogrammi: nessuna nuova app rilevata."
+        }
+    }
+
+    private func resetToVerifiedInstalledOnly() {
+        iOSInstalledAppsScanner.clearSavedCustomApps()
+        deselectedAppIds.removeAll()
+        onResetAllCustomApps?()
+        let base = iOSInstalledAppsScanner.scanLocallyInstalledApps()
+        appsCatalog = base
+        searchResults = []
+        ocrStatusNote = "Elenco ripristinato alle sole app verificate localmente (\(base.count)). Ora puoi ripetere la scansione dalla Libreria app A–Z."
+        Task {
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(base)
+            if !enriched.isEmpty {
+                appsCatalog = enriched
+            }
         }
     }
 }

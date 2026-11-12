@@ -456,6 +456,7 @@ struct SendCategoriesStepView: View {
     var onStartAutoAppCapture: () -> Void
     var onExtractRecentAutoCaptureNow: () -> Void
     var onDeleteTempAutoRecording: () -> Void
+    var onResetAppsToZero: (() -> Void)? = nil
     var onManageApps: () -> Void
     var onAddFilesOrWhatsApp: () -> Void
     var onClearStagedFiles: () -> Void
@@ -743,10 +744,10 @@ struct SendCategoriesStepView: View {
                                     .foregroundColor(AppleTheme.textPrimary)
                                 Spacer()
                                 InfoCircleButton(
-                                    title: "Passo 1: Come registrare il 100% delle App",
+                                    title: "Passo 1: Come leggere il 100% delle App (anche nelle cartelle)",
                                     message: !isCrossOs
-                                        ? "• Metodo consigliato (5 secondi, zero registrazione schermo e zero impostazioni): tocca «Inquadra tutte le App col Nuovo iPhone». La fotocamera si aprirà da sola su \(pairedPayload.receiverName): ti basta andare sulla schermata Home di questo telefono e sfogliare le 2–4 pagine delle tue app davanti all'obiettivo!\n\n• In alternativa da questo iPhone: fai uno screenshot alle pagine della tua Home (Tasto Laterale + Volume Su) e riapri DirectSwitch per la lettura automatica."
-                                        : "Non serve attivare alcuna registrazione schermo:\n\n1. Vai sulla schermata Home di questo iPhone.\n2. Premi «Tasto Laterale + Volume Su» sulle 2–4 pagine delle tue App.\n3. Riapri DirectSwitch: tutte le tue app vengono lette e selezionate in automatico!"
+                                        ? "• Metodo consigliato (zero app inventate e zero app saltate): tocca «Inquadra tutte le App col Nuovo iPhone». Poi su questo telefono vai sulla Home fino all'ultima pagina a destra («Libreria app») e tira verso il basso per aprire l'elenco alfabetico A–Z (che contiene anche le app chiuse dentro le cartelle!). Scorri piano davanti alla fotocamera.\n\n• In alternativa da questo iPhone: fai screenshot dell'elenco A–Z in Libreria app (Tasto Laterale + Volume Su) e riapri DirectSwitch."
+                                        : "Non serve attivare alcuna registrazione schermo:\n\n1. Vai sulla Home di questo iPhone fino all'ultima pagina a destra («Libreria app») e tira verso il basso per aprire l'elenco A–Z (incluse tutte le app dentro le cartelle).\n2. Premi «Tasto Laterale + Volume Su» mentre scorri dalla A alla Z.\n3. Riapri DirectSwitch: tutte le tue app vengono lette in automatico!"
                                 )
                             }
 
@@ -754,7 +755,7 @@ struct SendCategoriesStepView: View {
                                 HStack(spacing: 10) {
                                     ProgressView()
                                         .tint(AppleTheme.blue)
-                                    Text("Lettura automatica delle App dalle pagine Home in corso...")
+                                    Text("Lettura automatica delle App in corso...")
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundColor(AppleTheme.blue)
                                 }
@@ -770,7 +771,7 @@ struct SendCategoriesStepView: View {
                                             .foregroundColor(AppleTheme.green)
                                     }
 
-                                    Text("Ora vai sulla **schermata Home** di questo iPhone e sfoglia lentamente le pagine delle tue App davanti alla fotocamera di \(pairedPayload.receiverName). Le app vengono aggiunte qui in tempo reale (**\(selectedAppsCount)** selezionate)!")
+                                    Text("Su questo iPhone scorri fino all'ultima pagina a destra (**Libreria app**), tira giù per aprire l'**elenco A–Z** (così non salta le app nelle cartelle!) e scorri piano davanti a \(pairedPayload.receiverName) (**\(selectedAppsCount)** selezionate).")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textPrimary)
 
@@ -807,7 +808,7 @@ struct SendCategoriesStepView: View {
                                     }
                                 }
                             } else if isAwaitingAutoAppCapture {
-                                Text("Vai ora sulla **schermata Home** di questo iPhone, premi **Tasto Laterale + Volume Su** su ciascuna pagina delle tue App e riapri DirectSwitch: verranno lette in automatico!")
+                                Text("Vai all'ultima pagina a destra (**Libreria app**), tira giù per aprire l'**elenco A–Z** (anche le app nelle cartelle!), fai screenshot con **Tasto Laterale + Volume Su** mentre scorri e riapri DirectSwitch.")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundColor(AppleTheme.orange)
 
@@ -848,7 +849,7 @@ struct SendCategoriesStepView: View {
                                 }
                             } else if !isCrossOs {
                                 if !hasCompletedAutoAppCapture {
-                                    Text("Senza registrazione schermo né impostazioni: apri con 1 tocco la fotocamera su **\(pairedPayload.receiverName)** e sfoglia le pagine della tua Home per 5 secondi!")
+                                    Text("Zero registrazione schermo: apri la fotocamera su **\(pairedPayload.receiverName)** e scorri l'**elenco A–Z in Libreria app** (ultima pagina a destra) per leggere il 100% delle app!")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
@@ -869,7 +870,7 @@ struct SendCategoriesStepView: View {
                                     HStack(spacing: 5) {
                                         Image(systemName: "rectangle.stack.fill")
                                             .font(.system(size: 11, weight: .semibold))
-                                        Text("Oppure fai uno screenshot alle pagine della Home")
+                                        Text("Oppure fai screenshot all'elenco A–Z in Libreria app")
                                             .font(.system(size: 12, weight: .semibold))
                                     }
                                     .foregroundColor(AppleTheme.teal)
@@ -879,15 +880,15 @@ struct SendCategoriesStepView: View {
                                 .buttonStyle(.plain)
                             } else {
                                 if !hasCompletedAutoAppCapture {
-                                    Text("Senza registrazione schermo né impostazioni: fai uno screenshot alle 2–4 pagine della tua schermata Home e riapri DirectSwitch!")
+                                    Text("Zero registrazione schermo: apri **Libreria app → elenco A–Z** (ultima pagina a destra, tira verso il basso), fai screenshot e riapri DirectSwitch!")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
 
                                 ApplePrimaryButton(
                                     title: hasCompletedAutoAppCapture
-                                        ? "Aggiungi altri screenshot delle pagine Home"
-                                        : "Cattura tutte le App dalle pagine Home",
+                                        ? "Aggiungi altri screenshot (Libreria app A–Z)"
+                                        : "Cattura tutte le App da Libreria app (A–Z)",
                                     icon: "iphone.and.arrow.forward",
                                     color: hasCompletedAutoAppCapture ? AppleTheme.teal : AppleTheme.blue,
                                     action: onStartAutoAppCapture
@@ -921,9 +922,25 @@ struct SendCategoriesStepView: View {
 
                         // PASSO 2: App selezionate pronte al trasferimento
                         VStack(alignment: .leading, spacing: 9) {
-                            Text("Passo 2: App selezionate da trasferire (\(selectedAppsCount))")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(AppleTheme.textPrimary)
+                            HStack(spacing: 8) {
+                                Text("Passo 2: App selezionate da trasferire (\(selectedAppsCount))")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                Spacer()
+                                if let resetAction = onResetAppsToZero,
+                                   (hasCompletedAutoAppCapture || totalDetectedAppsCount > 0) {
+                                    Button(action: resetAction) {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "arrow.counterclockwise")
+                                                .font(.system(size: 10, weight: .bold))
+                                            Text("Rileva da zero")
+                                                .font(.system(size: 11, weight: .semibold))
+                                        }
+                                        .foregroundColor(AppleTheme.orange)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
 
                             if !selectedAppsPreview.isEmpty {
                                 ScrollView(.horizontal, showsIndicators: false) {

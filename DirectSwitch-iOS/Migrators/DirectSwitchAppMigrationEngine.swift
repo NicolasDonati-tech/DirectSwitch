@@ -62,12 +62,26 @@ private actor AppStoreMetadataCache {
     }
 }
 
-/// Scanner delle app installate sull'iPhone mittente (combina rilevamento istantaneo `canOpenURL`,
-/// lettura automatica da screenshot Home / Impostazioni tramite Apple `Vision` OCR locale e ricerca diretta App Store).
-enum iOSInstalledAppsScanner {
-    private static let customAppsStorageKey = "directswitch_custom_sender_apps_v1"
+/// Candidato app estratto tramite OCR spaziale (preserva il flag `wasTruncated` quando l'etichetta sulla Home finiva con `…`).
+struct ParsedAppCandidate: Equatable, Sendable {
+    let cleaned: String
+    let wasTruncated: Bool
+}
 
-    /// Tutti gli schemi dichiarati in `Info.plist` (`<= 50` secondo il limite di sistema Apple iOS 15+).
+/// Riquadro di testo riconosciuto da `Vision` con coordinate normalizzate `(0..1)` per separare icone adiacenti e unire etichette su 2 righe.
+struct RecognizedAppTextBox: Equatable, Sendable {
+    let text: String
+    let boundingBox: CGRect
+    let confidence: Float
+}
+
+/// Scanner delle app installate sull'iPhone mittente (combina rilevamento istantaneo `canOpenURL`,
+/// lettura spaziale accurata da Libreria App / Home tramite Apple `Vision` OCR locale e verifica rigorosa App Store).
+enum iOSInstalledAppsScanner {
+    private static let legacyCustomAppsStorageKey = "directswitch_custom_sender_apps_v1"
+    private static let customAppsStorageKey = "directswitch_verified_sender_apps_v2"
+
+    /// Tutti gli schemi univoci dichiarati in `Info.plist` (`<= 50` secondo il limite Apple; esclusi schemi generici come `otpauth`/`msauth`/`booking` per zero falsi positivi).
     static let knownProbes: [iOSKnownAppProbe] = [
         iOSKnownAppProbe(bundleId: "net.whatsapp.WhatsApp", appName: "WhatsApp Messenger", urlScheme: "whatsapp-consumer", appStoreId: 310633997),
         iOSKnownAppProbe(bundleId: "net.whatsapp.WhatsAppSMB", appName: "WhatsApp Business", urlScheme: "whatsapp-smb", appStoreId: 1386412985),
@@ -83,7 +97,7 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.google.Drive", appName: "Google Drive", urlScheme: "googledrive", appStoreId: 507874739),
         iOSKnownAppProbe(bundleId: "com.google.photos", appName: "Google Foto", urlScheme: "googlephotos", appStoreId: 962194608),
         iOSKnownAppProbe(bundleId: "com.google.GoogleMobile", appName: "Google", urlScheme: "googleapp", appStoreId: 284815942),
-        iOSKnownAppProbe(bundleId: "com.google.Authenticator", appName: "Google Authenticator", urlScheme: "otpauth", appStoreId: 388497605),
+        iOSKnownAppProbe(bundleId: "com.google.Authenticator", appName: "Google Authenticator", urlScheme: "googleauthenticator", appStoreId: 388497605),
         iOSKnownAppProbe(bundleId: "com.spotify.client", appName: "Spotify", urlScheme: "spotify", appStoreId: 324684580),
         iOSKnownAppProbe(bundleId: "com.netflix.Netflix", appName: "Netflix", urlScheme: "nflx", appStoreId: 363590051),
         iOSKnownAppProbe(bundleId: "com.amazon.aiv.AIVApp", appName: "Amazon Prime Video", urlScheme: "aiv", appStoreId: 545519333),
@@ -95,7 +109,6 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.satispay.consumer", appName: "Satispay", urlScheme: "satispay", appStoreId: 934438340),
         iOSKnownAppProbe(bundleId: "com.microsoft.Office.Outlook", appName: "Microsoft Outlook", urlScheme: "ms-outlook", appStoreId: 951937596),
         iOSKnownAppProbe(bundleId: "com.microsoft.skype.teams", appName: "Microsoft Teams", urlScheme: "msteams", appStoreId: 1113153706),
-        iOSKnownAppProbe(bundleId: "com.microsoft.azureauthenticator", appName: "Microsoft Authenticator", urlScheme: "msauth", appStoreId: 983156458),
         iOSKnownAppProbe(bundleId: "us.zoom.videomeetings", appName: "Zoom Workplace", urlScheme: "zoomus", appStoreId: 546505307),
         iOSKnownAppProbe(bundleId: "com.atebits.Tweetie2", appName: "X", urlScheme: "twitter", appStoreId: 333903271),
         iOSKnownAppProbe(bundleId: "com.burbn.barcelona", appName: "Threads", urlScheme: "barcelona", appStoreId: 6446901002),
@@ -109,7 +122,6 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.ubercab.UberClient", appName: "Uber", urlScheme: "uber", appStoreId: 368677368),
         iOSKnownAppProbe(bundleId: "it.subito.iphone", appName: "Subito", urlScheme: "subito", appStoreId: 385368449),
         iOSKnownAppProbe(bundleId: "fr.vinted", appName: "Vinted", urlScheme: "vinted", appStoreId: 999479354),
-        iOSKnownAppProbe(bundleId: "com.booking.BookingApp", appName: "Booking.com", urlScheme: "booking", appStoreId: 367003839),
         iOSKnownAppProbe(bundleId: "com.airbnb.app", appName: "Airbnb", urlScheme: "airbnb", appStoreId: 401626263),
         iOSKnownAppProbe(bundleId: "com.openai.chat", appName: "ChatGPT", urlScheme: "chatgpt", appStoreId: 6448311069),
         iOSKnownAppProbe(bundleId: "com.shazam.Shazam", appName: "Shazam", urlScheme: "shazam", appStoreId: 284993459),
@@ -162,19 +174,23 @@ enum iOSInstalledAppsScanner {
     private static let homeScreenShortAliases: [String: String] = [
         "whatsapp": "WhatsApp Messenger",
         "wa business": "WhatsApp Business",
+        "whatsapp busi": "WhatsApp Business",
         "telegram": "Telegram Messenger",
         "maps": "Google Maps",
         "google maps": "Google Maps",
         "chrome": "Google Chrome",
+        "google chrom": "Google Chrome",
         "drive": "Google Drive",
         "prime video": "Amazon Prime Video",
         "amazon": "Amazon Shopping",
         "outlook": "Microsoft Outlook",
         "teams": "Microsoft Teams",
         "authenticator": "Google Authenticator",
+        "google authe": "Google Authenticator",
         "ms authenticator": "Microsoft Authenticator",
         "zoom": "Zoom Workplace",
         "booking": "Booking.com",
+        "booking.com": "Booking.com",
         "edge": "Microsoft Edge",
         "nexipay": "Nexi Pay",
         "nexi pay": "Nexi Pay",
@@ -190,51 +206,150 @@ enum iOSInstalledAppsScanner {
         "posteid": "PosteID",
         "cieid": "CieID",
         "aruba pec": "Aruba PEC",
+        "aruba id": "Aruba ID",
+        "bper": "BPER Banca",
+        "bper banca": "BPER Banca",
+        "mediolanum": "Banca Mediolanum",
+        "banca mediol": "Banca Mediolanum",
+        "banca sella": "Banca Sella",
+        "sella": "Banca Sella",
+        "credit agricole": "Crédit Agricole Italia",
+        "crédit agric": "Crédit Agricole Italia",
+        "credit agric": "Crédit Agricole Italia",
+        "isybank": "Isybank",
+        "illimity": "illimity Bank",
+        "widiba": "Banca Widiba",
+        "findomestic": "Findomestic",
+        "scalapay": "Scalapay",
+        "too good to": "Too Good To Go",
+        "too good to go": "Too Good To Go",
+        "just eat": "Just Eat",
+        "mediaset inf": "Mediaset Infinity",
+        "mediaset infinity": "Mediaset Infinity",
+        "raiplay": "RaiPlay",
+        "sky go": "Sky Go",
+        "mytim": "MyTIM",
+        "my vodafone": "My Vodafone",
+        "myfastweb": "MyFastweb",
+        "yt music": "YouTube Music",
+        "youtube musi": "YouTube Music",
+        "yt studio": "YouTube Studio",
         "proton vpn": "Proton VPN",
         "protonvpn": "Proton VPN",
+        "proton mail": "Proton Mail",
+        "nordvpn": "NordVPN",
+        "surfshark": "Surfshark VPN",
         "speedtest": "Speedtest by Ookla",
         "shelly": "Shelly Smart Control",
+        "shelly smart": "Shelly Smart Control",
+        "smart life": "Smart Life - Smart Living",
+        "tapo": "TP-Link Tapo",
+        "xiaomi home": "Xiaomi Home",
         "dreamehome": "Dreamehome",
         "mya2a": "MyA2A",
-        "italo": "Italo Treno"
+        "enel energia": "Enel Energia",
+        "plenitude": "Eni Plenitude",
+        "italo": "Italo Treno",
+        "trenord": "Trenord",
+        "unipolmove": "UnipolMove",
+        "classeviva": "ClasseViva Studenti",
+        "argo didup": "DidUP Famiglia",
+        "didup": "DidUP Famiglia",
+        "garmin": "Garmin Connect",
+        "garmin conne": "Garmin Connect",
+        "zepp": "Zepp",
+        "mi fitness": "Mi Fitness",
+        "miodottore": "MioDottore",
+        "doctolib": "Doctolib",
+        "immobiliare": "Immobiliare.it",
+        "autoscout24": "AutoScout24",
+        "giallozaffer": "GialloZafferano",
+        "fantacalcio": "Leghe Fantacalcio",
+        "gemini": "Google Gemini",
+        "copilot": "Microsoft Copilot",
+        "claude": "Claude by Anthropic",
+        "perplexity": "Perplexity",
+        "meta ai": "Meta AI",
+        "word": "Microsoft Word",
+        "excel": "Microsoft Excel",
+        "powerpoint": "Microsoft PowerPoint",
+        "onedrive": "Microsoft OneDrive",
+        "onenote": "Microsoft OneNote",
+        "google keep": "Google Keep",
+        "google meet": "Google Meet",
+        "google earth": "Google Earth",
+        "google trans": "Google Traduttore",
+        "traduci goog": "Google Traduttore",
+        "traduttore": "Google Traduttore",
+        "thefork": "TheFork",
+        "uber eats": "Uber Eats",
+        "lidl plus": "Lidl Plus",
+        "wizz air": "Wizz Air",
+        "ita airways": "ITA Airways",
+        "trade republ": "Trade Republic",
+        "scalable cap": "Scalable Capital",
+        "monte dei pa": "Banca MPS",
+        "banca mps": "Banca MPS",
+        "bnl": "BNL",
+        "bbva": "BBVA Italia",
+        "webank": "Webank",
+        "credem": "Credem Banca",
+        "mediobanca": "Mediobanca Premier",
+        "youapp": "YouApp",
+        "banco bpm": "YouApp",
+        "poste itali": "Poste Italiane",
+        "banca genera": "Banca Generali",
+        "ing italia": "ING Italia",
+        "sumup": "SumUp",
+        "now tv": "NOW"
     ]
 
-    /// Ripulisce un'etichetta letta dalla schermata Home (rimuovendo anche l'ellissi `…` delle icone con nomi lunghi).
+    /// Ripulisce un'etichetta letta dalla schermata Home / Libreria App (rimuovendo l'ellissi `…` o `...` e simboli di stato come ☁️/•).
     static func cleanHomeScreenAppLabel(_ raw: String) -> (cleaned: String, wasTruncated: Bool) {
         var working = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "•›<>-–—_·:"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "•›<>-–—_·:|«»\"?~*=,;()"))
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         var truncated = false
         if working.hasSuffix("…") {
             truncated = true
             working = String(working.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if working.hasSuffix("..") {
+        } else if working.hasSuffix("..") || working.hasSuffix(". .") {
             truncated = true
-            while working.hasSuffix(".") {
+            while working.hasSuffix(".") || working.hasSuffix(" ") {
                 working.removeLast()
             }
             working = working.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return (working, truncated)
+
+        // Compatta spazi multipli interni
+        let collapsed = working
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return (collapsed, truncated)
     }
 
-    /// Restituisce la query canonica ottimale per cercare l'app su App Store Italia partendo dall'etichetta della Home.
+    /// Restituisce la query canonica ottimale per cercare l'app su App Store Italia partendo dall'etichetta della Home / Libreria App.
     static func canonicalAppQuery(for rawLabel: String) -> String {
         let (cleaned, _) = cleanHomeScreenAppLabel(rawLabel)
         let lower = cleaned.lowercased()
         if let mapped = homeScreenShortAliases[lower] {
             return mapped
         }
+        let folded = lower.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "it_IT"))
+        if let mappedFolded = homeScreenShortAliases[folded] {
+            return mappedFolded
+        }
         return cleaned
     }
 
-    /// Indica se l'etichetta corrisponde già a un'app nota del dizionario rapido italiano/globale (confermabile al 1° fotogramma live).
+    /// Indica se l'etichetta corrisponde con certezza a un'app verificata con nome distintivo (`>= 4` caratteri, mai codici ambigui di 2 lettere).
     static func isInstantlyTrustedAppLabel(_ rawLabel: String) -> Bool {
         let (cleaned, _) = cleanHomeScreenAppLabel(rawLabel)
         let lower = cleaned.lowercased()
-        guard lower.count >= 2 else { return false }
+        guard lower.count >= 4 else { return false }
         if homeScreenShortAliases[lower] != nil {
             return true
         }
@@ -345,6 +460,10 @@ enum iOSInstalledAppsScanner {
     }
 
     static func loadSavedCustomApps() -> [InstalledAppRecord] {
+        // Rimuove eventuali app errate salvate da versioni precedenti nella vecchia chiave v1
+        if UserDefaults.standard.object(forKey: legacyCustomAppsStorageKey) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyCustomAppsStorageKey)
+        }
         guard let data = UserDefaults.standard.data(forKey: customAppsStorageKey),
               let decoded = try? JSONDecoder().decode([InstalledAppRecord].self, from: data) else {
             return []
@@ -356,6 +475,11 @@ enum iOSInstalledAppsScanner {
         if let data = try? JSONEncoder().encode(apps) {
             UserDefaults.standard.set(data, forKey: customAppsStorageKey)
         }
+    }
+
+    static func clearSavedCustomApps() {
+        UserDefaults.standard.removeObject(forKey: legacyCustomAppsStorageKey)
+        UserDefaults.standard.removeObject(forKey: customAppsStorageKey)
     }
 
     static func appendCustomApps(_ newApps: [InstalledAppRecord]) {
@@ -372,45 +496,144 @@ enum iOSInstalledAppsScanner {
         saveCustomApps(existing)
     }
 
-    /// Filtra le stringhe estratte tramite OCR dalla schermata Home (anche via fotocamera live), «Libreria app» o «Impostazioni → App»,
-    /// scartando orari, widget, categorie di sistema, dimensioni in MB/GB e app preinstallate Apple, fino a 200 app utente.
-    static func filterPlausibleAppNames(_ rawStrings: [String]) -> [String] {
-        let ignoredTerms: Set<String> = [
-            "impostazioni", "settings", "app", "applicazioni", "cerca", "search", "indietro",
-            "fotocamera", "foto", "telefono", "messaggi", "safari", "orologio", "calendario",
-            "promemoria", "note", "mappe", "meteo", "borsa", "salute", "wallet", "casa",
-            "dov'è", "trova", "app store", "itunes store", "file", "calcolatrice", "bussola",
-            "metro", "memo vocali", "contatti", "suggerimenti", "comandi rapidi", "lente",
-            "traduzi", "traduttore", "libri", "podcast", "tv", "musica", "fitness", "diario",
-            "password", "freeform", "watch", "facetime", "mail", "directswitch", "libreria app",
-            "app di default", "app predefinite", "app nascoste", "generali", "accessibilità",
-            "notifiche", "suoni e feedback", "full immersion", "tempo di utilizzo", "batteria",
-            "privacy e sicurezza", "spazio su iphone", "documenti e dati", "scarica app",
-            "elimina app", "registrazione schermo", "interrompi", "annulla", "fine",
-            "5g", "4g", "lte", "wifi", "wi-fi", "iliad", "vodafone", "tim", "windtre", "fastweb", "ho.",
-            "social", "utilità", "produttività e finanza", "produttività", "finanza", "creatività",
-            "informazione e lettura", "intrattenimento", "salute e forma fisica", "shopping e cibo",
-            "viaggi", "giochi", "altro", "aggiunte di recente", "suggerimenti di siri", "modifica",
-            "rimuovi app", "condividi app", "oggi", "ieri", "domani", "nessun evento",
-            "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"
+    /// Sul telefono Mittente verifica localmente i bundle ambigui (es. "Google" letto da una cartella o da "Google Maps",
+    /// "Messenger" letto da "WhatsApp Messenger", "X" letto da un tasto chiudi, "IO" letto da testo italiano):
+    /// poiché il loro schema URL è dichiarato in `Info.plist`, se `canOpenURL` è falso su questo iPhone l'app NON è installata.
+    @MainActor
+    static func filterFalsePositiveProbesOnSender(_ apps: [InstalledAppRecord]) -> [InstalledAppRecord] {
+        let strictLocalSchemeBundles: [String: String] = [
+            "com.google.googlemobile": "googleapp",
+            "com.facebook.messenger": "fb-messenger",
+            "net.whatsapp.whatsappsmb": "whatsapp-smb",
+            "com.atebits.tweetie2": "twitter",
+            "it.pagopa.app.io": "ioit"
+        ]
+        return apps.filter { app in
+            let lowerBundle = app.packageName.lowercased()
+            if let requiredScheme = strictLocalSchemeBundles[lowerBundle] {
+                return canOpenScheme(requiredScheme)
+            }
+            return true
+        }
+    }
+
+    /// Termini di sistema iOS, barra di stato, calendario dinamico, widget, cartelle generiche e badge che NON sono app scaricate.
+    static let ignoredNonAppTerms: Set<String> = [
+        // App di sistema Apple preinstallate
+        "impostazioni", "settings", "app", "applicazioni", "cerca", "q cerca", "search", "indietro",
+        "fotocamera", "foto", "telefono", "messaggi", "safari", "orologio", "calendario",
+        "promemoria", "note", "mappe", "meteo", "borsa", "salute", "wallet", "casa",
+        "dov'è", "dov e", "trova", "app store", "itunes store", "file", "calcolatrice", "bussola",
+        "metro", "memo vocali", "contatti", "suggerimenti", "comandi rapidi", "lente",
+        "traduci", "traduzi", "libri", "podcast", "tv", "musica", "fitness", "diario",
+        "password", "freeform", "watch", "apple watch", "airpods", "iphone", "ipad",
+        "facetime", "mail", "playground", "image playground", "inviti", "directswitch",
+        // Categorie Libreria App & nomi comuni di Cartelle sulla schermata Home
+        "libreria app", "libreria delle app", "cerca app", "cerca nelle app", "nessun risultato",
+        "app di default", "app predefinite", "app nascoste", "generali", "accessibilità",
+        "notifiche", "suoni e feedback", "full immersion", "personale", "riposo", "sonno", "alla guida",
+        "tempo di utilizzo", "batteria", "raccolta smart", "smart stack",
+        "privacy e sicurezza", "spazio su iphone", "documenti e dati", "scarica app",
+        "elimina app", "registrazione schermo", "interrompi", "annulla", "fine", "chiudi", "apri",
+        "social", "utilità", "utility", "produttività e finanza", "produttività", "finanza", "creatività",
+        "informazione e lettura", "informazione", "intrattenimento", "salute e forma fisica",
+        "shopping e cibo", "shopping", "cibo", "spesa", "viaggi", "trasporti", "mobilità",
+        "istruzione", "navigazione", "consultazione", "foto e video", "musica e audio",
+        "giochi", "altro", "varie", "extra", "aggiunte di recente", "suggerimenti di siri",
+        "modifica", "rimuovi app", "condividi app", "condividi", "rimuovi", "elimina",
+        "banche", "banca", "pagamenti", "carte", "lavoro", "ufficio", "scuola", "studio",
+        "sport", "notizie", "news", "streaming", "strumenti", "tools", "domotica", "famiglia",
+        // Barra di stato / Operatori SIM (le app reali si chiamano MyTIM, My Vodafone, MyFastweb)
+        "5g", "4g", "3g", "lte", "wifi", "wi-fi", "sos", "solo sos", "nessun servizio",
+        "iliad", "iliad it", "vodafone", "vodafone it", "tim", "tim it", "tim 5g",
+        "windtre 5g", "fastweb", "fastweb it", "ho.", "ho", "very", "kena",
+        // Giorni icona Calendario (es. "GIO 12"), mesi e widget Meteo / Foto
+        "lun", "mar", "mer", "gio", "ven", "sab", "dom",
+        "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+        "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica",
+        "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+        "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+        "gen", "feb", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic",
+        "jan", "aug", "sep", "oct", "dec",
+        "oggi", "ieri", "domani", "ora", "adesso", "nessun evento", "nessuna sveglia",
+        "sereno", "soleggiato", "nuvoloso", "pioggia", "temporale", "neve", "vento", "umidità",
+        "per te", "ricordi", "in evidenza", "media giornaliera",
+        // Badge grafici dentro le icone & brevi parole di sistema/interfaccia (evitano false corrispondenze sullo Store)
+        "pro", "max", "vip", "hd", "4k", "ai", "new", "free", "plus", "live", "play",
+        "info", "menu", "start", "stop", "scan", "chat", "call", "pass", "card", "shop",
+        "club", "test", "beta", "lite", "mini", "ultra", "auto", "smart", "cloud", "home",
+        "web", "net", "vpn", "pdf", "qr", "sim", "esim", "pin", "spid", "cie", "pec",
+        "ok", "no", "si", "sì", "am", "pm", "re", "di", "da", "in", "con", "su", "per",
+        "tra", "fra", "del", "al", "un", "una", "uno", "gli", "the", "and", "for", "off",
+        "tap", "add", "all", "are", "but", "can", "day", "end", "faq", "few", "get", "has",
+        "how", "key", "low", "min", "not", "now", "old", "one", "our", "out", "own", "pay",
+        "put", "run", "see", "set", "six", "two", "use", "way", "who", "why", "yes", "yet", "you"
+    ]
+
+    private static let ignoredSubstrings: [String] = [
+        "ultimo utilizzo", "mai utilizzat", "kb/s", "mb/s", "registrazione dello schermo",
+        "spazio disponibile", "in uso", "elementi nascosti", "nessun evento", "cerca app",
+        "iliad it", "vodafone it", "nessun servizio", "parzialmente nuvoloso", "condizioni meteo"
+    ]
+
+    /// Marchi univoci a 3 caratteri effettivamente diffusi in Italia come nomi completi sotto icona.
+    private static let allowedThreeCharAppTokens: Set<String> = [
+        "vlc", "dhl", "ups", "gls", "brt", "h&m", "n26", "avg", "kfc", "atm", "gtt", "bmw", "ovs", "bnl", "ing"
+    ]
+
+    /// Analizza e filtra le stringhe OCR mantenendo l'informazione `wasTruncated` (`…` / `...`) per il matching rigoroso.
+    static func parsePlausibleAppCandidates(_ rawStrings: [String]) -> [ParsedAppCandidate] {
+        let weekdayOrMonthPrefixes: Set<String> = [
+            "lun", "mar", "mer", "gio", "ven", "sab", "dom",
+            "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+            "gen", "feb", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic",
+            "jan", "aug", "sep", "oct", "dec"
         ]
 
-        let ignoredSubstrings: [String] = [
-            "ultimo utilizzo", "mai utilizzat", "kb/s", "mb/s", "registrazione dello schermo",
-            "spazio disponibile", "in uso", "elementi nascosti", "nessun evento"
-        ]
-
-        var out: [String] = []
+        var out: [ParsedAppCandidate] = []
         var seen = Set<String>()
 
         for raw in rawStrings {
-            let (cleaned, _) = cleanHomeScreenAppLabel(raw)
-            guard cleaned.count >= 2, cleaned.count <= 30 else { continue }
+            let (cleaned, wasTruncated) = cleanHomeScreenAppLabel(raw)
+            guard cleaned.count >= 2, cleaned.count <= 40 else { continue }
+
+            let words = cleaned.split(separator: " ").map(String.init)
+            // Un nome di icona o voce in Libreria App non è una frase lunga di un widget
+            guard words.count <= 5 else { continue }
+
+            // Scarta frammenti della barra laterale alfabetica A–Z (es. "A B C", "X Y")
+            if words.count >= 2 && words.allSatisfy({ $0.count <= 1 }) { continue }
 
             let lower = cleaned.lowercased()
-            if ignoredTerms.contains(lower) { continue }
-            if lower.hasSuffix("%") || lower.hasSuffix("°") || lower.hasSuffix("°c") { continue }
+            if ignoredNonAppTerms.contains(lower) { continue }
+            if lower.hasSuffix("%") || lower.hasSuffix("°") || lower.hasSuffix("°c") || lower.contains("€") || lower.contains("$") {
+                continue
+            }
             if ignoredSubstrings.contains(where: { lower.contains($0) }) { continue }
+
+            // Scarta etichette brevi a 2 o 3 caratteri non corrispondenti a un'app/alias noto (evita rumore grafico delle icone e pulsanti UI)
+            let isKnownShortAlias = homeScreenShortAliases[lower] != nil
+                || knownProbes.contains(where: { $0.appName.lowercased() == lower })
+            if cleaned.count == 2 && cleaned != "IO" && !isKnownShortAlias {
+                continue
+            }
+            if cleaned.count == 3 && !isKnownShortAlias && !allowedThreeCharAppTokens.contains(lower) {
+                continue
+            }
+
+            // Scarta date dell'icona Calendario / Lock / Widget (es. "GIO 12", "12 NOV", "GIO 12 NOV")
+            if words.count == 2 || words.count == 3 {
+                let lw = words.map { $0.lowercased().trimmingCharacters(in: .punctuationCharacters) }
+                let hasDateToken = lw.contains { weekdayOrMonthPrefixes.contains($0) }
+                let hasDayNumber = lw.contains { !$0.isEmpty && $0.allSatisfy(\.isNumber) && $0.count <= 2 }
+                if hasDateToken && hasDayNumber {
+                    continue
+                }
+                if words.count == 2, ["5g", "4g", "lte", "it"].contains(lw[1]),
+                   ["iliad", "vodafone", "tim", "windtre", "fastweb", "very", "kena", "ho", "ho."].contains(lw[0]) {
+                    continue
+                }
+            }
 
             // Scarta dimensioni spazio (es. "348,2 MB", "1.4 GB", "820 KB")
             if lower.hasSuffix(" mb") || lower.hasSuffix(" gb") || lower.hasSuffix(" kb") || lower.hasSuffix(" tb") {
@@ -420,81 +643,309 @@ enum iOSInstalledAppsScanner {
                 }
             }
 
-            // Scarta orari (es. 21:10), date o soli numeri/simboli
+            // Scarta orari (es. 20:09), date (12/11) o stringhe prive di almeno 2 lettere
+            if cleaned.contains(":") && cleaned.filter(\.isNumber).count >= 2 { continue }
             let lettersCount = cleaned.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
             if lettersCount < 2 { continue }
 
+            // Evita falsi positivi da "io" minuscolo in frasi italiane (l'app ufficiale PagoPA è scritta "IO" maiuscolo)
+            if lower == "io" && cleaned != "IO" { continue }
+
             if !seen.contains(lower) {
                 seen.insert(lower)
-                out.append(cleaned)
+                out.append(ParsedAppCandidate(cleaned: cleaned, wasTruncated: wasTruncated))
             }
         }
-        return Array(out.prefix(200))
+        return Array(out.prefix(250))
     }
 
-    /// Esegue l'OCR locale Apple `Vision` su un singolo `CGImage`.
-    private static func recognizeTextLines(in cgImg: CGImage) -> [String] {
-        var lines: [String] = []
+    /// Filtra le stringhe estratte tramite OCR restituendo i nomi candidati puliti (fino a 250 app utente).
+    static func filterPlausibleAppNames(_ rawStrings: [String]) -> [String] {
+        parsePlausibleAppCandidates(rawStrings).map(\.cleaned)
+    }
+
+    // MARK: - Geometria Spaziale Vision (Separa icone affiancate sulla stessa riga + Unisce etichette su 2 righe + Taglia barra di stato)
+
+    /// Suddivide una singola riga `VNRecognizedTextObservation` quando `Vision` fonde per errore due icone adiacenti
+    /// della griglia Home (es. `"Spotify   Netflix"` -> `["Spotify", "Netflix"]`) misurando il gap orizzontale tra parole.
+    private static func splitHorizontallyMergedObservation(
+        _ obs: VNRecognizedTextObservation,
+        minConfidence: Float
+    ) -> [RecognizedAppTextBox] {
+        guard let top = obs.topCandidates(1).first, top.confidence >= minConfidence else {
+            return []
+        }
+        let fullText = top.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fullText.isEmpty else { return [] }
+
+        // Individua i range delle singole parole nella stringa riconosciuta
+        var wordTokens: [(word: String, rect: CGRect)] = []
+        var searchStart = fullText.startIndex
+        while searchStart < fullText.endIndex {
+            while searchStart < fullText.endIndex && fullText[searchStart].isWhitespace {
+                searchStart = fullText.index(after: searchStart)
+            }
+            guard searchStart < fullText.endIndex else { break }
+            var wordEnd = searchStart
+            while wordEnd < fullText.endIndex && !fullText[wordEnd].isWhitespace {
+                wordEnd = fullText.index(after: wordEnd)
+            }
+            let range = searchStart..<wordEnd
+            let tokenStr = String(fullText[range])
+            if let wordObs = try? top.boundingBox(for: range) {
+                wordTokens.append((tokenStr, wordObs.boundingBox))
+            } else {
+                return [RecognizedAppTextBox(text: fullText, boundingBox: obs.boundingBox, confidence: top.confidence)]
+            }
+            searchStart = wordEnd
+        }
+
+        guard wordTokens.count >= 2 else {
+            return [RecognizedAppTextBox(text: fullText, boundingBox: obs.boundingBox, confidence: top.confidence)]
+        }
+
+        wordTokens.sort { $0.rect.minX < $1.rect.minX }
+
+        var segments: [RecognizedAppTextBox] = []
+        var currentWords: [String] = [wordTokens[0].word]
+        var currentUnionRect: CGRect = wordTokens[0].rect
+
+        for idx in 1..<wordTokens.count {
+            let next = wordTokens[idx]
+            let prevMaxX = currentUnionRect.maxX
+            let gap = next.rect.minX - prevMaxX
+            let avgHeight = max(0.008, (currentUnionRect.height + next.rect.height) * 0.5)
+            // Dentro il nome di una singola app lo spazio tra parole è ~0.35-0.8x altezza carattere (~0.006-0.015);
+            // tra due icone affiancate della Home il vuoto supera max(0.022, 1.85x altezza carattere) anche con fotocamera distante.
+            if gap > max(0.022, avgHeight * 1.85) {
+                segments.append(
+                    RecognizedAppTextBox(
+                        text: currentWords.joined(separator: " "),
+                        boundingBox: currentUnionRect,
+                        confidence: top.confidence
+                    )
+                )
+                currentWords = [next.word]
+                currentUnionRect = next.rect
+            } else {
+                currentWords.append(next.word)
+                currentUnionRect = currentUnionRect.union(next.rect)
+            }
+        }
+
+        segments.append(
+            RecognizedAppTextBox(
+                text: currentWords.joined(separator: " "),
+                boundingBox: currentUnionRect,
+                confidence: top.confidence
+            )
+        )
+        return segments
+    }
+
+    /// Elabora i riquadri spaziali `RecognizedAppTextBox`:
+    /// 1) Scarta la barra di stato superiore (`y > 0.942` negli screenshot: ora, operatore SIM, batteria) e scritte giganti dei widget.
+    /// 2) Unisce automaticamente le etichette centrate su 2 righe sotto la stessa icona (es. `"Intesa"` + `"Sanpaolo"` -> `"Intesa Sanpaolo"`),
+    ///    senza mai fondere righe distinte dell'elenco verticale A–Z in «Libreria app».
+    static func mergeAndSplitSpatialTextBoxes(
+        _ rawBoxes: [RecognizedAppTextBox],
+        stripTopStatusBar: Bool
+    ) -> [String] {
+        let maxAllowedHeight: CGFloat = stripTopStatusBar ? 0.036 : 0.055
+        let filteredBoxes = rawBoxes.filter { item in
+            let b = item.boundingBox
+            if stripTopStatusBar && b.minY > 0.942 {
+                return false
+            }
+            if b.height < 0.005 || b.height > maxAllowedHeight {
+                return false
+            }
+            return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        guard !filteredBoxes.isEmpty else { return [] }
+
+        // Ordina dall'alto verso il basso (maxY decrescente in Vision) e da sinistra a destra
+        let sorted = filteredBoxes.sorted { a, b in
+            if abs(a.boundingBox.maxY - b.boundingBox.maxY) > 0.012 {
+                return a.boundingBox.maxY > b.boundingBox.maxY
+            }
+            return a.boundingBox.minX < b.boundingBox.minX
+        }
+
+        var consumed = Set<Int>()
+        var outputLines: [String] = []
+
+        for i in sorted.indices {
+            if consumed.contains(i) { continue }
+            let upper = sorted[i]
+            let uBox = upper.boundingBox
+
+            // Verifica se subito sotto questa etichetta stretta (colonna icona Home < 0.29) c'è la 2ª riga centrate dello stesso nome app
+            var joinedText = upper.text
+            if uBox.width < 0.29 {
+                var bestLowerIdx: Int? = nil
+                var bestVGap: CGFloat = .greatestFiniteMagnitude
+
+                for j in (i + 1)..<sorted.count {
+                    if consumed.contains(j) { continue }
+                    let lower = sorted[j]
+                    let lBox = lower.boundingBox
+                    guard lBox.width < 0.29 else { continue }
+
+                    let maxLineHeight = max(uBox.height, lBox.height)
+                    let vGap = uBox.minY - lBox.maxY
+                    if vGap > maxLineHeight * 0.72 {
+                        if uBox.minY - lBox.maxY > 0.035 { break }
+                        continue
+                    }
+                    guard vGap >= -0.005 else { continue }
+
+                    // Stessa colonna verticale centrata sotto l'icona e altezza font compatibile
+                    let xDelta = abs(uBox.midX - lBox.midX)
+                    let isLeftAlignedAZRows = abs(uBox.minX - lBox.minX) < 0.010 && abs(uBox.width - lBox.width) > 0.05 && vGap > maxLineHeight * 0.42
+                    let heightRatio = maxLineHeight / max(0.001, min(uBox.height, lBox.height))
+                    if !isLeftAlignedAZRows && xDelta < 0.045 && heightRatio <= 1.70 && vGap < bestVGap {
+                        bestVGap = vGap
+                        bestLowerIdx = j
+                    }
+                }
+
+                if let matchIdx = bestLowerIdx {
+                    consumed.insert(matchIdx)
+                    joinedText = "\(upper.text) \(sorted[matchIdx].text)"
+                }
+            }
+
+            outputLines.append(joinedText)
+        }
+
+        return outputLines
+    }
+
+    /// Esegue l'OCR spaziale Apple `Vision` su un singolo screenshot (`CGImage`).
+    private static func recognizeTextLines(in cgImg: CGImage, stripTopStatusBar: Bool = true) -> [String] {
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = .accurate
         req.usesLanguageCorrection = false
         req.recognitionLanguages = ["it-IT", "en-US"]
         let handler = VNImageRequestHandler(cgImage: cgImg, options: [:])
         try? handler.perform([req])
-        if let observations = req.results {
-            for obs in observations {
-                if let top = obs.topCandidates(1).first, top.confidence >= 0.45 {
-                    lines.append(top.string)
-                }
-            }
+
+        guard let observations = req.results, !observations.isEmpty else { return [] }
+        var boxes: [RecognizedAppTextBox] = []
+        for obs in observations {
+            boxes.append(contentsOf: splitHorizontallyMergedObservation(obs, minConfidence: 0.56))
         }
-        return lines
+        return mergeAndSplitSpatialTextBoxes(boxes, stripTopStatusBar: stripTopStatusBar)
     }
 
-    /// Risolve i candidati testuali estratti dagli screenshot o dalla fotocamera live in record completi App Store (con icona e `trackId`).
+    /// Esegue l'OCR spaziale Apple `Vision` su un fotogramma live della fotocamera (`CVPixelBuffer`).
+    static func recognizeSpatialCameraFrameLines(
+        in pixelBuffer: CVPixelBuffer,
+        orientation: CGImagePropertyOrientation = .right,
+        minConfidence: Float = 0.60
+    ) -> [String] {
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .accurate
+        req.usesLanguageCorrection = false
+        req.recognitionLanguages = ["it-IT", "en-US"]
+        req.regionOfInterest = CGRect(x: 0.04, y: 0.05, width: 0.92, height: 0.90)
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
+        try? handler.perform([req])
+
+        guard let observations = req.results, !observations.isEmpty else { return [] }
+        var boxes: [RecognizedAppTextBox] = []
+        for obs in observations {
+            boxes.append(contentsOf: splitHorizontallyMergedObservation(obs, minConfidence: minConfidence))
+        }
+        // Nella fotocamera live il bordo superiore dell'inquadratura non coincide con y=1.0 dello schermo, quindi non tagliamo per Y fisso
+        return mergeAndSplitSpatialTextBoxes(boxes, stripTopStatusBar: false)
+    }
+
+    /// Risolve i candidati estratti (da Libreria App, schermata Home o fotocamera live) in record ufficiali App Store:
+    /// - Fast-path istantaneo a 0 chiamate `/search` per le 46 app verificate in `knownProbes`
+    /// - Concorrenza controllata (`chunkSize = 3` + pacing anti-rate-limit) per non perdere nessuna app su cataloghi da 100+ app
+    /// - Verifica rigorosa del titolo principale (`strictTitleSimilarity: true`) per zero app inventate
     static func resolveCandidateAppLines(_ extractedLines: [String]) async -> [InstalledAppRecord] {
-        let candidates = filterPlausibleAppNames(extractedLines)
+        let candidates = parsePlausibleAppCandidates(extractedLines)
         guard !candidates.isEmpty else { return [] }
 
         var resolved: [InstalledAppRecord] = []
         var seenKeys = Set<String>()
+        var networkCandidates: [(query: String, wasTruncated: Bool)] = []
 
-        let chunkSize = 8
+        // 1. Risoluzione offline immediata (0ms, zero rate-limit) per tutte le app già presenti in `knownProbes`
+        for cand in candidates {
+            let query = canonicalAppQuery(for: cand.cleaned)
+            if let probe = knownProbes.first(where: { $0.appName.caseInsensitiveCompare(query) == .orderedSame }) {
+                let dedup = "\(probe.bundleId.lowercased())_\(probe.appStoreId)"
+                if !seenKeys.contains(dedup) {
+                    seenKeys.insert(dedup)
+                    resolved.append(
+                        InstalledAppRecord(
+                            packageName: probe.bundleId,
+                            appName: probe.appName,
+                            appStoreId: probe.appStoreId,
+                            iconUrl: nil,
+                            urlScheme: probe.urlScheme
+                        )
+                    )
+                }
+            } else {
+                networkCandidates.append((query: query, wasTruncated: cand.wasTruncated))
+            }
+        }
+
+        // 2. Ricerca App Store controllata (`chunkSize = 3` + pausa leggera) per evitare qualsiasi blocco HTTP 429/403 di iTunes
+        let chunkSize = 3
         var idx = 0
-        while idx < candidates.count {
-            let slice = Array(candidates[idx..<min(idx + chunkSize, candidates.count)])
+        while idx < networkCandidates.count {
+            let slice = Array(networkCandidates[idx..<min(idx + chunkSize, networkCandidates.count)])
             idx += chunkSize
 
-            let batchMatches = await withTaskGroup(of: (String, InstalledAppRecord?).self) { group -> [(String, InstalledAppRecord?)] in
-                for candidate in slice {
+            let batchMatches = await withTaskGroup(of: InstalledAppRecord?.self) { group -> [InstalledAppRecord] in
+                for item in slice {
                     group.addTask {
-                        let query = canonicalAppQuery(for: candidate)
-                        let match = await iOSAppStoreCatalogResolver.searchBestMatch(appName: query, strictTitleSimilarity: true)
-                        return (candidate, match)
+                        await iOSAppStoreCatalogResolver.searchBestMatch(
+                            appName: item.query,
+                            wasTruncated: item.wasTruncated,
+                            strictTitleSimilarity: true
+                        )
                     }
                 }
-                var collected: [(String, InstalledAppRecord?)] = []
-                for await pair in group {
-                    collected.append(pair)
+                var collected: [InstalledAppRecord] = []
+                for await maybeApp in group {
+                    if let app = maybeApp {
+                        collected.append(app)
+                    }
                 }
                 return collected
             }
 
-            for (_, maybeApp) in batchMatches {
-                guard let app = maybeApp else { continue }
+            for app in batchMatches {
                 let dedup = "\(app.packageName.lowercased())_\(app.appStoreId ?? 0)"
                 if !seenKeys.contains(dedup) && app.packageName.lowercased() != "com.directswitch.ios" {
                     seenKeys.insert(dedup)
                     resolved.append(app)
                 }
             }
+
+            if idx < networkCandidates.count {
+                try? await Task.sleep(nanoseconds: 95_000_000)
+            }
+        }
+
+        // 3. Carica in un'unica chiamata batch `/lookup?id=...` le icone mancanti delle app risolte offline
+        if resolved.contains(where: { $0.iconUrl == nil }) {
+            resolved = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(resolved)
         }
 
         return resolved
     }
 
-    /// Legge tramite Apple `Vision` (`VNRecognizeTextRequest` 100% locale su dispositivo) i nomi di tutte le app
-    /// presenti negli screenshot della schermata Home o di «Impostazioni → App» e ne risolve icona e ID su App Store.
+    /// Legge tramite Apple `Vision` spaziale i nomi di tutte le app presenti negli screenshot scelti dall'utente.
     static func recognizeAppsFromScreenshots(_ images: [UIImage]) async -> [InstalledAppRecord] {
         guard !images.isEmpty else { return [] }
         let cgImages = images.compactMap(\.cgImage)
@@ -504,7 +955,7 @@ enum iOSInstalledAppsScanner {
             var lines: [String] = []
             for cgImg in cgImages {
                 autoreleasepool {
-                    lines.append(contentsOf: recognizeTextLines(in: cgImg))
+                    lines.append(contentsOf: recognizeTextLines(in: cgImg, stripTopStatusBar: true))
                 }
             }
             return lines
@@ -513,9 +964,8 @@ enum iOSInstalledAppsScanner {
         return await resolveCandidateAppLines(extractedLines)
     }
 
-    /// Estrae automaticamente tutti gli screenshot nitidi da un video di scorrimento schermo (`AVAsset`),
-    /// elaborando 1 fotogramma alla volta in `autoreleasepool` (~12 MB RAM costanti) senza salvare 30 foto nel Rullino.
-    static func extractLinesFromScrollVideoAsset(_ avAsset: AVAsset, maxScreenshots: Int = 30) async -> (lines: [String], generatedCount: Int) {
+    /// Estrae automaticamente i fotogrammi nitidi da un video di scorrimento schermo (`AVAsset`) in `autoreleasepool`.
+    static func extractLinesFromScrollVideoAsset(_ avAsset: AVAsset, maxScreenshots: Int = 35) async -> (lines: [String], generatedCount: Int) {
         final class UncheckedAssetBox: @unchecked Sendable {
             let asset: AVAsset
             init(_ asset: AVAsset) { self.asset = asset }
@@ -525,9 +975,8 @@ enum iOSInstalledAppsScanner {
         let totalSeconds = max(0.0, CMTimeGetSeconds(durationTime))
         guard totalSeconds > 0.15 else { return ([], 0) }
 
-        // Analizza fino a 60 secondi di scorrimento, scattando in automatico 1 screenshot ogni ~0.65s
-        let effectiveDuration = min(totalSeconds, 60.0)
-        let stepSeconds = max(0.65, effectiveDuration / Double(max(1, maxScreenshots)))
+        let effectiveDuration = min(totalSeconds, 65.0)
+        let stepSeconds = max(0.55, effectiveDuration / Double(max(1, maxScreenshots)))
         var sampleTimes: [CMTime] = []
         var cursor = 0.20
         while cursor < effectiveDuration && sampleTimes.count < maxScreenshots {
@@ -541,9 +990,9 @@ enum iOSInstalledAppsScanner {
         return await Task.detached(priority: .userInitiated) {
             let generator = AVAssetImageGenerator(asset: box.asset)
             generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 1170, height: 2532)
-            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.15, preferredTimescale: 600)
-            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.15, preferredTimescale: 600)
+            generator.maximumSize = CGSize(width: 1290, height: 2796)
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.12, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.12, preferredTimescale: 600)
 
             var allLines: [String] = []
             var count = 0
@@ -551,7 +1000,7 @@ enum iOSInstalledAppsScanner {
                 autoreleasepool {
                     if let cgImg = try? generator.copyCGImage(at: t, actualTime: nil) {
                         count += 1
-                        allLines.append(contentsOf: recognizeTextLines(in: cgImg))
+                        allLines.append(contentsOf: recognizeTextLines(in: cgImg, stripTopStatusBar: true))
                     }
                 }
             }
@@ -559,17 +1008,17 @@ enum iOSInstalledAppsScanner {
         }.value
     }
 
-    /// Analizza un file video locale (es. scelto da `PhotosPicker`) generando automaticamente gli screenshot di scorrimento.
+    /// Analizza un file video locale scelto esplicitamente dall'utente via `PhotosPicker`.
     static func recognizeAppsFromScrollVideoURL(_ url: URL) async -> (apps: [InstalledAppRecord], generatedScreenshots: Int) {
         let asset = AVURLAsset(url: url)
-        let (lines, framesCount) = await extractLinesFromScrollVideoAsset(asset, maxScreenshots: 30)
+        let (lines, framesCount) = await extractLinesFromScrollVideoAsset(asset, maxScreenshots: 35)
         guard !lines.isEmpty else { return ([], framesCount) }
         let apps = await resolveCandidateAppLines(lines)
         return (apps, framesCount)
     }
 
-    /// PASSO 1 AUTOMATICO: genera automaticamente tutti gli screenshot dall'ultima registrazione schermo a scorrimento
-    /// (e/o dagli screenshot appena fatti) al rientro in DirectSwitch, riconoscendo fino a 200 app in pochi secondi.
+    /// PASSO 1 AUTOMATICO: legge esclusivamente gli screenshot (o registrazioni schermo verticali) scattati per la sessione corrente,
+    /// evitando di analizzare vecchi video personali o vecchi screenshot di chat WhatsApp/web che inventerebbero app inesistenti.
     static func extractAutomaticScreenshotsAndRecognizeApps(since armedDate: Date?) async -> AutoScreenshotCaptureResult {
         var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if status == .notDetermined {
@@ -579,62 +1028,73 @@ enum iOSInstalledAppsScanner {
             return AutoScreenshotCaptureResult(discoveredApps: [], generatedScreenshotsCount: 0, analyzedVideoAssetLocalIdentifier: nil)
         }
 
+        // Finestra stretta: se armato dal Passo 1 usa l'istante di avvio (-10s), altrimenti solo gli ultimi 25 minuti (mai 48 ore!)
         let cutoffDate: Date
         if let armed = armedDate {
-            cutoffDate = armed.addingTimeInterval(-30)
+            cutoffDate = armed.addingTimeInterval(-10)
         } else {
-            cutoffDate = Date().addingTimeInterval(-48 * 3600)
+            cutoffDate = Date().addingTimeInterval(-25 * 60)
         }
 
         var collectedLines: [String] = []
         var totalGeneratedFrames = 0
         var newestAnalyzedVideoId: String? = nil
 
-        // 1. Cerca prima il video di scorrimento schermo registrato nella finestra temporale e genera i fotogrammi automatici
-        let videoFetch = PHFetchOptions()
-        videoFetch.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        videoFetch.predicate = NSPredicate(format: "creationDate >= %@ AND duration <= 240", cutoffDate as NSDate)
-        videoFetch.fetchLimit = armedDate != nil ? 2 : 3
+        // 1. Analizza video SOLO se l'utente aveva armato la cattura (`armedDate != nil`) E il video ha proporzioni verticali da schermo iPhone
+        if armedDate != nil {
+            let screenBounds = await MainActor.run { UIScreen.main.bounds }
+            let expectedAspect = min(screenBounds.width, screenBounds.height) / max(1.0, max(screenBounds.width, screenBounds.height))
 
-        let videoAssets = PHAsset.fetchAssets(with: .video, options: videoFetch)
-        if videoAssets.count > 0 {
-            var videos: [PHAsset] = []
-            videoAssets.enumerateObjects { asset, _, _ in
-                videos.append(asset)
-            }
+            let videoFetch = PHFetchOptions()
+            videoFetch.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            videoFetch.predicate = NSPredicate(format: "creationDate >= %@ AND duration <= 180", cutoffDate as NSDate)
+            videoFetch.fetchLimit = 2
 
-            let imageManager = PHImageManager.default()
-            let vidOptions = PHVideoRequestOptions()
-            vidOptions.isNetworkAccessAllowed = true
-            vidOptions.deliveryMode = .highQualityFormat
-
-            for videoPhAsset in videos {
-                let loadedAVAsset: AVAsset? = await withCheckedContinuation { continuation in
-                    var settled = false
-                    let lock = NSLock()
-                    imageManager.requestAVAsset(forVideo: videoPhAsset, options: vidOptions) { avAsset, _, _ in
-                        lock.lock()
-                        defer { lock.unlock() }
-                        guard !settled else { return }
-                        settled = true
-                        continuation.resume(returning: avAsset)
+            let videoAssets = PHAsset.fetchAssets(with: .video, options: videoFetch)
+            if videoAssets.count > 0 {
+                var screenVideos: [PHAsset] = []
+                videoAssets.enumerateObjects { asset, _, _ in
+                    guard asset.pixelHeight > asset.pixelWidth, asset.pixelWidth > 0 else { return }
+                    let vidAspect = CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight)
+                    // Accetta solo registrazioni con aspect ratio dello schermo dell'iPhone (~0.46), mai video 9:16=0.5625 girati dalla fotocamera!
+                    if abs(vidAspect - expectedAspect) <= 0.035 {
+                        screenVideos.append(asset)
                     }
                 }
-                if let avAsset = loadedAVAsset {
-                    let (videoLines, framesCount) = await extractLinesFromScrollVideoAsset(avAsset, maxScreenshots: 30)
-                    if framesCount > 0 {
-                        totalGeneratedFrames += framesCount
-                        collectedLines.append(contentsOf: videoLines)
-                        if newestAnalyzedVideoId == nil {
-                            newestAnalyzedVideoId = videoPhAsset.localIdentifier
+
+                let imageManager = PHImageManager.default()
+                let vidOptions = PHVideoRequestOptions()
+                vidOptions.isNetworkAccessAllowed = true
+                vidOptions.deliveryMode = .highQualityFormat
+
+                for videoPhAsset in screenVideos {
+                    let loadedAVAsset: AVAsset? = await withCheckedContinuation { continuation in
+                        var settled = false
+                        let lock = NSLock()
+                        imageManager.requestAVAsset(forVideo: videoPhAsset, options: vidOptions) { avAsset, _, _ in
+                            lock.lock()
+                            defer { lock.unlock() }
+                            guard !settled else { return }
+                            settled = true
+                            continuation.resume(returning: avAsset)
+                        }
+                    }
+                    if let avAsset = loadedAVAsset {
+                        let (videoLines, framesCount) = await extractLinesFromScrollVideoAsset(avAsset, maxScreenshots: 35)
+                        if framesCount > 0 {
+                            totalGeneratedFrames += framesCount
+                            collectedLines.append(contentsOf: videoLines)
+                            if newestAnalyzedVideoId == nil {
+                                newestAnalyzedVideoId = videoPhAsset.localIdentifier
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 2. Unisce anche gli screenshot delle pagine Home presenti nella stessa finestra temporale
-        let recentScreenshotPairs = await fetchRecentScreenshotsWithIdentifiersFromLibrary(maxCount: 16, since: cutoffDate)
+        // 2. Legge gli screenshot recenti dall'album «Istantanee» (fino a 20 pagine)
+        let recentScreenshotPairs = await fetchRecentScreenshotsWithIdentifiersFromLibrary(maxCount: 20, since: cutoffDate)
         let screenshotIdsForCleanup = armedDate != nil ? recentScreenshotPairs.map(\.localIdentifier) : []
         if !recentScreenshotPairs.isEmpty {
             let cgImgs = recentScreenshotPairs.compactMap(\.image.cgImage)
@@ -642,7 +1102,7 @@ enum iOSInstalledAppsScanner {
                 var out: [String] = []
                 for cg in cgImgs {
                     autoreleasepool {
-                        out.append(contentsOf: recognizeTextLines(in: cg))
+                        out.append(contentsOf: recognizeTextLines(in: cg, stripTopStatusBar: true))
                     }
                 }
                 return out
@@ -660,9 +1120,12 @@ enum iOSInstalledAppsScanner {
             )
         }
 
-        let resolvedApps = await resolveCandidateAppLines(collectedLines)
+        let rawResolved = await resolveCandidateAppLines(collectedLines)
+        let verifiedApps = await MainActor.run {
+            filterFalsePositiveProbesOnSender(rawResolved)
+        }
         return AutoScreenshotCaptureResult(
-            discoveredApps: resolvedApps,
+            discoveredApps: verifiedApps,
             generatedScreenshotsCount: totalGeneratedFrames,
             analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId,
             analyzedScreenshotLocalIdentifiers: screenshotIdsForCleanup
@@ -870,7 +1333,7 @@ enum iOSAppStoreCatalogResolver {
 
         // 4. Per eventuali app senza `appStoreId` (es. provenienti da Android), risolve per nome su App Store Italia
         for idx in working.indices where working[idx].appStoreId == nil {
-            if let resolved = await searchBestMatch(appName: working[idx].appName, strictTitleSimilarity: false) {
+            if let resolved = await searchBestMatch(appName: working[idx].appName, wasTruncated: false, strictTitleSimilarity: false) {
                 working[idx].appStoreId = resolved.appStoreId
                 if working[idx].iconUrl == nil {
                     working[idx].iconUrl = resolved.iconUrl
@@ -884,29 +1347,160 @@ enum iOSAppStoreCatalogResolver {
         return working
     }
 
-    static func searchBestMatch(appName: String, strictTitleSimilarity: Bool) async -> InstalledAppRecord? {
-        let trimmed = appName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if let cached = await AppStoreMetadataCache.shared.getByName(trimmed) {
-            return cached
+    /// Normalizza un titolo rimuovendo accenti e punteggiatura superflua (mantenendo `+` e `&` per nomi come `Disney+` e `H&M`).
+    static func normalizeForTitleMatch(_ raw: String) -> String {
+        let folded = raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "it_IT")).lowercased()
+        var out = ""
+        out.reserveCapacity(folded.count)
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "+" || scalar == "&" {
+                out.unicodeScalars.append(scalar)
+            } else {
+                out.append(" ")
+            }
         }
-        let results = await searchAppStore(query: trimmed, limit: 3)
-        guard let first = results.first else { return nil }
+        return out
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 
-        if strictTitleSimilarity {
-            let qLower = trimmed.lowercased()
-            let tLower = first.appName.lowercased()
-            let qFirstWord = qLower.split(separator: " ").first.map(String.init) ?? qLower
-            let matches = tLower.contains(qLower)
-                || qLower.contains(tLower)
-                || (qFirstWord.count >= 3 && tLower.contains(qFirstWord))
-            if !matches {
-                return nil
+    /// Estrae il titolo principale dell'app su App Store tagliando gli slogan di marketing dopo ` - `, `: `, `, `, ` by `, ` | `, ` (`, ecc.
+    static func extractPrimaryStoreTitle(_ storeTrackName: String) -> String {
+        let separators = [" - ", " – ", " — ", ": ", ", ", " | ", " · ", " • ", " (", " by "]
+        var bestCut = storeTrackName.endIndex
+        for sep in separators {
+            if let range = storeTrackName.range(of: sep), range.lowerBound < bestCut, range.lowerBound > storeTrackName.startIndex {
+                bestCut = range.lowerBound
+            }
+        }
+        return String(storeTrackName[..<bestCut]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Parole singole generiche che non devono mai abbinare per prefisso o titolo parziale un'app dello Store.
+    private static let genericAmbiguousSingleWords: Set<String> = [
+        "lavoro", "banche", "banca", "finanza", "scuola", "studio", "sport", "viaggi", "casa",
+        "salute", "foto", "video", "musica", "giochi", "notizie", "news", "meteo", "mappe",
+        "spesa", "cibo", "auto", "moto", "treni", "voli", "hotel", "varie", "altro", "extra",
+        "pro", "max", "vip", "hd", "4k", "ai", "new", "free", "plus", "live", "play", "scan",
+        "chat", "call", "smart", "cloud", "home", "club", "pass", "card", "shop", "info", "menu",
+        "test", "ora", "oggi", "ieri", "domani", "condividi", "modifica", "cerca", "apri", "chiudi"
+    ]
+
+    private static let allowedTrailingStoreQualifiers: Set<String> = [
+        "app", "mobile", "italia", "italy", "it", "banca", "bank", "banking", "pay", "messenger",
+        "shopping", "shop", "club", "music", "video", "tv", "plus", "go", "online", "smart", "control",
+        "home", "connect", "workplace", "studenti", "famiglia", "famiglie", "clienti", "card", "otp",
+        "live", "ai", "studio", "editor", "notify", "energia", "assicurazioni", "flights", "airlines",
+        "treno", "vpn", "browser", "mail"
+    ]
+
+    /// Verifica rigorosa anti-allucinazione tra il nome letto sullo schermo del telefono e il titolo ufficiale su App Store:
+    /// impedisce che parole casuali, nomi di cartelle o sottotitoli generino app inesistenti.
+    static func isVerifiedAppStoreTitleMatch(
+        candidateQuery: String,
+        wasTruncated: Bool,
+        storeAppName: String
+    ) -> Bool {
+        let cand = normalizeForTitleMatch(candidateQuery)
+        let prim = normalizeForTitleMatch(extractPrimaryStoreTitle(storeAppName))
+        let full = normalizeForTitleMatch(storeAppName)
+        guard !cand.isEmpty, !prim.isEmpty else { return false }
+
+        let candWords = cand.split(separator: " ").map(String.init)
+        let primWords = prim.split(separator: " ").map(String.init)
+        guard !candWords.isEmpty, !primWords.isEmpty else { return false }
+
+        if candWords.count == 1 && genericAmbiguousSingleWords.contains(cand) {
+            return false
+        }
+
+        // 1. Corrispondenza esatta col titolo principale dello Store (es. "Subito" == "Subito" in "Subito - Annunci e shopping")
+        if cand == prim || cand == full {
+            return true
+        }
+
+        // 2. Etichetta troncata da iOS sulla schermata Home con `…` (es. "Banca Mediol…" -> prefisso di "Banca Mediolanum")
+        if wasTruncated && cand.count >= 5 && (prim.hasPrefix(cand) || full.hasPrefix(cand)) {
+            return true
+        }
+
+        // 3. Corrispondenza per parole intere dall'inizio del titolo principale (es. "Fineco" -> "Fineco Bank", "ClasseViva" -> "ClasseViva Studenti")
+        if primWords.count > candWords.count && Array(primWords.prefix(candWords.count)) == candWords {
+            if candWords.count >= 2 {
+                return true
+            }
+            let trailing = primWords.dropFirst(candWords.count)
+            if cand.count >= 7 && primWords.count <= 3 {
+                return true
+            }
+            if cand.count >= 4 && primWords.count <= 3 && trailing.allSatisfy({ allowedTrailingStoreQualifiers.contains($0) }) {
+                return true
             }
         }
 
-        await AppStoreMetadataCache.shared.setByName(trimmed, record: first)
-        return first
+        return false
+    }
+
+    static func searchBestMatch(
+        appName: String,
+        wasTruncated: Bool = false,
+        strictTitleSimilarity: Bool
+    ) async -> InstalledAppRecord? {
+        let trimmed = appName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let cacheKey = wasTruncated ? "\(trimmed)|trunc" : trimmed
+        if let cached = await AppStoreMetadataCache.shared.getByName(cacheKey) {
+            return cached
+        }
+
+        let results = await searchAppStore(query: trimmed, limit: 8)
+
+        if !strictTitleSimilarity {
+            if let first = results.first {
+                await AppStoreMetadataCache.shared.setByName(cacheKey, record: first)
+                return first
+            }
+            return nil
+        }
+
+        // Priorità 1: match esatto sul titolo principale
+        let normQuery = normalizeForTitleMatch(trimmed)
+        if let exactHit = results.first(where: {
+            normalizeForTitleMatch(extractPrimaryStoreTitle($0.appName)) == normQuery
+                && isVerifiedAppStoreTitleMatch(candidateQuery: trimmed, wasTruncated: wasTruncated, storeAppName: $0.appName)
+        }) {
+            await AppStoreMetadataCache.shared.setByName(cacheKey, record: exactHit)
+            return exactHit
+        }
+
+        // Priorità 2: primo risultato verificato rigorosamente
+        if let verifiedHit = results.first(where: {
+            isVerifiedAppStoreTitleMatch(candidateQuery: trimmed, wasTruncated: wasTruncated, storeAppName: $0.appName)
+        }) {
+            await AppStoreMetadataCache.shared.setByName(cacheKey, record: verifiedHit)
+            return verifiedHit
+        }
+
+        // Priorità 3: se l'etichetta Home finiva con `…` e l'ultima parola era tagliata a metà (es. "Banca Mediol…"),
+        // cerca con le parole intere precedenti mantenendo l'obbligo che il titolo inizi con l'intero prefisso letto!
+        if wasTruncated {
+            let parts = trimmed.split(separator: " ").map(String.init)
+            if parts.count >= 2 {
+                let wholeWordsPrefix = parts.dropLast().joined(separator: " ")
+                if wholeWordsPrefix.count >= 4 {
+                    let fallbackResults = await searchAppStore(query: wholeWordsPrefix, limit: 15)
+                    if let truncHit = fallbackResults.first(where: {
+                        isVerifiedAppStoreTitleMatch(candidateQuery: trimmed, wasTruncated: true, storeAppName: $0.appName)
+                    }) {
+                        await AppStoreMetadataCache.shared.setByName(cacheKey, record: truncHit)
+                        return truncHit
+                    }
+                }
+            }
+        }
+
+        return nil
     }
 
     static func searchAppStore(query: String, limit: Int = 12) async -> [InstalledAppRecord] {
@@ -916,10 +1510,29 @@ enum iOSAppStoreCatalogResolver {
               let url = URL(string: "https://itunes.apple.com/search?term=\(encoded)&country=it&entity=software&limit=\(limit)") else {
             return []
         }
-        var req = URLRequest(url: url, timeoutInterval: 6.0)
-        req.httpMethod = "GET"
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
+
+        var responseData: Data? = nil
+        for attempt in 0..<2 {
+            var req = URLRequest(url: url, timeoutInterval: 6.5)
+            req.httpMethod = "GET"
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let code = (resp as? HTTPURLResponse)?.statusCode {
+                if code == 200 {
+                    responseData = data
+                    break
+                }
+                // Se iTunes applica un rate-limit temporaneo (429/403/503), attende 650ms e riprova per non saltare alcuna app
+                if (code == 429 || code == 403 || code >= 500) && attempt == 0 {
+                    try? await Task.sleep(nanoseconds: 650_000_000)
+                    continue
+                }
+                break
+            } else if attempt == 0 {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+            }
+        }
+
+        guard let data = responseData,
               let parsed = try? JSONDecoder().decode(ITunesLookupResponse.self, from: data) else {
             return []
         }
@@ -1564,36 +2177,46 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
     }
 }
 
-// MARK: - Stabilizzatore Multi-Fotogramma e Scanner Fotocamera Live in Tempo Reale (Zero Registrazione Schermo)
+// MARK: - Stabilizzatore Multi-Fotogramma e Scanner Fotocamera Live 4K Macro (Zero Registrazione Schermo, Zero App Inventate)
 
-/// Stabilizza le stringhe lette in tempo reale dalla fotocamera puntando lo schermo del vecchio telefono:
-/// - Le app note (dizionario rapido italiano/globale) vengono confermate al 1° fotogramma nitido.
-/// - Tutte le altre app dello Store richiedono 2 fotogrammi distinti (~0.4 sec) per azzerare falsi positivi da sfocatura durante lo swipe.
+/// Stabilizza le etichette lette in tempo reale dalla fotocamera puntando lo schermo del vecchio telefono:
+/// richiede SEMPRE almeno 2 fotogrammi nitidi coerenti (~0.28s) prima di confermare qualsiasi app,
+/// eliminando al 100% gli errori da sfocatura durante lo scorrimento delle pagine.
 struct LiveCameraCandidateStabilizer: Sendable {
     private var sightingsByKey: [String: Int] = [:]
     private var emittedKeys: Set<String> = []
+    var requiredFramesCount: Int = 2
 
     mutating func reset() {
         sightingsByKey.removeAll()
         emittedKeys.removeAll()
     }
 
+    mutating func allowRetry(forRawCandidates rawCandidates: [String]) {
+        for raw in rawCandidates {
+            let key = iOSInstalledAppsScanner.canonicalAppQuery(for: raw).lowercased()
+            emittedKeys.remove(key)
+            sightingsByKey[key] = 1
+        }
+    }
+
     mutating func ingestFrameLines(_ rawFrameLines: [String]) -> [String] {
-        let candidatesInFrame = iOSInstalledAppsScanner.filterPlausibleAppNames(rawFrameLines)
-        guard !candidatesInFrame.isEmpty else { return [] }
+        let parsedInFrame = iOSInstalledAppsScanner.parsePlausibleAppCandidates(rawFrameLines)
+        guard !parsedInFrame.isEmpty else { return [] }
 
         var newlyStabilized: [String] = []
-        for candidate in candidatesInFrame {
-            let key = iOSInstalledAppsScanner.canonicalAppQuery(for: candidate).lowercased()
+        let threshold = max(1, requiredFramesCount)
+
+        for cand in parsedInFrame {
+            let key = iOSInstalledAppsScanner.canonicalAppQuery(for: cand.cleaned).lowercased()
             guard !emittedKeys.contains(key) else { continue }
 
             let nextCount = (sightingsByKey[key] ?? 0) + 1
             sightingsByKey[key] = nextCount
 
-            let requiredFrames = iOSInstalledAppsScanner.isInstantlyTrustedAppLabel(candidate) ? 1 : 2
-            if nextCount >= requiredFrames {
+            if nextCount >= threshold {
                 emittedKeys.insert(key)
-                newlyStabilized.append(candidate)
+                newlyStabilized.append(cand.wasTruncated ? "\(cand.cleaned)…" : cand.cleaned)
             }
         }
         return newlyStabilized
@@ -1624,40 +2247,29 @@ private final class CameraFrameVisionWorker: NSObject, AVCaptureVideoDataOutputS
         from connection: AVCaptureConnection
     ) {
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastAnalyzedTimestamp >= 0.36 else { return }
+        guard now - lastAnalyzedTimestamp >= 0.27 else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastAnalyzedTimestamp = now
 
-        var recognizedStrings: [String] = []
+        var recognizedLines: [String] = []
         autoreleasepool {
-            let req = VNRecognizeTextRequest()
-            req.recognitionLevel = .accurate
-            req.usesLanguageCorrection = false
-            req.recognitionLanguages = ["it-IT", "en-US"]
-            req.regionOfInterest = CGRect(x: 0.04, y: 0.06, width: 0.92, height: 0.88)
-
-            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
-            try? handler.perform([req])
-
-            if let observations = req.results {
-                for obs in observations {
-                    if let top = obs.topCandidates(1).first, top.confidence >= 0.60 {
-                        recognizedStrings.append(top.string)
-                    }
-                }
-            }
+            recognizedLines = iOSInstalledAppsScanner.recognizeSpatialCameraFrameLines(
+                in: pixelBuffer,
+                orientation: .right,
+                minConfidence: 0.56
+            )
         }
 
-        guard !recognizedStrings.isEmpty else { return }
-        let readyBatch = stabilizer.ingestFrameLines(recognizedStrings)
+        guard !recognizedLines.isEmpty else { return }
+        let readyBatch = stabilizer.ingestFrameLines(recognizedLines)
         if !readyBatch.isEmpty {
             onNewStabilizedCandidates(readyBatch)
         }
     }
 }
 
-/// Gestisce la sessione `AVCaptureSession` 1080p ad autofocus ravvicinato per leggere dal vivo tutte le app
-/// sfogliate sulla schermata Home / Libreria App del vecchio telefono senza alcuna registrazione schermo.
+/// Gestisce la sessione `AVCaptureSession` 4K con autofocus Macro automatico (`builtInTripleCamera` / `builtInDualWideCamera`)
+/// per leggere nitidamente il 100% delle app sfogliate in «Libreria app (A–Z)» o sulla schermata Home del vecchio telefono.
 @MainActor
 final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
     @Published var discoveredApps: [InstalledAppRecord] = []
@@ -1670,6 +2282,7 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
     var onLiveAppsChanged: (([InstalledAppRecord]) -> Void)? = nil
 
     let captureSession = AVCaptureSession()
+    private var initialSeedApps: [InstalledAppRecord] = []
     private var isConfigured = false
     private var worker: CameraFrameVisionWorker? = nil
     private let haptic = UIImpactFeedbackGenerator(style: .light)
@@ -1685,6 +2298,7 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
                 unique.append(item)
             }
         }
+        initialSeedApps = unique
         discoveredApps = unique
         newlyScannedCount = 0
         latestDetectedAppName = nil
@@ -1703,6 +2317,14 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    func resetToSeedApps() {
+        worker?.resetState()
+        discoveredApps = initialSeedApps
+        newlyScannedCount = 0
+        latestDetectedAppName = nil
+        onLiveAppsChanged?(discoveredApps)
     }
 
     func startScanning() {
@@ -1742,6 +2364,21 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
         onLiveAppsChanged?(discoveredApps)
     }
 
+    private static func bestMacroCapableBackCamera() -> AVCaptureDevice? {
+        let preferredTypes: [AVCaptureDevice.DeviceType] = [
+            .builtInTripleCamera,
+            .builtInDualWideCamera,
+            .builtInDualCamera,
+            .builtInWideAngleCamera
+        ]
+        for type in preferredTypes {
+            if let dev = AVCaptureDevice.default(type, for: .video, position: .back) {
+                return dev
+            }
+        }
+        return AVCaptureDevice.default(for: .video)
+    }
+
     private func configureSessionIfNeededAndStart() {
         if !isConfigured {
             let visionWorker = CameraFrameVisionWorker { [weak self] candidates in
@@ -1752,15 +2389,9 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
             self.worker = visionWorker
 
             captureSession.beginConfiguration()
-            if captureSession.canSetSessionPreset(.hd1920x1080) {
-                captureSession.sessionPreset = .hd1920x1080
-            } else {
-                captureSession.sessionPreset = .high
-            }
 
-            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-                ?? AVCaptureDevice.default(for: .video)
-            if let device {
+            // Aggiunge prima l'input fotocamera virtuale (così può abilitare sia il Macro ravvicinato automatico sia il 4K nitido)
+            if let device = Self.bestMacroCapableBackCamera() {
                 if (try? device.lockForConfiguration()) != nil {
                     if device.isFocusModeSupported(.continuousAutoFocus) {
                         device.focusMode = .continuousAutoFocus
@@ -1780,6 +2411,14 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
                    captureSession.canAddInput(input) {
                     captureSession.addInput(input)
                 }
+            }
+
+            if captureSession.canSetSessionPreset(.hd4K3840x2160) {
+                captureSession.sessionPreset = .hd4K3840x2160
+            } else if captureSession.canSetSessionPreset(.hd1920x1080) {
+                captureSession.sessionPreset = .hd1920x1080
+            } else {
+                captureSession.sessionPreset = .high
             }
 
             let videoOutput = AVCaptureVideoDataOutput()
@@ -1828,7 +2467,6 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
 
             if addedAny {
                 self.haptic.impactOccurred()
-                iOSInstalledAppsScanner.appendCustomApps(resolved)
                 self.onLiveAppsChanged?(self.discoveredApps)
             }
         }

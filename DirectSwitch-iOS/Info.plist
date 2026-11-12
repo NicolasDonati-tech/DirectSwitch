@@ -84,7 +84,7 @@
 		<string>googledrive</string>
 		<string>googlephotos</string>
 		<string>googleapp</string>
-		<string>otpauth</string>
+		<string>googleauthenticator</string>
 		<string>spotify</string>
 		<string>nflx</string>
 		<string>aiv</string>
@@ -96,7 +96,6 @@
 		<string>satispay</string>
 		<string>ms-outlook</string>
 		<string>msteams</string>
-		<string>msauth</string>
 		<string>zoomus</string>
 		<string>twitter</string>
 		<string>barcelona</string>
@@ -110,7 +109,6 @@
 		<string>uber</string>
 		<string>subito</string>
 		<string>vinted</string>
-		<string>booking</string>
 		<string>airbnb</string>
 		<string>chatgpt</string>
 		<string>shazam</string>

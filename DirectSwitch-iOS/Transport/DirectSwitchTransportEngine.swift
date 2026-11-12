@@ -966,7 +966,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
             remoteScannerPeerName = req.senderName
-            remoteScannedApps = Self.mergeUniqueApps(remoteScannedApps, req.seedApps)
+            if req.replaceExisting == true {
+                remoteScannedApps = Self.mergeUniqueApps([], req.seedApps)
+            } else {
+                remoteScannedApps = Self.mergeUniqueApps(remoteScannedApps, req.seedApps)
+            }
             remoteScannerCompleted = false
             showRemoteAppScannerOnReceiver = true
             UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -1174,10 +1178,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             activeTransferScope = manifest.transferScope ?? ActiveTransferScope.inferred(from: manifest)
             visualStepProgress = acceptedItems.isEmpty ? 0.75 : 0.05
             if fullAllowed {
-                if let incomingApps = manifest.installedAppsPayload, !incomingApps.isEmpty {
-                    receivedInstalledApps = activeTransferScope.apps
-                        ? Self.mergeUniqueApps(incomingApps, remoteScannedApps)
-                        : incomingApps
+                if let incomingApps = manifest.installedAppsPayload {
+                    receivedInstalledApps = incomingApps
                 } else if activeTransferScope.apps && !remoteScannedApps.isEmpty {
                     receivedInstalledApps = remoteScannedApps
                 } else if !activeRunIsResume {
@@ -1571,7 +1573,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     /// Dal vecchio iPhone apre automaticamente lo Scanner Fotocamera Live sul nuovo iPhone già accoppiato.
     func requestRemoteAppScannerStart(
         pairedPayload: QrPairingPayload,
-        seedApps: [InstalledAppRecord]
+        seedApps: [InstalledAppRecord],
+        replaceExisting: Bool = false
     ) async throws -> RemoteAppScannerStatusResponse {
         var candidateIps = pairedPayload.ips
         for b in discoveredBeacons where b.sessionId == pairedPayload.sessionId || b.receiverName == pairedPayload.receiverName {
@@ -1590,7 +1593,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         let req = RemoteAppScannerStartRequest(
             sessionId: pairedPayload.sessionId,
             senderName: UIDevice.current.name,
-            seedApps: seedApps
+            seedApps: seedApps,
+            replaceExisting: replaceExisting ? true : nil
         )
         let respData = try await postEncryptedJson(
             url: "http://\(reachableIp):\(pairedPayload.port)/v1/remote-app-scanner/start",

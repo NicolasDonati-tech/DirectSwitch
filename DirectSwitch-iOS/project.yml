@@ -69,7 +69,7 @@ targets:
           - googledrive
           - googlephotos
           - googleapp
-          - otpauth
+          - googleauthenticator
           - spotify
           - nflx
           - aiv
@@ -81,7 +81,6 @@ targets:
           - satispay
           - ms-outlook
           - msteams
-          - msauth
           - zoomus
           - twitter
           - barcelona
@@ -95,7 +94,6 @@ targets:
           - uber
           - subito
           - vinted
-          - booking
           - airbnb
           - chatgpt
           - shazam
