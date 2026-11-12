@@ -56,7 +56,7 @@
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>DirectSwitch legge e importa tutti i promemoria sul nuovo iPhone evitando duplicati.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>DirectSwitch utilizza la fotocamera per inquadrare il codice QR del telefono ricevente.</string>
+	<string>DirectSwitch utilizza la fotocamera per inquadrare il codice QR di collegamento o il codice QR di trasferimento chat di WhatsApp.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>processing</string>
@@ -76,14 +76,14 @@
 		<string>tg</string>
 		<string>fb</string>
 		<string>fb-messenger</string>
-		<string>snssdk1233</string>
+		<string>tiktok</string>
 		<string>youtube</string>
 		<string>googlegmail</string>
 		<string>comgooglemaps</string>
 		<string>googlechrome</string>
 		<string>googledrive</string>
 		<string>googlephotos</string>
-		<string>google</string>
+		<string>googleapp</string>
 		<string>otpauth</string>
 		<string>spotify</string>
 		<string>nflx</string>
@@ -114,7 +114,8 @@
 		<string>airbnb</string>
 		<string>chatgpt</string>
 		<string>shazam</string>
-		<string>ryanair</string>
+		<string>canva</string>
+		<string>ebay</string>
 		<string>ioit</string>
 		<string>posteid</string>
 	</array>

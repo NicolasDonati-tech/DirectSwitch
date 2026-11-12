@@ -431,6 +431,8 @@ struct SendCategoriesStepView: View {
     let isLocalProUnlocked: Bool
     let pickedDocuments: [(ManifestItem, URL)]
     let selectedAppsCount: Int
+    let totalDetectedAppsCount: Int
+    let selectedAppsPreview: [InstalledAppRecord]
 
     @Binding var includeContacts: Bool
     @Binding var includePhotos: Bool
@@ -462,6 +464,10 @@ struct SendCategoriesStepView: View {
 
     private var anySelected: Bool {
         includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeDocuments || includeApps || includeWhatsApp
+    }
+
+    private var isOnlyWhatsAppSelected: Bool {
+        includeWhatsApp && !includeContacts && !includePhotos && !includeVideos && !includeCalendars && !includeReminders && !includeDocuments && !includeApps
     }
 
     private var isCrossOs: Bool {
@@ -684,9 +690,11 @@ struct SendCategoriesStepView: View {
                     CleanCategoryToggleRow(
                         icon: "square.grid.2x2.fill",
                         iconColor: AppleTheme.blue,
-                        title: "App installate",
-                        countBadge: selectedAppsCount > 0 ? "\(selectedAppsCount) app pronte" : "Rileva app",
-                        infoMessage: "Passa al nuovo telefono l'elenco completo delle tue app con icona e ID ufficiale App Store, pronte per essere installate automaticamente una dopo l'altra!",
+                        title: "App scaricate",
+                        countBadge: includeApps
+                            ? (selectedAppsCount > 0 ? "\(selectedAppsCount) selezionate" : "Tocca per scegliere")
+                            : (totalDetectedAppsCount > 0 ? "\(totalDetectedAppsCount) sul telefono" : nil),
+                        infoMessage: "Quando «App scaricate» è spuntata in blu, seleziona automaticamente tutte le app presenti su questo iPhone per installarle una dopo l'altra sul nuovo telefono!",
                         isOn: $includeApps
                     )
 
@@ -698,80 +706,111 @@ struct SendCategoriesStepView: View {
                         title: "Chat WhatsApp",
                         countBadge: whatsAppCount > 0
                             ? "Cronologia QR + \(whatsAppCount) .zip"
-                            : (isCrossOs ? "Senza cavo via QR (Android Switch)" : "Cronologia diretta via QR"),
+                            : (isCrossOs ? "Senza cavo via QR (Android Switch)" : "Passaggio diretto via QR"),
                         infoMessage: isCrossOs
-                            ? "Al termine della copia, DirectSwitch apre il modulo senza cavo sul telefono Android per mostrare il codice QR: su questo iPhone ti basterà aprire WhatsApp Personale → Impostazioni → Chat → Trasferisci chat su Android e inquadrare il QR."
-                            : "Al termine della copia, DirectSwitch apre WhatsApp Personale (mai Business per errore) e ti guida nei 2 tocchi dentro Impostazioni → Chat → Trasferisci chat su iPhone per spostare tutte le chat senza iCloud.",
+                            ? "Apre una schermata dedicata al passaggio delle chat verso Android con codice QR diretto senza cavo."
+                            : "Apre una schermata dedicata esclusivamente a WhatsApp con scanner QR integrato per andare direttamente su «Trasferisci la cronologia chat» senza passare dalla Fotocamera di iPhone.",
                         isOn: $includeWhatsApp
                     )
                 }
                 .appleCard(padding: 0)
 
-                // Card dedicata per vedere tutte le app rilevate sull'iPhone che invia o importarle da screenshot Home
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Elenco App di questo iPhone")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                        Spacer()
-                        InfoCircleButton(
-                            title: "Passare il 100% delle tue App",
-                            message: "DirectSwitch rileva subito in automatico le app principali installate su questo iPhone.\n\nTocca il pulsante qui sotto per vedere l'elenco completo con le icone, cercare eventuali altre app oppure importarle tutte in 2 secondi da uno screenshot della schermata Home o di «Impostazioni → App»!"
-                        )
-                    }
-
-                    AppleSecondaryButton(
-                        title: selectedAppsCount > 0
-                            ? "Mostra o aggiungi le tue App (\(selectedAppsCount) selezionate)"
-                            : "Mostra e seleziona le App di questo iPhone",
-                        icon: "square.grid.2x2.fill",
-                        tint: AppleTheme.blue,
-                        action: onManageApps
-                    )
-                }
-                .appleCard(padding: 14)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Cartelle «Su iPhone», File o Password .csv")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                        Spacer()
-                        InfoCircleButton(
-                            title: "Cartelle «Su iPhone» e Password senza iCloud",
-                            message: "• Puoi selezionare singoli file oppure INTERE CARTELLE da «Su iPhone» nell'app File (inclusi Memo Vocali salvati in File e PDF): DirectSwitch ricrea automaticamente tutte le sottocartelle sul nuovo iPhone.\n\n• Vuoi passare anche le Password salvate senza Portachiavi iCloud? Apri Impostazioni → App → Password (o Safari) → Esporta password (.csv), salva il file e allegalo qui: sul nuovo iPhone comparirà il tasto rapido per reimportarle tutte!"
-                        )
-                    }
-
-                    AppleSecondaryButton(
-                        title: pickedDocuments.isEmpty
-                            ? "Scegli file, cartelle «Su iPhone» o Password .csv"
-                            : "Aggiungi altri file o cartelle (\(pickedDocuments.count) pronti)",
-                        icon: "folder.badge.plus",
-                        tint: AppleTheme.blue,
-                        action: onAddFilesOrWhatsApp
-                    )
-
-                    if !pickedDocuments.isEmpty {
+                // Visibile ESCLUSIVAMENTE quando la spunta «App scaricate» è attiva in blu
+                if includeApps {
+                    VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text(pickedDocuments.map { $0.0.fileName }.joined(separator: ", "))
-                                .font(.system(size: 12))
-                                .foregroundColor(AppleTheme.textSecondary)
-                                .lineLimit(1)
+                            Text("App scaricate selezionate (\(selectedAppsCount))")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(AppleTheme.textPrimary)
                             Spacer()
-                            Button("Rimuovi", action: onClearStagedFiles)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(AppleTheme.red)
-                                .buttonStyle(.plain)
+                            InfoCircleButton(
+                                title: "Tutte le App di questo iPhone",
+                                message: "Tutte le app rilevate sul telefono vengono selezionate automaticamente quando attivi «App scaricate».\n\nTocca il pulsante qui sotto per controllare l'elenco, deselezionarne qualcuna oppure importare il 100% delle tue app anche da uno screenshot della Home o di «Impostazioni → App»!"
+                            )
+                        }
+
+                        if !selectedAppsPreview.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(selectedAppsPreview.prefix(12)) { app in
+                                        AppIconThumbnailView(iconUrl: app.iconUrl, size: 34)
+                                    }
+                                    if selectedAppsCount > 12 {
+                                        Text("+\(selectedAppsCount - 12)")
+                                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                                            .foregroundColor(AppleTheme.blue)
+                                            .frame(width: 34, height: 34)
+                                            .background(AppleTheme.cardSelected)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    }
+                                }
+                            }
+                        }
+
+                        AppleSecondaryButton(
+                            title: selectedAppsCount > 0
+                                ? "Vedi elenco o aggiungi altre App (\(selectedAppsCount) selezionate)"
+                                : "Aggiungi le App di questo iPhone",
+                            icon: "square.grid.2x2.fill",
+                            tint: AppleTheme.blue,
+                            action: onManageApps
+                        )
+                    }
+                    .appleCard(padding: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                // Visibile ESCLUSIVAMENTE quando la spunta «Documenti, Cartelle e Password» è attiva in blu
+                if includeDocuments {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Cartelle «Su iPhone», File o Password .csv")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Spacer()
+                            InfoCircleButton(
+                                title: "Cartelle «Su iPhone» e Password senza iCloud",
+                                message: "• Puoi selezionare singoli file oppure INTERE CARTELLE da «Su iPhone» nell'app File (inclusi Memo Vocali salvati in File e PDF): DirectSwitch ricrea automaticamente tutte le sottocartelle sul nuovo iPhone.\n\n• Vuoi passare anche le Password salvate senza Portachiavi iCloud? Apri Impostazioni → App → Password (o Safari) → Esporta password (.csv), salva il file e allegalo qui: sul nuovo iPhone comparirà il tasto rapido per reimportarle tutte!"
+                            )
+                        }
+
+                        AppleSecondaryButton(
+                            title: pickedDocuments.isEmpty
+                                ? "Scegli file, cartelle «Su iPhone» o Password .csv"
+                                : "Aggiungi altri file o cartelle (\(pickedDocuments.count) pronti)",
+                            icon: "folder.badge.plus",
+                            tint: AppleTheme.blue,
+                            action: onAddFilesOrWhatsApp
+                        )
+
+                        if !pickedDocuments.isEmpty {
+                            HStack {
+                                Text(pickedDocuments.map { $0.0.fileName }.joined(separator: ", "))
+                                    .font(.system(size: 12))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button("Rimuovi", action: onClearStagedFiles)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(AppleTheme.red)
+                                    .buttonStyle(.plain)
+                            }
                         }
                     }
+                    .appleCard(padding: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
-                .appleCard(padding: 14)
 
                 ApplePrimaryButton(
-                    title: "Copia i dati",
-                    icon: "arrow.right",
-                    color: AppleTheme.blue,
+                    title: (isOnlyWhatsAppSelected && whatsAppCount == 0)
+                        ? "Vai al passaggio Chat WhatsApp"
+                        : "Copia le voci selezionate",
+                    icon: (isOnlyWhatsAppSelected && whatsAppCount == 0)
+                        ? "bubble.left.and.bubble.right.fill"
+                        : "arrow.right",
+                    color: (isOnlyWhatsAppSelected && whatsAppCount == 0)
+                        ? AppleTheme.green
+                        : AppleTheme.blue,
                     isDisabled: !anySelected,
                     action: onStartCopy
                 )
@@ -906,5 +945,84 @@ struct QrCameraScannerView: UIViewControllerRepresentable {
             }
             onCodeScanned(stringValue)
         }
+    }
+}
+
+// MARK: - Scanner QR dedicato per aprire direttamente «Trasferisci la cronologia chat» di WhatsApp senza passare dalla Fotocamera iOS
+
+struct WhatsAppMigrationQrScannerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var scannerSessionToken: Int = 0
+    @State private var feedbackMessage: String? = nil
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                HStack(spacing: 8) {
+                    AppleSettingsIcon(systemName: "qrcode.viewfinder", color: AppleTheme.green)
+                    Text("Inquadra QR di WhatsApp")
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                }
+                Spacer()
+                Button("Chiudi") {
+                    dismiss()
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(AppleTheme.blue)
+            }
+            .padding(.top, 6)
+
+            Text("Inquadra il codice QR mostrato da WhatsApp sul nuovo telefono: DirectSwitch aprirà direttamente la schermata «Trasferisci la cronologia chat» dentro WhatsApp Personale, saltando la Fotocamera di iPhone e il bottone giallo.")
+                .font(.system(size: 13))
+                .foregroundColor(AppleTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ZStack {
+                QrCameraScannerView { rawCode in
+                    DirectSwitchTransportViewModel.openWhatsAppMigrationQrPayload(rawCode) { opened, errNote in
+                        if opened {
+                            dismiss()
+                        } else {
+                            feedbackMessage = errNote ?? "Codice QR non valido: inquadra il QR mostrato dentro WhatsApp sul nuovo telefono."
+                            scannerSessionToken += 1
+                        }
+                    }
+                }
+                .id(scannerSessionToken)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(AppleTheme.green, style: StrokeStyle(lineWidth: 3, dash: [18, 10]))
+                    .frame(width: 225, height: 225)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 310)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(AppleTheme.cardBorder, lineWidth: 1)
+            )
+
+            if let msg = feedbackMessage, !msg.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(AppleTheme.orange)
+                    Text(msg)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(AppleTheme.orange)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppleTheme.orange.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .background(AppleTheme.backgroundGradient.ignoresSafeArea())
+        .presentationDetents([.height(540), .large])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.light)
     }
 }

@@ -57,14 +57,14 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "ph.telegra.Telegraph", appName: "Telegram Messenger", urlScheme: "tg", appStoreId: 686449807),
         iOSKnownAppProbe(bundleId: "com.facebook.Facebook", appName: "Facebook", urlScheme: "fb", appStoreId: 284882215),
         iOSKnownAppProbe(bundleId: "com.facebook.Messenger", appName: "Messenger", urlScheme: "fb-messenger", appStoreId: 454638411),
-        iOSKnownAppProbe(bundleId: "com.zhiliaoapp.musically", appName: "TikTok", urlScheme: "snssdk1233", appStoreId: 835599320),
+        iOSKnownAppProbe(bundleId: "com.zhiliaoapp.musically", appName: "TikTok", urlScheme: "tiktok", appStoreId: 835599320),
         iOSKnownAppProbe(bundleId: "com.google.ios.youtube", appName: "YouTube", urlScheme: "youtube", appStoreId: 544007664),
         iOSKnownAppProbe(bundleId: "com.google.Gmail", appName: "Gmail", urlScheme: "googlegmail", appStoreId: 422689480),
         iOSKnownAppProbe(bundleId: "com.google.Maps", appName: "Google Maps", urlScheme: "comgooglemaps", appStoreId: 585027354),
         iOSKnownAppProbe(bundleId: "com.google.chrome.ios", appName: "Google Chrome", urlScheme: "googlechrome", appStoreId: 535886823),
         iOSKnownAppProbe(bundleId: "com.google.Drive", appName: "Google Drive", urlScheme: "googledrive", appStoreId: 507874739),
         iOSKnownAppProbe(bundleId: "com.google.photos", appName: "Google Foto", urlScheme: "googlephotos", appStoreId: 962194608),
-        iOSKnownAppProbe(bundleId: "com.google.GoogleMobile", appName: "Google", urlScheme: "google", appStoreId: 284815942),
+        iOSKnownAppProbe(bundleId: "com.google.GoogleMobile", appName: "Google", urlScheme: "googleapp", appStoreId: 284815942),
         iOSKnownAppProbe(bundleId: "com.google.Authenticator", appName: "Google Authenticator", urlScheme: "otpauth", appStoreId: 388497605),
         iOSKnownAppProbe(bundleId: "com.spotify.client", appName: "Spotify", urlScheme: "spotify", appStoreId: 324684580),
         iOSKnownAppProbe(bundleId: "com.netflix.Netflix", appName: "Netflix", urlScheme: "nflx", appStoreId: 363590051),
@@ -95,7 +95,8 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.airbnb.app", appName: "Airbnb", urlScheme: "airbnb", appStoreId: 401626263),
         iOSKnownAppProbe(bundleId: "com.openai.chat", appName: "ChatGPT", urlScheme: "chatgpt", appStoreId: 6448311069),
         iOSKnownAppProbe(bundleId: "com.shazam.Shazam", appName: "Shazam", urlScheme: "shazam", appStoreId: 284993459),
-        iOSKnownAppProbe(bundleId: "com.ryanair.cheapflights", appName: "Ryanair", urlScheme: "ryanair", appStoreId: 572698805),
+        iOSKnownAppProbe(bundleId: "com.canva.canvaeditor", appName: "Canva", urlScheme: "canva", appStoreId: 897446215),
+        iOSKnownAppProbe(bundleId: "com.ebay.iphone", appName: "eBay", urlScheme: "ebay", appStoreId: 282614216),
         iOSKnownAppProbe(bundleId: "it.pagopa.app.io", appName: "IO", urlScheme: "ioit", appStoreId: 1505842859),
         iOSKnownAppProbe(bundleId: "posteitaliane.posteapp.appposteid", appName: "PosteID", urlScheme: "posteid", appStoreId: 1078512138)
     ]
@@ -583,13 +584,32 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         apps.filter { selectedIds.contains($0.id) && !alreadyInstalledIds.contains($0.id) && !completedIds.contains($0.id) }.count
     }
 
+    func reset() {
+        stopSequence()
+        apps = []
+        selectedIds = []
+        completedIds = []
+        alreadyInstalledIds = []
+        isEnrichingMetadata = false
+    }
+
     func configure(with incomingApps: [InstalledAppRecord]) {
-        guard !incomingApps.isEmpty else { return }
+        guard !incomingApps.isEmpty else {
+            reset()
+            return
+        }
         if apps.map(\.id) == incomingApps.map(\.id) && !apps.isEmpty {
             refreshInstalledStatuses()
+            completedIds.removeAll()
+            selectedIds = Set(
+                apps
+                    .filter { !alreadyInstalledIds.contains($0.id) }
+                    .map(\.id)
+            )
             return
         }
 
+        completedIds.removeAll()
         apps = incomingApps
         refreshInstalledStatuses()
         selectedIds = Set(

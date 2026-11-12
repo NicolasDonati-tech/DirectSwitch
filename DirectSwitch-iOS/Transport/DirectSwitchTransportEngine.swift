@@ -97,12 +97,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var failedItemsCount: Int = 0
     @Published var contactsAlreadyPresentCount: Int = 0
     @Published var receivedInstalledApps: [InstalledAppRecord] = []
+    @Published var sentInstalledAppsCount: Int = 0
+    @Published var activeTransferScope: ActiveTransferScope = ActiveTransferScope()
+    @Published var visualStepProgress: Double = 0.0
     @Published var errorMessage: String? = nil
     @Published var activePairingPin: String = ""
     @Published var discoveredBeacons: [DiscoveryBeaconPayload] = []
     @Published var bootstrapPortalUrl: String? = nil
 
     private var listener: NWListener?
+    private var activeRunIsResume: Bool = false
     private var activeReceiverPort: UInt16 = 49443
     private var activeReceiverAdvertiseBonjour: Bool = true
     private var udpDiscoveryListener: NWListener?
@@ -219,6 +223,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         failedItemsCount = 0
         contactsAlreadyPresentCount = 0
         receivedInstalledApps = []
+        sentInstalledAppsCount = 0
+        activeTransferScope = ActiveTransferScope()
+        visualStepProgress = 0.0
+        activeRunIsResume = false
         errorMessage = nil
 
         Self.raiseOpenFileDescriptorLimitIfNeeded()
@@ -281,7 +289,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     }
 
     private func reviveReceiverListenerIfNeeded() {
-        guard !activeSessionId.isEmpty && !isCompleted else { return }
+        guard !activeSessionId.isEmpty else { return }
         if listener == nil {
             startHttpListener(port: activeReceiverPort, advertiseBonjour: activeReceiverAdvertiseBonjour)
             return
@@ -431,6 +439,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         failedItemsCount = 0
         contactsAlreadyPresentCount = 0
         receivedInstalledApps = []
+        sentInstalledAppsCount = 0
+        activeTransferScope = ActiveTransferScope()
+        visualStepProgress = 0.0
+        activeRunIsResume = false
         errorMessage = nil
         statusLabel = "Pronto al trasferimento diretto"
         iOSBackgroundTransferKeepAlive.shared.endActiveSession(completed: false)
@@ -493,6 +505,142 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         if let webStore = URL(string: "https://apps.apple.com/it/app/whatsapp-messenger/id310633997") {
             UIApplication.shared.open(webStore)
         }
+    }
+
+    /// Prepara e azzera in modo sincrono tutti i contatori prima di ogni nuovo trasferimento singolo o multiplo,
+    /// così ogni avvio parte rigorosamente da 0% senza mai mostrare dati o stati residui di un trasferimento precedente.
+    func prepareForFreshTransfer(
+        sessionId: String,
+        scope: ActiveTransferScope,
+        receiverName: String,
+        receiverPlatform: DevicePlatform
+    ) {
+        senderUploadedIdsBySession.removeValue(forKey: sessionId)
+        senderUploadedBytesBySession.removeValue(forKey: sessionId)
+        cleanupPendingLiveVideos()
+        activeTransferScope = scope
+        visualStepProgress = 0.0
+        peerName = receiverName
+        peerPlatform = receiverPlatform
+        completedItems = 0
+        totalItems = 0
+        transferredBytesCount = 0
+        totalBytesCount = 0
+        transferredBytes = 0
+        speedMegabytesPerSec = 0.0
+        mergedContacts = 0
+        contactsAlreadyPresentCount = 0
+        importedCalendars = 0
+        importedReminders = 0
+        importedSms = 0
+        savedLivePhotos = 0
+        iCloudOptimizedSkippedHint = 0
+        receivedPasswordsCsvCount = 0
+        skippedDuplicates = 0
+        gatedPreviewCount = 0
+        failedItemsCount = 0
+        receivedInstalledApps = []
+        sentInstalledAppsCount = 0
+        canResumeInterruptedTransfer = false
+        currentItemName = ""
+        isCompleted = false
+        pendingNativeWhatsAppMigration = false
+        requestedWhatsAppMigration = false
+        needsLocalNetworkRedirect = false
+        errorMessage = nil
+        isSessionConnected = true
+        isTransferring = true
+        statusLabel = scope.isWhatsAppOnly
+            ? "Connessione per il passaggio Chat WhatsApp..."
+            : "Preparazione trasferimento (0%)..."
+    }
+
+    /// Legge il codice QR mostrato da WhatsApp sul nuovo telefono e apre direttamente la schermata
+    /// «Trasferisci la cronologia chat» dentro WhatsApp Personale sul vecchio iPhone, saltando la Fotocamera di sistema e il bottone giallo.
+    @MainActor
+    static func openWhatsAppMigrationQrPayload(
+        _ rawQr: String,
+        completion: @escaping @MainActor (Bool, String?) -> Void
+    ) {
+        let trimmed = rawQr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            completion(false, "Codice QR vuoto: riprova inquadrando il QR mostrato da WhatsApp sul nuovo telefono.")
+            return
+        }
+
+        // Se per sbaglio l'utente inquadra il QR di collegamento di DirectSwitch anziché il QR di WhatsApp
+        if trimmed.hasPrefix("{") && (trimmed.contains("sessionKeyHex") || trimmed.contains("DSWITCH")) {
+            completion(false, "Questo è il QR di DirectSwitch: apri WhatsApp sul nuovo telefono fino al codice QR del trasferimento chat e inquadra quello!")
+            return
+        }
+
+        let normalizedCandidate: String
+        if trimmed.lowercased().hasPrefix("wa.me/") || trimmed.lowercased().hasPrefix("www.whatsapp.com/") || trimmed.lowercased().hasPrefix("v.whatsapp.com/") {
+            normalizedCandidate = "https://\(trimmed)"
+        } else {
+            normalizedCandidate = trimmed
+        }
+
+        if let url = URL(string: normalizedCandidate), let scheme = url.scheme?.lowercased(), !scheme.isEmpty {
+            if scheme == "http" || scheme == "https" {
+                // Identico al bottone giallo «Apri in WhatsApp» della Fotocamera di iOS (Universal Link diretto senza passare da Safari)
+                UIApplication.shared.open(url, options: [.universalLinksOnly: true]) { openedUniversal in
+                    Task { @MainActor in
+                        if openedUniversal {
+                            completion(true, nil)
+                        } else {
+                            UIApplication.shared.open(url, options: [:]) { openedFallback in
+                                Task { @MainActor in
+                                    if openedFallback {
+                                        completion(true, nil)
+                                    } else {
+                                        Self.openPersonalWhatsAppOrStore()
+                                        completion(true, nil)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return
+            }
+
+            if scheme == "whatsapp" && iOSInstalledAppsScanner.isWhatsAppBusinessInstalled() && iOSInstalledAppsScanner.isPersonalWhatsAppInstalled() {
+                let suffix = String(normalizedCandidate.dropFirst("whatsapp://".count))
+                if let consumerURL = URL(string: "whatsapp-consumer://\(suffix)"), UIApplication.shared.canOpenURL(consumerURL) {
+                    UIApplication.shared.open(consumerURL, options: [:]) { openedConsumer in
+                        Task { @MainActor in
+                            if openedConsumer {
+                                completion(true, nil)
+                            } else {
+                                UIApplication.shared.open(url, options: [:]) { openedOrig in
+                                    Task { @MainActor in
+                                        completion(openedOrig, openedOrig ? nil : "Impossibile aprire il link di WhatsApp.")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return
+                }
+            }
+
+            UIApplication.shared.open(url, options: [:]) { opened in
+                Task { @MainActor in
+                    if opened {
+                        completion(true, nil)
+                    } else {
+                        Self.openPersonalWhatsAppOrStore()
+                        completion(true, nil)
+                    }
+                }
+            }
+            return
+        }
+
+        // Payload QR non-URL (es. QR opaco Android Switch): apre WhatsApp Personale e avvisa chiaramente
+        openPersonalWhatsAppOrStore()
+        completion(true, nil)
     }
 
     /// Apre esplicitamente WhatsApp Business solo quando l'utente tocca la voce secondaria dedicata.
@@ -817,6 +965,47 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             peerPlatform = req.senderPlatform
             licenseTier = tier
             transferStartDate = Date()
+            activeRunIsResume = (req.isResume == true)
+
+            // Se NON è una ripresa di errore di rete (ma un nuovo trasferimento singolo o successivo),
+            // azzera tutti i contatori del ricevente così riparte sempre da 0% e mostra solo le categorie di QUESTO invio!
+            if !activeRunIsResume {
+                cleanupPendingLiveVideos()
+                manifestItems.removeAll()
+                completedItemIds.removeAll()
+                completedItems = 0
+                totalItems = 0
+                transferredBytes = 0
+                transferredBytesCount = 0
+                totalBytesCount = 0
+                speedMegabytesPerSec = 0.0
+                visualStepProgress = 0.0
+                mergedContacts = 0
+                contactsAlreadyPresentCount = 0
+                importedCalendars = 0
+                importedReminders = 0
+                importedSms = 0
+                savedLivePhotos = 0
+                iCloudOptimizedSkippedHint = 0
+                receivedPasswordsCsvCount = 0
+                skippedDuplicates = 0
+                gatedPreviewCount = 0
+                failedItemsCount = 0
+                receivedInstalledApps = []
+                sentInstalledAppsCount = 0
+                isCompleted = false
+                pendingNativeWhatsAppMigration = false
+                requestedWhatsAppMigration = false
+                currentItemName = ""
+                if let incomingScope = req.transferScope {
+                    activeTransferScope = incomingScope
+                } else {
+                    activeTransferScope = ActiveTransferScope()
+                }
+            } else if let incomingScope = req.transferScope {
+                activeTransferScope = incomingScope
+            }
+
             // In fase di handshake verifichiamo un margine operativo minimo (250 MB):
             // il controllo esatto sui byte da scrivere viene eseguito in /v1/manifest DOPO aver escluso i file già presenti (fondamentale per il Resume all'85%!).
             let hasMinimalWorkingRoom = free > 250 * 1024 * 1024
@@ -920,9 +1109,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             importedSms += insSms
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
-            if fullAllowed, let incomingApps = manifest.installedAppsPayload, !incomingApps.isEmpty {
-                receivedInstalledApps = incomingApps
-            } else if !fullAllowed {
+            activeTransferScope = manifest.transferScope ?? ActiveTransferScope.inferred(from: manifest)
+            visualStepProgress = acceptedItems.isEmpty ? 0.75 : 0.05
+            if fullAllowed {
+                if let incomingApps = manifest.installedAppsPayload, !incomingApps.isEmpty {
+                    receivedInstalledApps = incomingApps
+                } else if !activeRunIsResume {
+                    receivedInstalledApps = []
+                }
+            } else {
                 receivedInstalledApps = []
             }
 
@@ -1070,6 +1265,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             isTransferring = false
             isBackgroundKeepAliveActive = false
             currentItemName = ""
+            visualStepProgress = 1.0
             pendingNativeWhatsAppMigration = requestedWhatsAppMigration
             isCompleted = true
             statusLabel = "Trasferimento su iPhone completato!"
@@ -1286,21 +1482,46 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         includeCalendars: Bool,
         includeReminders: Bool = true,
         includeDocuments: Bool = true,
+        includeApps: Bool = false,
         includeWhatsAppVault: Bool = true,
         installedApps: [InstalledAppRecord] = [],
-        pickedDocuments: [(ManifestItem, URL)] = []
+        pickedDocuments: [(ManifestItem, URL)] = [],
+        isResume: Bool = false
     ) async {
         Self.raiseOpenFileDescriptorLimitIfNeeded()
         var didAuthenticateSession = false
-        let previouslySentIds = senderUploadedIdsBySession[qrPayload.sessionId] ?? []
-        let previouslySentBytes = senderUploadedBytesBySession[qrPayload.sessionId] ?? 0
+        let transferScope = ActiveTransferScope(
+            contacts: includeContacts,
+            photos: includePhotos,
+            videos: includeVideos,
+            calendars: includeCalendars,
+            reminders: includeReminders,
+            documents: includeDocuments,
+            apps: includeApps,
+            whatsApp: includeWhatsAppVault
+        )
+        if !isResume {
+            prepareForFreshTransfer(
+                sessionId: qrPayload.sessionId,
+                scope: transferScope,
+                receiverName: qrPayload.receiverName,
+                receiverPlatform: qrPayload.receiverPlatform
+            )
+        } else {
+            activeTransferScope = transferScope
+        }
+        let previouslySentIds = isResume ? (senderUploadedIdsBySession[qrPayload.sessionId] ?? []) : []
+        let previouslySentBytes = isResume ? (senderUploadedBytesBySession[qrPayload.sessionId] ?? 0) : 0
         do {
             errorMessage = nil
             needsLocalNetworkRedirect = false
             canResumeInterruptedTransfer = false
             failedItemsCount = 0
-            contactsAlreadyPresentCount = 0
-            receivedInstalledApps = []
+            if !isResume {
+                contactsAlreadyPresentCount = 0
+                receivedInstalledApps = []
+                sentInstalledAppsCount = 0
+            }
             isCompleted = false
             pendingNativeWhatsAppMigration = false
             isSessionConnected = true
@@ -1310,15 +1531,19 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             peerName = qrPayload.receiverName
             peerPlatform = qrPayload.receiverPlatform
             completedItems = previouslySentIds.count
-            if totalItems < completedItems {
-                totalItems = completedItems
-            }
-            transferredBytesCount = previouslySentBytes
-            if totalBytesCount < transferredBytesCount {
-                totalBytesCount = transferredBytesCount
-            }
-            speedMegabytesPerSec = 0.0
-            if previouslySentIds.isEmpty {
+            if isResume {
+                if totalItems < completedItems {
+                    totalItems = completedItems
+                }
+                transferredBytesCount = previouslySentBytes
+                if totalBytesCount < transferredBytesCount {
+                    totalBytesCount = transferredBytesCount
+                }
+            } else {
+                totalItems = 0
+                transferredBytesCount = 0
+                totalBytesCount = 0
+                visualStepProgress = 0.0
                 mergedContacts = 0
                 importedCalendars = 0
                 importedReminders = 0
@@ -1327,6 +1552,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 skippedDuplicates = 0
                 gatedPreviewCount = 0
             }
+            speedMegabytesPerSec = 0.0
             iCloudOptimizedSkippedHint = 0
             receivedPasswordsCsvCount = 0
             UIApplication.shared.isIdleTimerDisabled = true
@@ -1345,7 +1571,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             let hotspotFallbackHint = await joinAndroidHotspotIfPresent(payload: qrPayload)
             statusLabel = previouslySentIds.isEmpty
-                ? "Ricerca canale diretto verso \(qrPayload.receiverName)..."
+                ? (transferScope.isWhatsAppOnly
+                    ? "Connessione con \(qrPayload.receiverName) per il passaggio WhatsApp..."
+                    : "Connessione diretta con \(qrPayload.receiverName)...")
                 : "Ripresa canale diretto verso \(qrPayload.receiverName)..."
 
             var candidateIps = qrPayload.ips
@@ -1391,7 +1619,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             }
             let allItems = scannedAssets.map(\.0) + filteredPickedDocs.map(\.0)
-            let currentSentIds = senderUploadedIdsBySession[qrPayload.sessionId] ?? []
+            let currentSentIds = isResume ? (senderUploadedIdsBySession[qrPayload.sessionId] ?? []) : []
             let remainingEstimatedBytes = allItems
                 .filter { !currentSentIds.contains($0.id) }
                 .reduce(Int64(0)) { $0 + $1.sizeBytes }
@@ -1402,7 +1630,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 senderPlatform: .IOS,
                 senderHasPro: iOSLicenseStore.isLocalProUnlocked,
                 senderHasCloudSavePro: iOSLicenseStore.hasVerifiedCloudSaveProEntitlement,
-                totalEstimatedBytes: remainingEstimatedBytes
+                totalEstimatedBytes: remainingEstimatedBytes,
+                isResume: isResume,
+                transferScope: transferScope
             )
             let hsRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/handshake", payload: hsReq, key: key)
             let hsResp = try JSONDecoder().decode(HandshakeResponse.self, from: hsRespData)
@@ -1418,10 +1648,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
             didAuthenticateSession = true
+            if !transferScope.isWhatsAppOnly {
+                visualStepProgress = 0.25
+            }
 
             let fullCategoriesAllowed = LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
             let wantNativeWa = includeWhatsAppVault && fullCategoriesAllowed
-            let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && !installedApps.isEmpty) ? installedApps : nil
+            let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && includeApps && !installedApps.isEmpty) ? installedApps : nil
+            sentInstalledAppsCount = appsToSend?.count ?? 0
             let manifest = TransferManifest(
                 sessionId: qrPayload.sessionId,
                 senderPlatform: .IOS,
@@ -1430,7 +1664,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 calendarsPayload: calendars,
                 remindersPayload: reminders.isEmpty ? nil : reminders,
                 installedAppsPayload: appsToSend,
-                requestNativeWhatsAppMigration: wantNativeWa
+                requestNativeWhatsAppMigration: wantNativeWa,
+                transferScope: transferScope
             )
             let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
             let mfResp = try JSONDecoder().decode(ManifestResponse.self, from: mfRespData)
@@ -1450,8 +1685,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             skippedDuplicates = mfResp.skippedDuplicateCount
             gatedPreviewCount = mfResp.gatedByCrossOsPreviewCount
 
-            var uploadedIdSet = senderUploadedIdsBySession[qrPayload.sessionId] ?? []
-            var cumulativeSentBytes = senderUploadedBytesBySession[qrPayload.sessionId] ?? 0
+            var uploadedIdSet = isResume ? (senderUploadedIdsBySession[qrPayload.sessionId] ?? []) : []
+            var cumulativeSentBytes = isResume ? (senderUploadedBytesBySession[qrPayload.sessionId] ?? 0) : 0
 
             let acceptedSet = Set(mfResp.acceptedItemIds)
             let assetsToUpload = scannedAssets.filter { acceptedSet.contains($0.0.id) && !uploadedIdSet.contains($0.0.id) }
@@ -1465,12 +1700,29 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             transferredBytesCount = cumulativeSentBytes
             totalBytesCount = cumulativeSentBytes + remainingBytesToUpload
 
+            if !transferScope.isWhatsAppOnly && totalItems == 0 {
+                statusLabel = "Sincronizzazione in corso..."
+                visualStepProgress = 0.72
+                try? await Task.sleep(nanoseconds: 280_000_000)
+            }
+
             let runStartTime = Date()
             var runBytesSent: Int64 = 0
             var sessionFilesCounter = 0
 
             var uploadSession = Self.makeUploadSession()
             defer { uploadSession.finishTasksAndInvalidate() }
+
+            let reconnectHandshakeReq = HandshakeRequest(
+                sessionId: qrPayload.sessionId,
+                senderName: UIDevice.current.name,
+                senderPlatform: .IOS,
+                senderHasPro: iOSLicenseStore.isLocalProUnlocked,
+                senderHasCloudSavePro: iOSLicenseStore.hasVerifiedCloudSaveProEntitlement,
+                totalEstimatedBytes: remainingEstimatedBytes,
+                isResume: true,
+                transferScope: transferScope
+            )
 
             // Helper interno: invia un singolo file distinguendo errori di rete (con riconnessione automatica 45s) da singoli file corrotti
             func sendFileResiliently(item: ManifestItem, plainFileURL: URL) async throws -> Int64? {
@@ -1523,8 +1775,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 baseUrl = "http://\(recoveredIp):\(qrPayload.port)"
                                 uploadSession.finishTasksAndInvalidate()
                                 uploadSession = Self.makeUploadSession()
-                                // Ri-autentica e riallinea il manifest se il ricevente ha riavviato il socket
-                                _ = try? await self.postEncryptedJson(url: "\(baseUrl)/v1/handshake", payload: hsReq, key: key)
+                                // Ri-autentica in modalità Resume così il ricevente conserva tutti i file già salvati
+                                _ = try? await self.postEncryptedJson(url: "\(baseUrl)/v1/handshake", payload: reconnectHandshakeReq, key: key)
                                 _ = try? await self.postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
                                 quickAttempt = 0
                                 continue
@@ -1663,6 +1915,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             currentItemName = ""
             senderUploadedIdsBySession.removeValue(forKey: qrPayload.sessionId)
             senderUploadedBytesBySession.removeValue(forKey: qrPayload.sessionId)
+            visualStepProgress = 1.0
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
             pendingNativeWhatsAppMigration = wantNativeWa
             isCompleted = true

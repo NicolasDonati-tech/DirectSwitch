@@ -433,4 +433,42 @@ final class DirectSwitchTests: XCTestCase {
             "https://is1.mzstatic.com/icon.png"
         )
     }
+
+    func testActiveTransferScopeIsolationAndRepeatableHandshakeRoundTrip() throws {
+        let waOnly = ActiveTransferScope(whatsApp: true)
+        XCTAssertTrue(waOnly.isWhatsAppOnly)
+        XCTAssertFalse(waOnly.hasAnyStandardDataCategory)
+
+        let appsOnly = ActiveTransferScope(apps: true)
+        XCTAssertTrue(appsOnly.isAppsOnly)
+        XCTAssertTrue(appsOnly.hasAnyStandardDataCategory)
+        XCTAssertFalse(appsOnly.isWhatsAppOnly)
+
+        let hs = HandshakeRequest(
+            sessionId: "ds_repeat_01",
+            senderName: "iPhone Vecchio",
+            senderPlatform: .IOS,
+            senderHasPro: true,
+            totalEstimatedBytes: 0,
+            isResume: false,
+            transferScope: waOnly
+        )
+        let hsData = try JSONEncoder().encode(hs)
+        let hsDecoded = try JSONDecoder().decode(HandshakeRequest.self, from: hsData)
+        XCTAssertEqual(hsDecoded.isResume, false)
+        XCTAssertEqual(hsDecoded.transferScope, waOnly)
+
+        let manifestOnlyApps = TransferManifest(
+            sessionId: "ds_repeat_02",
+            senderPlatform: .IOS,
+            items: [],
+            installedAppsPayload: [InstalledAppRecord(packageName: "com.spotify.client", appName: "Spotify")],
+            requestNativeWhatsAppMigration: false
+        )
+        let inferred = ActiveTransferScope.inferred(from: manifestOnlyApps)
+        XCTAssertTrue(inferred.isAppsOnly)
+        XCTAssertFalse(inferred.contacts)
+        XCTAssertFalse(inferred.photos)
+        XCTAssertFalse(inferred.whatsApp)
+    }
 }

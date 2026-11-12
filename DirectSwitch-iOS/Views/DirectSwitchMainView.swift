@@ -69,6 +69,14 @@ struct DirectSwitchMainView: View {
     @State private var showProSheet: Bool = false
     @State private var billingNote: String? = nil
 
+    private var isDedicatedWhatsAppScreenActive: Bool {
+        guard activeStep == .transferProgress, transport.errorMessage == nil else { return false }
+        if transport.activeTransferScope.isWhatsAppOnly && transport.totalItems == 0 {
+            return true
+        }
+        return transport.isCompleted && transport.pendingNativeWhatsAppMigration
+    }
+
     private var topBarTitle: String {
         switch activeStep {
         case .home:
@@ -80,6 +88,9 @@ struct DirectSwitchMainView: View {
         case .sendSelectCategories:
             return "Cosa inviare"
         case .transferProgress:
+            if isDedicatedWhatsAppScreenActive {
+                return "Chat WhatsApp"
+            }
             return transport.isCompleted ? "Completato" : "Copia dati"
         }
     }
@@ -185,6 +196,8 @@ struct DirectSwitchMainView: View {
                                     isLocalProUnlocked: isProUnlocked,
                                     pickedDocuments: pickedDocuments,
                                     selectedAppsCount: selectedSenderApps.count,
+                                    totalDetectedAppsCount: senderAppsCatalog.count,
+                                    selectedAppsPreview: selectedSenderApps,
                                     includeContacts: $includeContacts,
                                     includePhotos: $includePhotos,
                                     includeVideos: $includeVideos,
@@ -221,10 +234,11 @@ struct DirectSwitchMainView: View {
                                 appInstaller: appInstaller,
                                 isReceiverMode: isReceiverMode,
                                 isProUnlocked: isProUnlocked,
+                                canSendAnotherCategory: !isReceiverMode && pairedTargetPayload != nil,
                                 onOpenProSheet: { showProSheet = true },
                                 onRetryIfFailed: {
                                     if !isReceiverMode, let paired = pairedTargetPayload {
-                                        launchSenderTransferWithPayload(paired)
+                                        launchSenderTransferWithPayload(paired, isResume: transport.canResumeInterruptedTransfer)
                                     } else {
                                         handleBackNavigation()
                                     }
@@ -242,6 +256,7 @@ struct DirectSwitchMainView: View {
                                         activeStep = .sendConnect
                                     }
                                 },
+                                onTransferAnotherCategory: returnToCategorySelectionForAnotherTransfer,
                                 onFinish: finishAndReturnHome
                             )
                         }
@@ -258,9 +273,16 @@ struct DirectSwitchMainView: View {
         }
         .onChange(of: transport.isSessionConnected) { connected in
             if connected && activeStep == .receiveWaitCode {
+                appInstaller.reset()
                 withAnimation(.easeInOut(duration: 0.25)) {
                     activeStep = .transferProgress
                 }
+            }
+        }
+        .onChange(of: includeApps) { enabled in
+            if enabled {
+                deselectedSenderAppIds.removeAll()
+                refreshSenderAppsCatalog()
             }
         }
         .onChange(of: scenePhase) { newPhase in
@@ -376,12 +398,31 @@ struct DirectSwitchMainView: View {
 
     private func launchSenderTransfer() {
         guard let paired = pairedTargetPayload else { return }
-        launchSenderTransferWithPayload(paired)
+        launchSenderTransferWithPayload(paired, isResume: false)
     }
 
-    private func launchSenderTransferWithPayload(_ paired: QrPairingPayload) {
+    private func launchSenderTransferWithPayload(_ paired: QrPairingPayload, isResume: Bool) {
         sharedVaultToast = nil
         isReceiverMode = false
+        let currentScope = ActiveTransferScope(
+            contacts: includeContacts,
+            photos: includePhotos,
+            videos: includeVideos,
+            calendars: includeCalendars,
+            reminders: includeReminders,
+            documents: includeDocuments,
+            apps: includeApps,
+            whatsApp: includeWhatsApp
+        )
+        if !isResume {
+            appInstaller.reset()
+            transport.prepareForFreshTransfer(
+                sessionId: paired.sessionId,
+                scope: currentScope,
+                receiverName: paired.receiverName,
+                receiverPlatform: paired.receiverPlatform
+            )
+        }
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .transferProgress
         }
@@ -396,14 +437,31 @@ struct DirectSwitchMainView: View {
                 includeCalendars: includeCalendars,
                 includeReminders: includeReminders,
                 includeDocuments: includeDocuments,
+                includeApps: includeApps,
                 includeWhatsAppVault: includeWhatsApp,
                 installedApps: appsSnapshot,
-                pickedDocuments: docsSnapshot
+                pickedDocuments: docsSnapshot,
+                isResume: isResume
             )
             if transport.isCompleted && transport.failedItemsCount == 0 {
                 pickedDocuments.removeAll()
                 refreshAuthorizedSummary()
             }
+        }
+    }
+
+    private func returnToCategorySelectionForAnotherTransfer() {
+        guard pairedTargetPayload != nil else {
+            finishAndReturnHome()
+            return
+        }
+        appInstaller.reset()
+        transport.errorMessage = nil
+        transport.isCompleted = false
+        transport.pendingNativeWhatsAppMigration = false
+        transport.visualStepProgress = 0.0
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeStep = .sendSelectCategories
         }
     }
 
@@ -493,7 +551,11 @@ struct DirectSwitchMainView: View {
                 activeStep = .sendConnect
             }
         case .transferProgress:
-            finishAndReturnHome()
+            if !isReceiverMode && pairedTargetPayload != nil && !transport.isTransferring {
+                returnToCategorySelectionForAnotherTransfer()
+            } else {
+                finishAndReturnHome()
+            }
         }
     }
 
@@ -504,7 +566,7 @@ struct DirectSwitchMainView: View {
         selectedBeacon = nil
         pinCodeInput = ""
         pairingErrorNote = nil
-        appInstaller.stopSequence()
+        appInstaller.reset()
         transport.resetSession()
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .home
@@ -599,10 +661,36 @@ private struct DirectSwitchTransferProgressView: View {
     @ObservedObject var appInstaller: iOSSequentialAppInstaller
     let isReceiverMode: Bool
     let isProUnlocked: Bool
+    let canSendAnotherCategory: Bool
     var onOpenProSheet: () -> Void
     var onRetryIfFailed: () -> Void
     var onReconnectNewCode: () -> Void
+    var onTransferAnotherCategory: () -> Void
     var onFinish: () -> Void
+
+    @State private var showWhatsAppQrScanner: Bool = false
+
+    private struct ScopedSummaryItem: Identifiable {
+        let id: String
+        let icon: String
+        let color: Color
+        let title: String
+        let value: String
+    }
+
+    private var scope: ActiveTransferScope {
+        transport.activeTransferScope
+    }
+
+    /// Quando il passaggio riguarda solo WhatsApp (oppure quando termina la copia delle altre voci e serve il passaggio chat di WhatsApp),
+    /// l'intera schermata cambia e mostra ESCLUSIVAMENTE la guida/scanner dedicata a WhatsApp senza 100% fuorvianti o voci non selezionate.
+    private var isStandaloneWhatsAppScreen: Bool {
+        guard transport.errorMessage == nil else { return false }
+        if scope.isWhatsAppOnly && transport.totalItems == 0 {
+            return true
+        }
+        return transport.isCompleted && transport.pendingNativeWhatsAppMigration
+    }
 
     private var progressFraction: Double {
         if transport.isCompleted { return 1.0 }
@@ -614,7 +702,7 @@ private struct DirectSwitchTransferProgressView: View {
             guard transport.completedItems > 0 else { return 0.0 }
             return min(1.0, max(0.01, Double(transport.completedItems) / Double(transport.totalItems)))
         }
-        return 0.0
+        return min(0.99, max(0.0, transport.visualStepProgress))
     }
 
     private var contactsSummaryValue: String {
@@ -626,6 +714,129 @@ private struct DirectSwitchTransferProgressView: View {
 
     private var percentageInt: Int {
         Int((progressFraction * 100.0).rounded())
+    }
+
+    private var mediaRowTitle: String {
+        if scope.photos && !scope.videos && !scope.documents { return "Foto trasferite" }
+        if scope.videos && !scope.photos && !scope.documents { return "Video trasferiti" }
+        if scope.documents && !scope.photos && !scope.videos { return "Documenti e File" }
+        if scope.photos && scope.videos && !scope.documents { return "Foto e Video" }
+        return "Foto, Video e File"
+    }
+
+    private var visibleSummaryRows: [ScopedSummaryItem] {
+        var rows: [ScopedSummaryItem] = []
+
+        if scope.contacts {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "contacts",
+                    icon: "person.crop.circle.fill",
+                    color: AppleTheme.blue,
+                    title: "Rubrica contatti",
+                    value: contactsSummaryValue
+                )
+            )
+        }
+
+        if scope.photos || scope.videos || scope.documents || (scope.whatsApp && transport.totalItems > 0) {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "media_docs",
+                    icon: scope.documents && !scope.photos && !scope.videos ? "doc.fill" : "photo.on.rectangle.angled",
+                    color: scope.documents && !scope.photos && !scope.videos ? AppleTheme.teal : AppleTheme.orange,
+                    title: mediaRowTitle,
+                    value: transport.totalItems > 0 ? "\(transport.completedItems) / \(transport.totalItems)" : "\(transport.completedItems)"
+                )
+            )
+        }
+
+        if scope.photos && transport.savedLivePhotos > 0 {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "live_photos",
+                    icon: "livephoto",
+                    color: AppleTheme.orange,
+                    title: "Live Photos animate",
+                    value: "\(transport.savedLivePhotos)"
+                )
+            )
+        }
+
+        if scope.calendars {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "calendars",
+                    icon: "calendar",
+                    color: AppleTheme.slate,
+                    title: "Calendari importati",
+                    value: "\(transport.importedCalendars)"
+                )
+            )
+        }
+
+        if scope.reminders {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "reminders",
+                    icon: "checklist",
+                    color: AppleTheme.blue,
+                    title: "Promemoria importati",
+                    value: "\(transport.importedReminders)"
+                )
+            )
+        }
+
+        if transport.importedSms > 0 {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "sms",
+                    icon: "message.fill",
+                    color: AppleTheme.green,
+                    title: "Messaggi salvati",
+                    value: "\(transport.importedSms)"
+                )
+            )
+        }
+
+        if scope.apps {
+            let countVal = isReceiverMode ? transport.receivedInstalledApps.count : transport.sentInstalledAppsCount
+            rows.append(
+                ScopedSummaryItem(
+                    id: "apps",
+                    icon: "square.grid.2x2.fill",
+                    color: AppleTheme.blue,
+                    title: isReceiverMode ? "App ricevute" : "App inviate al nuovo telefono",
+                    value: "\(countVal)"
+                )
+            )
+        }
+
+        if transport.skippedDuplicates > 0 {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "duplicates",
+                    icon: "sparkles",
+                    color: AppleTheme.teal,
+                    title: "Doppioni già presenti ignorati",
+                    value: "\(transport.skippedDuplicates)"
+                )
+            )
+        }
+
+        if transport.failedItemsCount > 0 {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "failed",
+                    icon: "icloud.slash",
+                    color: AppleTheme.orange,
+                    title: "Foto iCloud non scaricate / illeggibili",
+                    value: "\(transport.failedItemsCount)"
+                )
+            )
+        }
+
+        return rows
     }
 
     private var remainingTimeLabel: String? {
@@ -644,6 +855,223 @@ private struct DirectSwitchTransferProgressView: View {
     }
 
     var body: some View {
+        Group {
+            if isStandaloneWhatsAppScreen {
+                whatsAppDedicatedScreen
+            } else {
+                standardDataTransferScreen
+            }
+        }
+        .sheet(isPresented: $showWhatsAppQrScanner) {
+            WhatsAppMigrationQrScannerSheet()
+        }
+    }
+
+    // MARK: - Schermata ESCLUSIVA per il passaggio delle Chat WhatsApp (senza 100% fuorvianti o altre voci)
+
+    @ViewBuilder
+    private var whatsAppDedicatedScreen: some View {
+        let isToAndroid = !isReceiverMode && transport.peerPlatform == .ANDROID
+        let isFromAndroid = isReceiverMode && transport.peerPlatform == .ANDROID
+        let isPersonalInstalled = iOSInstalledAppsScanner.isPersonalWhatsAppInstalled()
+        let isBusinessAlsoInstalled = iOSInstalledAppsScanner.isWhatsAppBusinessInstalled()
+
+        let screenTitle: String = {
+            if isToAndroid { return "Passaggio Chat su Android" }
+            if !isReceiverMode { return "Passaggio Chat da questo iPhone" }
+            if isFromAndroid { return "Importa Chat WhatsApp" }
+            return "Passaggio Chat su questo iPhone"
+        }()
+
+        let screenSubtitle: String = {
+            if !isReceiverMode && !isToAndroid {
+                return "Inquadra il QR di WhatsApp del nuovo iPhone senza passare dalla Fotocamera di sistema"
+            }
+            if isReceiverMode && !isFromAndroid {
+                return "Verifica il numero qui: il vecchio iPhone si scollegherà da solo e apparirà il codice QR"
+            }
+            return "Trasferimento diretto della cronologia chat senza cloud"
+        }()
+
+        let stepsList: [String] = {
+            if isToAndroid {
+                return [
+                    "Sul telefono Android prosegui nella schermata aperta fino a visualizzare il codice QR.",
+                    "Su questo iPhone tocca «Inquadra QR di WhatsApp» qui sotto (oppure apri WhatsApp Personale → Impostazioni ⚙️ → Chat → Trasferisci chat su Android) per avviare il passaggio."
+                ]
+            }
+            if !isReceiverMode {
+                return [
+                    "Sul nuovo iPhone apri WhatsApp Personale, inserisci il numero e il codice di conferma SMS: questo vecchio iPhone verrà disconnesso subito in automatico e sul nuovo apparirà il codice QR del trasferimento chat.",
+                    "Senza aprire la Fotocamera di iPhone e senza premere il bottone giallo, tocca direttamente qui sotto «Inquadra QR di WhatsApp e avvia passaggio»: DirectSwitch leggerà il QR e aprirà subito «Trasferisci la cronologia chat su iPhone» su questo telefono!"
+                ]
+            }
+            if isFromAndroid {
+                return [
+                    "Tocca il pulsante verde qui sotto per aprire (o scaricare) WhatsApp Personale.",
+                    "Inserisci il tuo numero e il codice SMS per completare l'importazione delle chat."
+                ]
+            }
+            return [
+                "Tocca il pulsante verde qui sotto per aprire (o scaricare da App Store) WhatsApp Personale su questo nuovo iPhone.",
+                "Inserisci il numero e il codice SMS: WhatsApp scollegherà subito il vecchio iPhone (non c'è bisogno di riaprire nulla qui) e ti chiederà di iniziare il trasferimento mostrando il codice QR su questo schermo.",
+                "Lascia il codice QR visibile qui e sul vecchio iPhone tocca «Inquadra QR di WhatsApp e avvia passaggio» direttamente dentro DirectSwitch!"
+            ]
+        }()
+
+        ScrollView {
+            VStack(spacing: 18) {
+                if scope.hasAnyStandardDataCategory && transport.isCompleted {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(AppleTheme.green)
+                        Text("Altre voci selezionate già copiate • Ora passa le Chat WhatsApp")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(AppleTheme.green)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(AppleTheme.green.opacity(0.12))
+                    .clipShape(Capsule())
+                    .padding(.top, 8)
+                }
+
+                VStack(spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(AppleTheme.green.opacity(0.16))
+                            .frame(width: 72, height: 72)
+                        Image(systemName: !isReceiverMode ? "qrcode.viewfinder" : "bubble.left.and.bubble.right.fill")
+                            .font(.system(size: 34, weight: .semibold))
+                            .foregroundColor(AppleTheme.green)
+                    }
+                    .padding(.top, scope.hasAnyStandardDataCategory ? 4 : 16)
+
+                    Text(screenTitle)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .multilineTextAlignment(.center)
+
+                    Text(screenSubtitle)
+                        .font(.system(size: 14))
+                        .foregroundColor(AppleTheme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                }
+
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 10) {
+                        AppleSettingsIcon(systemName: "bubble.left.and.bubble.right.fill", color: AppleTheme.green)
+                        Text("Come procedere adesso")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Spacer()
+                        InfoCircleButton(
+                            title: "Come funziona dopo la disconnessione del vecchio iPhone",
+                            message: "Quando inserisci numero e SMS sul nuovo iPhone, WhatsApp disconnette subito il vecchio telefono (quindi sul vecchio non puoi più entrare in Impostazioni → Chat).\n\nIl codice QR mostrato sul nuovo iPhone contiene il link diretto di sblocco della schermata «Trasferisci la cronologia chat»: inquadrandolo con il pulsante qui sotto dentro DirectSwitch salti completamente la Fotocamera di iPhone e il bottone giallo!"
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(stepsList.enumerated()), id: \.offset) { idx, stepText in
+                            HStack(alignment: .top, spacing: 10) {
+                                Text("\(idx + 1)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(AppleTheme.green)
+                                    .clipShape(Circle())
+                                    .padding(.top, 1)
+
+                                Text(stepText)
+                                    .font(.system(size: 14))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    if !isReceiverMode {
+                        // Vecchio iPhone (Mittente): Scanner diretto del QR WhatsApp che salta la Fotocamera di iPhone e il bottone giallo
+                        ApplePrimaryButton(
+                            title: "Inquadra QR di WhatsApp e avvia passaggio",
+                            icon: "qrcode.viewfinder",
+                            color: AppleTheme.green
+                        ) {
+                            showWhatsAppQrScanner = true
+                        }
+
+                        AppleSecondaryButton(
+                            title: isPersonalInstalled
+                                ? "Oppure apri WhatsApp Personale"
+                                : "Scarica WhatsApp Personale",
+                            icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
+                            tint: AppleTheme.green
+                        ) {
+                            DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
+                        }
+                    } else {
+                        // Nuovo iPhone (Ricevente): Apre direttamente WhatsApp Personale per inserire numero + codice SMS e mostrare il QR
+                        ApplePrimaryButton(
+                            title: isPersonalInstalled
+                                ? "Apri WhatsApp Personale"
+                                : "Scarica WhatsApp Personale",
+                            icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
+                            color: AppleTheme.green
+                        ) {
+                            DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
+                        }
+                    }
+
+                    if isBusinessAlsoInstalled {
+                        Button(action: {
+                            DirectSwitchTransportViewModel.openWhatsAppBusiness()
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "briefcase.fill")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("Devi trasferire invece l'account aziendale? Apri WhatsApp Business")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundColor(AppleTheme.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(16)
+                .background(AppleTheme.cardSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(AppleTheme.green.opacity(0.48), lineWidth: 1.2)
+                )
+
+                if canSendAnotherCategory {
+                    AppleSecondaryButton(
+                        title: "Trasferisci un'altra voce a questo telefono",
+                        icon: "arrow.uturn.backward.circle.fill",
+                        tint: AppleTheme.blue,
+                        action: onTransferAnotherCategory
+                    )
+                }
+
+                AppleSecondaryButton(
+                    title: "Fine",
+                    icon: "checkmark",
+                    tint: AppleTheme.slate,
+                    action: onFinish
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+    }
+
+    // MARK: - Schermata Avanzamento Dati Selezionati (sempre da 0% -> 100%, mostra SOLO le voci scelte in questo trasferimento)
+
+    private var standardDataTransferScreen: some View {
         ScrollView {
             VStack(spacing: 18) {
                 VStack(spacing: 10) {
@@ -663,8 +1091,8 @@ private struct DirectSwitchTransferProgressView: View {
                             .foregroundColor(AppleTheme.textPrimary)
 
                         Text(isReceiverMode
-                             ? "I tuoi dati sono pronti su questo iPhone"
-                             : "Tutti i dati selezionati sono stati copiati su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)")
+                             ? "Le voci selezionate sono pronte su questo iPhone"
+                             : "Le voci selezionate sono state copiate su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)")
                             .font(.system(size: 14))
                             .foregroundColor(AppleTheme.textSecondary)
                             .multilineTextAlignment(.center)
@@ -683,7 +1111,7 @@ private struct DirectSwitchTransferProgressView: View {
                                 .foregroundColor(AppleTheme.textSecondary)
                                 .multilineTextAlignment(.center)
                         } else {
-                            Text(isReceiverMode ? "Copia su questo iPhone..." : "Copia dei dati in corso...")
+                            Text(isReceiverMode ? "Copia su questo iPhone..." : "Copia delle voci selezionate...")
                                 .font(.system(size: 23, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
 
@@ -770,90 +1198,23 @@ private struct DirectSwitchTransferProgressView: View {
                 }
                 .appleCard()
 
-                VStack(spacing: 0) {
-                    summaryRow(
-                        icon: "person.crop.circle.fill",
-                        color: AppleTheme.blue,
-                        title: "Contatti uniti",
-                        value: contactsSummaryValue
-                    )
-                    Divider().padding(.leading, 56)
-                    summaryRow(
-                        icon: "photo.on.rectangle.angled",
-                        color: AppleTheme.orange,
-                        title: "Foto, Video e File",
-                        value: transport.totalItems > 0 ? "\(transport.completedItems) / \(transport.totalItems)" : "\(transport.completedItems)"
-                    )
-
-                    if transport.savedLivePhotos > 0 {
-                        Divider().padding(.leading, 56)
-                        summaryRow(
-                            icon: "livephoto",
-                            color: AppleTheme.orange,
-                            title: "Live Photos animate",
-                            value: "\(transport.savedLivePhotos)"
-                        )
+                // Mostra ESCLUSIVAMENTE le categorie selezionate per QUESTO trasferimento
+                if !visibleSummaryRows.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(Array(visibleSummaryRows.enumerated()), id: \.element.id) { index, row in
+                            summaryRow(
+                                icon: row.icon,
+                                color: row.color,
+                                title: row.title,
+                                value: row.value
+                            )
+                            if index < visibleSummaryRows.count - 1 {
+                                Divider().padding(.leading, 56)
+                            }
+                        }
                     }
-
-                    Divider().padding(.leading, 56)
-                    summaryRow(
-                        icon: "calendar",
-                        color: AppleTheme.slate,
-                        title: "Calendari importati",
-                        value: "\(transport.importedCalendars)"
-                    )
-
-                    if transport.importedReminders > 0 || isReceiverMode {
-                        Divider().padding(.leading, 56)
-                        summaryRow(
-                            icon: "checklist",
-                            color: AppleTheme.blue,
-                            title: "Promemoria importati",
-                            value: "\(transport.importedReminders)"
-                        )
-                    }
-
-                    if transport.importedSms > 0 {
-                        Divider().padding(.leading, 56)
-                        summaryRow(
-                            icon: "message.fill",
-                            color: AppleTheme.green,
-                            title: "Messaggi salvati",
-                            value: "\(transport.importedSms)"
-                        )
-                    }
-
-                    if isReceiverMode && !transport.receivedInstalledApps.isEmpty {
-                        Divider().padding(.leading, 56)
-                        summaryRow(
-                            icon: "square.grid.2x2.fill",
-                            color: AppleTheme.blue,
-                            title: "App trasferite",
-                            value: "\(transport.receivedInstalledApps.count)"
-                        )
-                    }
-
-                    if transport.skippedDuplicates > 0 {
-                        Divider().padding(.leading, 56)
-                        summaryRow(
-                            icon: "sparkles",
-                            color: AppleTheme.teal,
-                            title: "Doppioni già presenti ignorati",
-                            value: "\(transport.skippedDuplicates)"
-                        )
-                    }
-
-                    if transport.failedItemsCount > 0 {
-                        Divider().padding(.leading, 56)
-                        summaryRow(
-                            icon: "icloud.slash",
-                            color: AppleTheme.orange,
-                            title: "Foto iCloud non scaricate / illeggibili",
-                            value: "\(transport.failedItemsCount)"
-                        )
-                    }
+                    .appleCard(padding: 0)
                 }
-                .appleCard(padding: 0)
 
                 if !isReceiverMode && transport.isCompleted && transport.canResumeInterruptedTransfer && transport.failedItemsCount > 0 {
                     VStack(alignment: .leading, spacing: 10) {
@@ -877,22 +1238,19 @@ private struct DirectSwitchTransferProgressView: View {
                     .appleCard(padding: 14)
                 }
 
-                if transport.isCompleted && transport.pendingNativeWhatsAppMigration {
-                    whatsAppWirelessMigrationCard
-                }
-
-                if isReceiverMode && transport.isCompleted && transport.receivedPasswordsCsvCount > 0 {
+                if isReceiverMode && transport.isCompleted && scope.documents && transport.receivedPasswordsCsvCount > 0 {
                     passwordsCsvImportHelperCard
                 }
 
-                if isReceiverMode && transport.isCompleted {
+                // Mostra il catalogo di installazione automatica App SOLO se in questo trasferimento è stata selezionata «App scaricate»
+                if isReceiverMode && transport.isCompleted && scope.apps && !transport.receivedInstalledApps.isEmpty {
                     ReceiverAppsAutoInstallCard(
                         incomingApps: transport.receivedInstalledApps,
                         installer: appInstaller
                     )
                 }
 
-                if isReceiverMode && transport.isCompleted && (transport.importedSms > 0 || transport.completedItems > 0) {
+                if isReceiverMode && transport.isCompleted && ((scope.documents && transport.completedItems > 0) || transport.importedSms > 0) {
                     HStack(spacing: 10) {
                         Image(systemName: "folder.fill")
                             .foregroundColor(AppleTheme.blue)
@@ -994,6 +1352,14 @@ private struct DirectSwitchTransferProgressView: View {
                 }
 
                 if transport.isCompleted {
+                    if canSendAnotherCategory {
+                        AppleSecondaryButton(
+                            title: "Trasferisci un'altra voce a questo telefono",
+                            icon: "arrow.uturn.backward.circle.fill",
+                            tint: AppleTheme.blue,
+                            action: onTransferAnotherCategory
+                        )
+                    }
                     ApplePrimaryButton(
                         title: "Fine",
                         icon: "checkmark",
@@ -1001,6 +1367,14 @@ private struct DirectSwitchTransferProgressView: View {
                         action: onFinish
                     )
                 } else if transport.errorMessage != nil {
+                    if canSendAnotherCategory {
+                        AppleSecondaryButton(
+                            title: "Torna alla scelta delle voci",
+                            icon: "arrow.uturn.backward",
+                            tint: AppleTheme.blue,
+                            action: onTransferAnotherCategory
+                        )
+                    }
                     AppleSecondaryButton(
                         title: "Torna alla Home",
                         icon: "house",
@@ -1012,122 +1386,6 @@ private struct DirectSwitchTransferProgressView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
-    }
-
-    @ViewBuilder
-    private var whatsAppWirelessMigrationCard: some View {
-        let isToAndroid = !isReceiverMode && transport.peerPlatform == .ANDROID
-        let isFromAndroid = isReceiverMode && transport.peerPlatform == .ANDROID
-        let isPersonalInstalled = iOSInstalledAppsScanner.isPersonalWhatsAppInstalled()
-        let isBusinessAlsoInstalled = iOSInstalledAppsScanner.isWhatsAppBusinessInstalled()
-
-        let cardTitle: String = {
-            if isToAndroid { return "Chat WhatsApp → Android" }
-            if !isReceiverMode { return "Chat WhatsApp → Altro iPhone" }
-            if isFromAndroid { return "Importa Chat WhatsApp" }
-            return "Ricevi Chat WhatsApp senza iCloud"
-        }()
-
-        let stepsList: [String] = {
-            if isToAndroid {
-                return [
-                    "Sul telefono Android prosegui nella schermata aperta fino al codice QR.",
-                    "Tocca «Apri WhatsApp Personale» qui sotto.",
-                    "Dentro WhatsApp vai in Impostazioni ⚙️ → Chat → Trasferisci chat su Android → Inizia per aprire la fotocamera interna di WhatsApp e inquadrare il QR."
-                ]
-            }
-            if !isReceiverMode {
-                return [
-                    "Sull'altro iPhone apri WhatsApp Personale, verifica il numero SMS e tocca Continua su «Trasferisci la cronologia chat da iPhone» per mostrare il QR.",
-                    "Su questo iPhone tocca «Apri WhatsApp Personale» qui sotto.",
-                    "Dentro WhatsApp vai in Impostazioni ⚙️ → Chat → Trasferisci chat su iPhone → Inizia per aprire lo scanner interno di WhatsApp e inquadrare il QR."
-                ]
-            }
-            if isFromAndroid {
-                return [
-                    "Tocca il pulsante verde qui sotto per aprire (o scaricare) WhatsApp Personale.",
-                    "Inserisci il tuo numero di telefono e segui la procedura guidata per importare le chat."
-                ]
-            }
-            return [
-                "Tocca il pulsante verde qui sotto per aprire (o scaricare da App Store) WhatsApp Personale.",
-                "Inserisci il tuo numero e il codice SMS: quando appare «Trasferisci la cronologia chat da iPhone», tocca Continua (NON toccare «Salta») per mostrare il codice QR.",
-                "Dal vecchio iPhone apri WhatsApp Personale → Impostazioni ⚙️ → Chat → Trasferisci chat su iPhone → Inizia e inquadra il QR mostrato qui!"
-            ]
-        }()
-
-        let buttonTitle: String = isPersonalInstalled
-            ? "Apri WhatsApp Personale"
-            : "Scarica WhatsApp Personale"
-
-        let buttonIcon: String = isPersonalInstalled
-            ? "bubble.left.and.bubble.right.fill"
-            : "arrow.down.app.fill"
-
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                AppleSettingsIcon(systemName: "bubble.left.and.bubble.right.fill", color: AppleTheme.green)
-                Text(cardTitle)
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(AppleTheme.textPrimary)
-                Spacer()
-                InfoCircleButton(
-                    title: "Perché lo scanner QR si apre dentro WhatsApp",
-                    message: "Per motivi di sicurezza Meta non permette ad alcuna app esterna di avviare direttamente la fotocamera di migrazione di WhatsApp.\n\n• Il pulsante qui sotto apre sempre il tuo WhatsApp Personale (mai WhatsApp Business per errore).\n• Una volta dentro WhatsApp sul vecchio telefono, bastano 2 tocchi: Impostazioni ⚙️ (in basso a destra) → Chat → Trasferisci chat su iPhone (o Android) → Inizia per aprire lo scanner QR integrato!"
-                )
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(stepsList.enumerated()), id: \.offset) { idx, stepText in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("\(idx + 1)")
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundColor(.white)
-                            .frame(width: 19, height: 19)
-                            .background(AppleTheme.green)
-                            .clipShape(Circle())
-                            .padding(.top, 1)
-
-                        Text(stepText)
-                            .font(.system(size: 13))
-                            .foregroundColor(AppleTheme.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-
-            ApplePrimaryButton(
-                title: buttonTitle,
-                icon: buttonIcon,
-                color: AppleTheme.green
-            ) {
-                DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
-            }
-
-            if isBusinessAlsoInstalled {
-                Button(action: {
-                    DirectSwitchTransportViewModel.openWhatsAppBusiness()
-                }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "briefcase.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("Devi trasferire invece l'account aziendale? Apri WhatsApp Business")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundColor(AppleTheme.textSecondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 2)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(14)
-        .background(AppleTheme.cardSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(AppleTheme.green.opacity(0.48), lineWidth: 1.2)
-        )
     }
 
     private var passwordsCsvImportHelperCard: some View {

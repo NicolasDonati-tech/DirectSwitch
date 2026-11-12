@@ -123,6 +123,50 @@ struct PinPairingRequest: Codable, Sendable {
     let senderName: String
 }
 
+struct ActiveTransferScope: Codable, Equatable, Sendable {
+    var contacts: Bool = false
+    var photos: Bool = false
+    var videos: Bool = false
+    var calendars: Bool = false
+    var reminders: Bool = false
+    var documents: Bool = false
+    var apps: Bool = false
+    var whatsApp: Bool = false
+
+    var hasAnyStandardDataCategory: Bool {
+        contacts || photos || videos || calendars || reminders || documents || apps
+    }
+
+    var isWhatsAppOnly: Bool {
+        whatsApp && !hasAnyStandardDataCategory
+    }
+
+    var isAppsOnly: Bool {
+        apps && !contacts && !photos && !videos && !calendars && !reminders && !documents && !whatsApp
+    }
+
+    var hasMediaOrDocuments: Bool {
+        photos || videos || documents
+    }
+
+    static func inferred(from manifest: TransferManifest) -> ActiveTransferScope {
+        let hasPhotos = manifest.items.contains { $0.category == .PHOTOS }
+        let hasVideos = manifest.items.contains { $0.category == .VIDEOS }
+        let hasDocs = manifest.items.contains { $0.category == .DOCUMENTS }
+        let hasWaVault = manifest.items.contains { $0.category == .WHATSAPP_VAULT }
+        return ActiveTransferScope(
+            contacts: !manifest.contactsPayload.isEmpty,
+            photos: hasPhotos,
+            videos: hasVideos,
+            calendars: !manifest.calendarsPayload.isEmpty,
+            reminders: !(manifest.remindersPayload ?? []).isEmpty,
+            documents: hasDocs,
+            apps: !(manifest.installedAppsPayload ?? []).isEmpty,
+            whatsApp: (manifest.requestNativeWhatsAppMigration == true) || hasWaVault
+        )
+    }
+}
+
 struct HandshakeRequest: Codable, Sendable {
     let sessionId: String
     let senderName: String
@@ -130,6 +174,8 @@ struct HandshakeRequest: Codable, Sendable {
     let senderHasPro: Bool
     var senderHasCloudSavePro: Bool = false
     var totalEstimatedBytes: Int64 = 0
+    var isResume: Bool? = nil
+    var transferScope: ActiveTransferScope? = nil
 }
 
 struct HandshakeResponse: Codable, Sendable {
@@ -245,6 +291,7 @@ struct TransferManifest: Codable, Sendable {
     var smsPayload: [SmsTransferRecord] = []
     var installedAppsPayload: [InstalledAppRecord]? = nil
     var requestNativeWhatsAppMigration: Bool? = nil
+    var transferScope: ActiveTransferScope? = nil
 }
 
 struct ManifestResponse: Codable, Sendable {
