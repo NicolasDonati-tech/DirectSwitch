@@ -110,30 +110,46 @@ struct SenderAppsSelectionSheet: View {
                                 )
                             }
 
-                            PhotosPicker(
-                                selection: $screenshotPickerItems,
-                                maxSelectionCount: 10,
-                                matching: .images
-                            ) {
+                            Button(action: scanRecentScreenshotsAutomatically) {
                                 HStack(spacing: 8) {
                                     if isScanningScreenshots {
                                         ProgressView()
                                             .scaleEffect(0.85)
-                                            .tint(AppleTheme.blue)
+                                            .tint(.white)
                                     } else {
-                                        Image(systemName: "photo.badge.plus")
-                                            .font(.system(size: 14, weight: .semibold))
+                                        Image(systemName: "bolt.viewfinder")
+                                            .font(.system(size: 14, weight: .bold))
                                     }
                                     Text(isScanningScreenshots
                                          ? "Lettura nomi app dagli screenshot..."
-                                         : "Scegli screenshot Home o Impostazioni → App")
-                                        .font(.system(size: 14, weight: .semibold))
+                                         : "Rileva con 1 tocco dagli ultimi screenshot")
+                                        .font(.system(size: 14, weight: .bold))
+                                }
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .background(AppleTheme.blue)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isScanningScreenshots)
+
+                            PhotosPicker(
+                                selection: $screenshotPickerItems,
+                                maxSelectionCount: 14,
+                                matching: .images
+                            ) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "photo.badge.plus")
+                                        .font(.system(size: 13, weight: .semibold))
+                                    Text("Oppure scegli screenshot manualmente dalla galleria")
+                                        .font(.system(size: 13, weight: .semibold))
                                 }
                                 .foregroundColor(AppleTheme.blue)
                                 .frame(maxWidth: .infinity)
-                                .frame(height: 44)
+                                .frame(height: 38)
                                 .background(AppleTheme.cardSelected)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                             .disabled(isScanningScreenshots)
 
@@ -366,6 +382,20 @@ struct SenderAppsSelectionSheet: View {
         iOSInstalledAppsScanner.appendCustomApps([app])
     }
 
+    private func scanRecentScreenshotsAutomatically() {
+        isScanningScreenshots = true
+        ocrStatusNote = nil
+        Task {
+            let recentImages = await iOSInstalledAppsScanner.fetchRecentScreenshotsFromLibrary(maxCount: 14)
+            guard !recentImages.isEmpty else {
+                isScanningScreenshots = false
+                ocrStatusNote = "Nessuno screenshot delle ultime 48 ore trovato (oppure permesso Foto disattivato). Fai uno screenshot della Home o di «Impostazioni → App» e riprova!"
+                return
+            }
+            await ingestRecognizedScreenshotImages(recentImages)
+        }
+    }
+
     private func processPickedScreenshots(_ items: [PhotosPickerItem]) {
         isScanningScreenshots = true
         ocrStatusNote = nil
@@ -377,36 +407,48 @@ struct SenderAppsSelectionSheet: View {
                     uiImages.append(img)
                 }
             }
-            let discovered = await iOSInstalledAppsScanner.recognizeAppsFromScreenshots(uiImages)
-            var newlyAdded = 0
-            for app in discovered {
-                let exists = appsCatalog.contains {
-                    $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
-                        || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
-                }
-                if !exists {
-                    appsCatalog.append(app)
-                    newlyAdded += 1
-                }
-                deselectedAppIds.remove(app.id)
-            }
-            if !discovered.isEmpty {
-                iOSInstalledAppsScanner.appendCustomApps(discovered)
-            }
-            isScanningScreenshots = false
             screenshotPickerItems = []
-            ocrStatusNote = newlyAdded > 0
-                ? "Aggiunte \(newlyAdded) nuove app rilevate dagli screenshot!"
-                : "Tutte le app leggibili negli screenshot sono già presenti nell'elenco."
+            await ingestRecognizedScreenshotImages(uiImages)
         }
+    }
+
+    private func ingestRecognizedScreenshotImages(_ uiImages: [UIImage]) async {
+        let discovered = await iOSInstalledAppsScanner.recognizeAppsFromScreenshots(uiImages)
+        var newlyAdded = 0
+        for app in discovered {
+            let exists = appsCatalog.contains {
+                $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                    || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+            }
+            if !exists {
+                appsCatalog.append(app)
+                newlyAdded += 1
+            }
+            deselectedAppIds.remove(app.id)
+        }
+        if !discovered.isEmpty {
+            iOSInstalledAppsScanner.appendCustomApps(discovered)
+        }
+        isScanningScreenshots = false
+        ocrStatusNote = newlyAdded > 0
+            ? "Aggiunte \(newlyAdded) nuove app rilevate dagli screenshot!"
+            : "Tutte le app leggibili negli screenshot sono già presenti nell'elenco."
     }
 }
 
-// MARK: - Card Ricevente: Catalogo App ricevute + Installazione Automatica in Sequenza 1-dopo-l'altra
+// MARK: - Card Ricevente: Installazione Rapida 1-Tocco Fissa in Basso (`SKOverlay`) + Zero Face ID / Stesso ID Apple
 
 struct ReceiverAppsAutoInstallCard: View {
+    private enum AppleAccountMode: String {
+        case differentAppleId
+        case sameAppleId
+    }
+
     let incomingApps: [InstalledAppRecord]
     @ObservedObject var installer: iOSSequentialAppInstaller
+    @AppStorage("directswitch_zero_faceid_setup_done_v1") private var zeroFaceIdSetupDone: Bool = false
+    @State private var accountMode: AppleAccountMode = .differentAppleId
+    @State private var showZeroFaceIdSteps: Bool = true
     @State private var showFullList: Bool = false
 
     private var visibleApps: [InstalledAppRecord] {
@@ -427,8 +469,8 @@ struct ReceiverAppsAutoInstallCard: View {
                 AppleSettingsIcon(systemName: "square.grid.2x2.fill", color: AppleTheme.blue)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(installer.apps.isEmpty
-                         ? "Scarica le tue App"
-                         : "App dal telefono precedente (\(installer.apps.count))")
+                         ? "Installa le tue App"
+                         : "App dal vecchio telefono (\(installer.apps.count))")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
 
@@ -440,16 +482,35 @@ struct ReceiverAppsAutoInstallCard: View {
                 }
                 Spacer()
                 InfoCircleButton(
-                    title: "Installazione automatica in sequenza",
-                    message: "Tocca «Installa tutte una dopo l'altra» per avviare la coda automatica:\n\n• DirectSwitch apre subito la scheda ufficiale della 1ª app pronta sul pulsante «Ottieni / ☁️».\n• Appena confermi e chiudi la scheda (o torni a DirectSwitch con «◀ DirectSwitch» in alto a sinistra), si apre automaticamente l'app successiva senza cercare nulla manualmente!\n• Le app già installate su questo iPhone vengono saltate in automatico."
+                    title: "Sincronizzazione iCloud & Installazione Rapida",
+                    message: "• Con un NUOVO / ALTRO ID Apple: disattiva una sola volta Face ID per App Store seguendo i 2 passaggi qui sotto, poi avvia la barra rapida in basso. Il pulsante «Ottieni» resta fisso sotto il pollice senza aprire 100 schede e lega ogni app al nuovo iCloud.\n\n• Con lo STESSO ID Apple: apri direttamente «Non su questo iPhone» in App Store per scaricarle dalla lista unica con l'icona ☁️."
                 )
             }
 
-            if installer.apps.isEmpty {
-                Text("Puoi caricare subito le app principali in coda automatica oppure aprire la sezione gratuita «Non su questo iPhone» di App Store.")
-                    .font(.system(size: 13))
-                    .foregroundColor(AppleTheme.textSecondary)
+            // Selettore rapido: Nuovo / Altro ID Apple vs Stesso ID Apple
+            HStack(spacing: 6) {
+                accountModeTab(
+                    title: "Altro / Nuovo ID Apple",
+                    icon: "person.crop.circle.badge.plus",
+                    mode: .differentAppleId
+                )
+                accountModeTab(
+                    title: "Stesso ID Apple",
+                    icon: "icloud.and.arrow.down",
+                    mode: .sameAppleId
+                )
+            }
+            .padding(4)
+            .background(AppleTheme.inputSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
+            if accountMode == .sameAppleId {
+                sameAppleIdSection
+            } else {
+                differentAppleIdZeroFaceIdSection
+            }
+
+            if installer.apps.isEmpty {
                 ApplePrimaryButton(
                     title: "Carica elenco App principali in coda",
                     icon: "square.stack.3d.down.right.fill",
@@ -467,212 +528,539 @@ struct ReceiverAppsAutoInstallCard: View {
                     installer.configure(with: defaults)
                 }
             } else {
-                // Banner attivo durante la sequenza automatica 1-dopo-l'altra
-                if installer.isRunningSequence {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            if let active = installer.currentActiveApp {
-                                AppIconThumbnailView(iconUrl: active.iconUrl, size: 36)
-                            } else {
-                                ProgressView()
-                                    .tint(AppleTheme.blue)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Coda automatica \(installer.currentQueuePosition) di \(installer.totalQueueCount)")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(AppleTheme.blue)
-                                Text(installer.currentActiveApp?.appName ?? "Preparazione...")
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            if installer.isLoadingInlineCard {
-                                ProgressView()
-                                    .scaleEffect(0.85)
-                                    .tint(AppleTheme.blue)
-                            }
+                activeInstallerSection
+                appsChecklistSection
+            }
+        }
+        .appleCard(padding: 14)
+        .onAppear {
+            showZeroFaceIdSteps = !zeroFaceIdSetupDone
+            installer.configure(with: incomingApps)
+        }
+        .onChange(of: incomingApps) { updated in
+            installer.configure(with: updated)
+        }
+    }
+
+    private func accountModeTab(title: String, icon: String, mode: AppleAccountMode) -> some View {
+        let selected = accountMode == mode
+        return Button(action: {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                accountMode = mode
+            }
+        }) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .bold))
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+            }
+            .foregroundColor(selected ? AppleTheme.blue : AppleTheme.textSecondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(selected ? Color.white : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .shadow(color: selected ? Color.black.opacity(0.06) : .clear, radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var sameAppleIdSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Con lo stesso ID Apple tutte le app del vecchio iPhone sono già registrate sul tuo account iCloud: puoi scaricarle subito dall'elenco unico con l'icona ☁️ senza Face ID né password.")
+                .font(.system(size: 13))
+                .foregroundColor(AppleTheme.textSecondary)
+
+            Text("In App Store tocca la tua **foto profilo in alto a destra → App → Non su questo iPhone**.")
+                .font(.system(size: 12))
+                .foregroundColor(AppleTheme.textPrimary)
+
+            ApplePrimaryButton(
+                title: "Apri «Non su questo iPhone» in App Store",
+                icon: "icloud.and.arrow.down.fill",
+                color: AppleTheme.teal
+            ) {
+                iOSPermissionsHelper.openAppStorePurchasedSection()
+            }
+        }
+        .padding(12)
+        .background(AppleTheme.teal.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(AppleTheme.teal.opacity(0.30), lineWidth: 1.0)
+        )
+    }
+
+    private var differentAppleIdZeroFaceIdSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showZeroFaceIdSteps.toggle()
+                }
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: zeroFaceIdSetupDone ? "checkmark.seal.fill" : "bolt.shield.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(zeroFaceIdSetupDone ? AppleTheme.green : AppleTheme.orange)
+                    Text(zeroFaceIdSetupDone
+                         ? "Zero Face ID / Doppio Clic attivo per app gratuite"
+                         : "Prima di iniziare: togli Doppio Clic e Face ID (15 sec)")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Spacer()
+                    Image(systemName: showZeroFaceIdSteps ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if showZeroFaceIdSteps {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1. Apri **Impostazioni** (tocca «◀ Impostazioni» in alto a sinistra) → **Face ID e codice** → spegni **iTunes Store e App Store**.")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("2. Tocca il **tuo Nome (Apple Account)** in alto → **File multimediali e acquisti → Impostazioni password** → metti **Richiedi password: No** sotto *Download gratuiti*.")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("Così ogni tocco su «Ottieni» scarica subito l'app sulla Home e la sincronizza col nuovo iCloud senza doppio clic né Face ID!")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+
+                HStack(spacing: 8) {
+                    Button(action: {
+                        iOSPermissionsHelper.openDirectSwitchSettings()
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("Apri Impostazioni")
+                                .font(.system(size: 12, weight: .bold))
                         }
+                        .foregroundColor(AppleTheme.blue)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
 
-                        Text(installer.waitingForExternalReturn
-                             ? "Tocca «Ottieni / ☁️» in App Store, poi tocca «◀ DirectSwitch» in alto a sinistra: la prossima app partirà da sola!"
-                             : "Tocca «Ottieni / ☁️» sulla scheda e chiudila per passare in automatico alla successiva.")
-                            .font(.system(size: 12))
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            zeroFaceIdSetupDone = true
+                            showZeroFaceIdSteps = false
+                        }
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("Fatto, nascondi")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(AppleTheme.green)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(12)
+        .background(zeroFaceIdSetupDone ? AppleTheme.green.opacity(0.08) : AppleTheme.orange.opacity(0.09))
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke((zeroFaceIdSetupDone ? AppleTheme.green : AppleTheme.orange).opacity(0.32), lineWidth: 1.0)
+        )
+    }
+
+    @ViewBuilder
+    private var activeInstallerSection: some View {
+        if installer.isRunningSequence {
+            if installer.activeDeliveryMode == .fastBottomOverlay {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .scaleEffect(0.85)
+                        .tint(AppleTheme.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Barra rapida attiva in basso (\(installer.currentQueuePosition) di \(installer.totalQueueCount))")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(AppleTheme.blue)
+                        Text("Usa il mini-banner Apple e il tasto «Prossima →» fissi in fondo allo schermo.")
+                            .font(.system(size: 11))
                             .foregroundColor(AppleTheme.textSecondary)
+                    }
+                    Spacer()
+                    Button("Ferma") {
+                        installer.stopSequence()
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(AppleTheme.red)
+                }
+                .padding(11)
+                .background(AppleTheme.cardSelected)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        if let active = installer.currentActiveApp {
+                            AppIconThumbnailView(iconUrl: active.iconUrl, size: 36)
+                        } else {
+                            ProgressView()
+                                .tint(AppleTheme.blue)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Coda automatica \(installer.currentQueuePosition) di \(installer.totalQueueCount)")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(AppleTheme.blue)
+                            Text(installer.currentActiveApp?.appName ?? "Preparazione...")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        if installer.isLoadingInlineCard {
+                            ProgressView()
+                                .scaleEffect(0.85)
+                                .tint(AppleTheme.blue)
+                        }
+                    }
 
-                        HStack(spacing: 8) {
+                    Text(installer.waitingForExternalReturn
+                         ? "Tocca «Ottieni / ☁️» in App Store, poi tocca «◀ DirectSwitch» in alto a sinistra: la prossima app partirà da sola!"
+                         : "Tocca «Ottieni / ☁️» sulla scheda e chiudila per passare in automatico alla successiva.")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textSecondary)
+
+                    HStack(spacing: 8) {
+                        if installer.canGoBackInQueue {
                             Button(action: {
-                                installer.skipCurrentAndContinue()
+                                installer.goBackToPreviousApp()
                             }) {
                                 HStack(spacing: 4) {
-                                    Image(systemName: "forward.fill")
+                                    Image(systemName: "backward.fill")
                                         .font(.system(size: 11, weight: .bold))
-                                    Text("Salta questa")
-                                        .font(.system(size: 13, weight: .bold))
+                                    Text("Precedente")
+                                        .font(.system(size: 12, weight: .bold))
                                 }
-                                .foregroundColor(AppleTheme.blue)
+                                .foregroundColor(AppleTheme.textPrimary)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
                                 .background(Color.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                        }
 
+                        Button(action: {
+                            installer.skipCurrentAndContinue()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "forward.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("Salta")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundColor(AppleTheme.blue)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(action: {
+                            installer.stopSequence()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("Ferma")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundColor(AppleTheme.red)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(AppleTheme.red.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(12)
+                .background(AppleTheme.cardSelected)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(AppleTheme.blue.opacity(0.45), lineWidth: 1.1)
+                )
+            }
+        } else if pendingCount > 0 {
+            VStack(alignment: .leading, spacing: 6) {
+                ApplePrimaryButton(
+                    title: "Avvia Barra Rapida 1-Tocco (\(pendingCount) app)",
+                    icon: "bolt.horizontal.circle.fill",
+                    color: AppleTheme.blue
+                ) {
+                    installer.startAutomaticSequence()
+                }
+                Text("Il tasto «Ottieni» compare fisso in basso senza aprire e chiudere pagine: sincronizza tutte le app col nuovo iCloud in pochi secondi.")
+                    .font(.system(size: 11))
+                    .foregroundColor(AppleTheme.textSecondary)
+            }
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundColor(AppleTheme.green)
+                Text("Tutte le app selezionate sono state avviate o sono già presenti!")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(AppleTheme.green)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var appsChecklistSection: some View {
+        VStack(spacing: 8) {
+            VStack(spacing: 0) {
+                ForEach(Array(visibleApps.enumerated()), id: \.element.id) { index, app in
+                    let isAlready = installer.alreadyInstalledIds.contains(app.id)
+                    let isDone = installer.completedIds.contains(app.id)
+                    let isSelected = installer.selectedIds.contains(app.id)
+
+                    HStack(spacing: 10) {
+                        if !isAlready {
                             Button(action: {
-                                installer.stopSequence()
+                                installer.toggleSelection(for: app)
+                            }) {
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 19))
+                                    .foregroundColor(isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        AppIconThumbnailView(iconUrl: app.iconUrl, size: 36)
+
+                        Text(app.appName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        if isAlready {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("Installata")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .foregroundColor(AppleTheme.green)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(AppleTheme.green.opacity(0.12))
+                            .clipShape(Capsule())
+                        } else {
+                            Button(action: {
+                                installer.installSingleApp(app)
                             }) {
                                 HStack(spacing: 4) {
-                                    Image(systemName: "stop.fill")
-                                        .font(.system(size: 11, weight: .bold))
-                                    Text("Ferma coda")
-                                        .font(.system(size: 13, weight: .bold))
+                                    Image(systemName: isDone ? "checkmark.circle.fill" : "icloud.and.arrow.down")
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Text(isDone ? "Avviata" : "Ottieni")
+                                        .font(.system(size: 12, weight: .bold))
                                 }
-                                .foregroundColor(AppleTheme.red)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(AppleTheme.red.opacity(0.10))
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .foregroundColor(isDone ? AppleTheme.teal : AppleTheme.blue)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(isDone ? AppleTheme.teal.opacity(0.12) : AppleTheme.cardSelected)
+                                .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(12)
-                    .background(AppleTheme.cardSelected)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(AppleTheme.blue.opacity(0.45), lineWidth: 1.1)
-                    )
-                } else if pendingCount > 0 {
-                    ApplePrimaryButton(
-                        title: "Installa tutte una dopo l'altra (\(pendingCount) app)",
-                        icon: "arrow.down.app.fill",
-                        color: AppleTheme.blue
-                    ) {
-                        installer.startAutomaticSequence()
+                    .padding(.vertical, 8)
+
+                    if index < visibleApps.count - 1 {
+                        Divider().padding(.leading, 56)
                     }
-                } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.seal.fill")
-                            .foregroundColor(AppleTheme.green)
-                        Text("Tutte le app selezionate sono state avviate o sono già presenti!")
+                }
+            }
+
+            if installer.apps.count > 10 {
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showFullList.toggle()
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Text(showFullList ? "Mostra meno" : "Mostra tutte le \(installer.apps.count) app")
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(AppleTheme.green)
+                        Image(systemName: showFullList ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .bold))
                     }
-                    .padding(.vertical, 4)
+                    .foregroundColor(AppleTheme.blue)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 2)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+// MARK: - Console Flottante Sopra il Mini-Banner di Sistema `SKOverlay` (Ottieni fisso + Prossima sotto il pollice)
+
+struct FastOverlayFloatingControlBar: View {
+    @ObservedObject var installer: iOSSequentialAppInstaller
+
+    private var progressFraction: Double {
+        guard installer.totalQueueCount > 0 else { return 0 }
+        return min(1.0, max(0.05, Double(installer.currentQueuePosition) / Double(installer.totalQueueCount)))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                if let active = installer.currentActiveApp {
+                    AppIconThumbnailView(iconUrl: active.iconUrl, size: 34)
                 }
 
-                // Lista app trasferite con icone reali, selezione e stato
-                VStack(spacing: 0) {
-                    ForEach(Array(visibleApps.enumerated()), id: \.element.id) { index, app in
-                        let isAlready = installer.alreadyInstalledIds.contains(app.id)
-                        let isDone = installer.completedIds.contains(app.id)
-                        let isSelected = installer.selectedIds.contains(app.id)
-
-                        HStack(spacing: 10) {
-                            if !isAlready {
-                                Button(action: {
-                                    installer.toggleSelection(for: app)
-                                }) {
-                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 19))
-                                        .foregroundColor(isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-
-                            AppIconThumbnailView(iconUrl: app.iconUrl, size: 36)
-
-                            Text(app.appName)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                                .lineLimit(1)
-
-                            Spacer()
-
-                            if isAlready {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 10, weight: .bold))
-                                    Text("Già presente")
-                                        .font(.system(size: 11, weight: .bold))
-                                }
-                                .foregroundColor(AppleTheme.green)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 5)
-                                .background(AppleTheme.green.opacity(0.12))
-                                .clipShape(Capsule())
-                            } else {
-                                Button(action: {
-                                    installer.installSingleApp(app)
-                                }) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: isDone ? "checkmark.circle.fill" : "icloud.and.arrow.down")
-                                            .font(.system(size: 12, weight: .semibold))
-                                        Text(isDone ? "Aperta" : "Ottieni")
-                                            .font(.system(size: 12, weight: .bold))
-                                    }
-                                    .foregroundColor(isDone ? AppleTheme.teal : AppleTheme.blue)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(isDone ? AppleTheme.teal.opacity(0.12) : AppleTheme.cardSelected)
-                                    .clipShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.vertical, 8)
-
-                        if index < visibleApps.count - 1 {
-                            Divider().padding(.leading, 56)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(installer.isSingleOverlaySession
+                             ? "Installazione rapida"
+                             : "App \(installer.currentQueuePosition) di \(installer.totalQueueCount)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(AppleTheme.blue)
+                        if installer.isLoadingInlineCard {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .tint(AppleTheme.blue)
                         }
                     }
+                    Text(installer.currentActiveApp?.appName ?? "")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .lineLimit(1)
                 }
 
-                if installer.apps.count > 10 {
+                Spacer()
+
+                Button(action: {
+                    installer.stopSequence()
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(AppleTheme.textTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !installer.isSingleOverlaySession {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(AppleTheme.inputSurface)
+                            .frame(height: 5)
+                        Capsule()
+                            .fill(AppleTheme.blue)
+                            .frame(width: geo.size.width * progressFraction, height: 5)
+                    }
+                }
+                .frame(height: 5)
+            }
+
+            Text("1. Tocca **OTTIENI** nel banner Apple qui sotto  •  2. Tocca **Prossima →**")
+                .font(.system(size: 11))
+                .foregroundColor(AppleTheme.textSecondary)
+                .lineLimit(1)
+
+            HStack(spacing: 8) {
+                if installer.canGoBackInQueue {
                     Button(action: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showFullList.toggle()
-                        }
+                        installer.goBackToPreviousApp()
                     }) {
-                        HStack(spacing: 4) {
-                            Text(showFullList ? "Mostra meno" : "Mostra tutte le \(installer.apps.count) app")
-                                .font(.system(size: 13, weight: .semibold))
-                            Image(systemName: showFullList ? "chevron.up" : "chevron.down")
+                        HStack(spacing: 3) {
+                            Image(systemName: "chevron.left")
                                 .font(.system(size: 11, weight: .bold))
+                            Text("Indietro")
+                                .font(.system(size: 12, weight: .bold))
                         }
-                        .foregroundColor(AppleTheme.blue)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 2)
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .padding(.horizontal, 11)
+                        .frame(height: 40)
+                        .background(AppleTheme.inputSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                } else if !installer.isSingleOverlaySession {
+                    Button(action: {
+                        installer.skipCurrentAndContinue()
+                    }) {
+                        Text("Salta")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(AppleTheme.textSecondary)
+                            .padding(.horizontal, 12)
+                            .frame(height: 40)
+                            .background(AppleTheme.inputSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
-            }
 
-            Divider()
-
-            Button(action: {
-                iOSPermissionsHelper.openAppStorePurchasedSection()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "bag")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("Hai lo stesso ID Apple? Apri anche «Non su questo iPhone»")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                if !installer.isOverlayVisible && !installer.isLoadingInlineCard {
+                    Button(action: {
+                        installer.reopenCurrentOverlay()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.square.fill")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("Mostra Ottieni")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .foregroundColor(AppleTheme.blue)
+                        .padding(.horizontal, 11)
+                        .frame(height: 40)
+                        .background(AppleTheme.cardSelected)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .foregroundColor(AppleTheme.textSecondary)
+
+                Button(action: {
+                    installer.confirmCurrentAndAdvance()
+                }) {
+                    HStack(spacing: 6) {
+                        Text(installer.isSingleOverlaySession ? "Fatto • Chiudi" : "Fatto Ottieni → Prossima")
+                            .font(.system(size: 13, weight: .bold))
+                        if !installer.isSingleOverlaySession {
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(AppleTheme.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
-        .appleCard(padding: 14)
-        .onAppear {
-            installer.configure(with: incomingApps)
-        }
-        .onChange(of: incomingApps) { updated in
-            installer.configure(with: updated)
-        }
+        .padding(12)
+        .background(Color.white.opacity(0.98))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(AppleTheme.blue.opacity(0.35), lineWidth: 1.2)
+        )
+        .shadow(color: Color.black.opacity(0.14), radius: 12, x: 0, y: 4)
     }
 }

@@ -263,6 +263,15 @@ struct DirectSwitchMainView: View {
                     }
                 }
             }
+            .overlay(alignment: .bottom) {
+                if appInstaller.showsFloatingBottomBar {
+                    FastOverlayFloatingControlBar(installer: appInstaller)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, appInstaller.overlaySafeBottomPadding + 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: appInstaller.showsFloatingBottomBar)
             .navigationBarHidden(true)
         }
         .preferredColorScheme(.light)
@@ -1065,7 +1074,7 @@ private struct DirectSwitchTransferProgressView: View {
                 )
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 28)
+            .padding(.bottom, appInstaller.showsFloatingBottomBar ? (appInstaller.overlaySafeBottomPadding + 165) : 28)
         }
     }
 
@@ -1384,7 +1393,7 @@ private struct DirectSwitchTransferProgressView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 28)
+            .padding(.bottom, appInstaller.showsFloatingBottomBar ? (appInstaller.overlaySafeBottomPadding + 165) : 28)
         }
     }
 

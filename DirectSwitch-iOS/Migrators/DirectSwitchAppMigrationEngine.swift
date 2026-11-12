@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import Photos
 import SwiftUI
 import StoreKit
 import UIKit
@@ -353,6 +354,71 @@ enum iOSInstalledAppsScanner {
 
         return resolved
     }
+
+    /// Legge con 1 solo tocco gli ultimi screenshot recenti dall'album «Istantanee» (ultime 48 ore)
+    /// per importare decine di app dalla Home o da «Impostazioni → App» senza selezionarle manualmente una per una.
+    static func fetchRecentScreenshotsFromLibrary(maxCount: Int = 12) async -> [UIImage] {
+        var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .notDetermined {
+            status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        }
+        guard status == .authorized || status == .limited else {
+            return []
+        }
+
+        let cutoffDate = Date().addingTimeInterval(-48 * 3600)
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        fetchOptions.predicate = NSPredicate(format: "creationDate >= %@", cutoffDate as NSDate)
+        fetchOptions.fetchLimit = maxCount
+
+        let screenshotAlbums = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum,
+            subtype: .smartAlbumScreenshots,
+            options: nil
+        )
+        let assetsResult: PHFetchResult<PHAsset>
+        if let album = screenshotAlbums.firstObject {
+            assetsResult = PHAsset.fetchAssets(in: album, options: fetchOptions)
+        } else {
+            return []
+        }
+        guard assetsResult.count > 0 else { return [] }
+
+        var assets: [PHAsset] = []
+        assetsResult.enumerateObjects { asset, _, _ in
+            assets.append(asset)
+        }
+
+        let imageManager = PHImageManager.default()
+        let reqOptions = PHImageRequestOptions()
+        reqOptions.isNetworkAccessAllowed = true
+        reqOptions.deliveryMode = .highQualityFormat
+        reqOptions.isSynchronous = false
+
+        var images: [UIImage] = []
+        for asset in assets {
+            let loaded: UIImage? = await withCheckedContinuation { continuation in
+                var settled = false
+                let lock = NSLock()
+                imageManager.requestImageDataAndOrientation(for: asset, options: reqOptions) { data, _, _, _ in
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !settled else { return }
+                    settled = true
+                    if let data, let img = UIImage(data: data) {
+                        continuation.resume(returning: img)
+                    } else {
+                        continuation.resume(returning: nil)
+                    }
+                }
+            }
+            if let loaded {
+                images.append(loaded)
+            }
+        }
+        return images
+    }
 }
 
 /// Risolve icone ufficiali `artworkUrl100` e `trackId` numerici tramite le API pubbliche Apple iTunes Lookup / Search (`country=it`).
@@ -557,11 +623,19 @@ enum iOSAppStoreCatalogResolver {
     }
 }
 
-/// Motore di installazione sequenziale automatica sul nuovo iPhone:
-/// apre una dopo l'altra le schede ufficiali App Store (`SKStoreProductViewController` nativo in-app con fallback automatico
-/// al link diretto `id<trackId>` + concatenazione automatica al rientro in foreground per build sideloaded).
+/// Motore di installazione rapida 1-tocco sul nuovo iPhone:
+/// 1) Livello 1 (Predefinito): Mini-banner di sistema fisso in basso (`SKOverlay`, posizione `.bottom`) senza mai uscire da DirectSwitch
+///    né aprire/chiudere 100 pagine intere dell'App Store — il tasto «Ottieni» resta fisso sotto il pollice e sincronizza ogni app col nuovo iCloud.
+/// 2) Livello 2 (Fallback automatico): `SKStoreProductViewController` se una specifica app o build sideloaded non supporta `SKOverlay`.
+/// 3) Livello 3 (Fallback universale `Free-Install.ipa`): Link diretto `itms-apps://itunes.apple.com/app/id<trackId>` con concatenazione automatica al rientro.
 @MainActor
-final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProductViewControllerDelegate, UIAdaptivePresentationControllerDelegate {
+final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDelegate, SKStoreProductViewControllerDelegate, UIAdaptivePresentationControllerDelegate {
+    enum DeliveryMode: Equatable {
+        case fastBottomOverlay
+        case inlineStoreSheet
+        case externalAppStore
+    }
+
     @Published var apps: [InstalledAppRecord] = []
     @Published var selectedIds: Set<String> = []
     @Published var completedIds: Set<String> = []
@@ -569,19 +643,44 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
     @Published var isEnrichingMetadata: Bool = false
 
     @Published var isRunningSequence: Bool = false
+    @Published var isSingleOverlaySession: Bool = false
     @Published var isLoadingInlineCard: Bool = false
+    @Published var isOverlayVisible: Bool = false
+    @Published var overlaySafeBottomPadding: CGFloat = 78
+    @Published var activeDeliveryMode: DeliveryMode = .fastBottomOverlay
+
     @Published var currentQueuePosition: Int = 0
     @Published var totalQueueCount: Int = 0
     @Published var currentActiveApp: InstalledAppRecord? = nil
     @Published var waitingForExternalReturn: Bool = false
+    @Published private(set) var historyStack: [InstalledAppRecord] = []
+
+    /// Usato nei test unitari su simulatore per verificare la macchina a stati della coda senza invocare `storekitd`.
+    var dryRunPresentationForTesting: Bool = false
 
     private var queue: [InstalledAppRecord] = []
+    private var overlayUnsupportedOnDevice: Bool = false
+    private var hasEverPresentedOverlaySuccessfully: Bool = false
     private var preferExternalAppStore: Bool = false
     private var inlineSheetHandledForCurrentStep: Bool = false
+    private var isSwitchingOverlayProgrammatically: Bool = false
+    private var currentPresentationAttemptId: UUID = UUID()
     private var autoAdvanceTask: Task<Void, Never>? = nil
+    private var liveInstallMonitorTask: Task<Void, Never>? = nil
+    private var activeOverlayInstance: SKOverlay? = nil
 
     var pendingInstallableCount: Int {
         apps.filter { selectedIds.contains($0.id) && !alreadyInstalledIds.contains($0.id) && !completedIds.contains($0.id) }.count
+    }
+
+    var canGoBackInQueue: Bool {
+        isRunningSequence && !historyStack.isEmpty
+    }
+
+    var showsFloatingBottomBar: Bool {
+        (isRunningSequence || isSingleOverlaySession)
+            && activeDeliveryMode == .fastBottomOverlay
+            && currentActiveApp != nil
     }
 
     func reset() {
@@ -590,6 +689,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         selectedIds = []
         completedIds = []
         alreadyInstalledIds = []
+        historyStack = []
         isEnrichingMetadata = false
     }
 
@@ -610,6 +710,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         }
 
         completedIds.removeAll()
+        historyStack.removeAll()
         apps = incomingApps
         refreshInstalledStatuses()
         selectedIds = Set(
@@ -618,10 +719,17 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
                 .map(\.id)
         )
 
+        guard !dryRunPresentationForTesting else { return }
         isEnrichingMetadata = true
         Task {
             let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(incomingApps)
+            let byId = Dictionary(uniqueKeysWithValues: enriched.map { ($0.id, $0) })
             self.apps = enriched
+            self.queue = self.queue.map { byId[$0.id] ?? $0 }
+            self.historyStack = self.historyStack.map { byId[$0.id] ?? $0 }
+            if let active = self.currentActiveApp, let updatedActive = byId[active.id] {
+                self.currentActiveApp = updatedActive
+            }
             self.refreshInstalledStatuses()
             self.isEnrichingMetadata = false
         }
@@ -652,15 +760,20 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         }
     }
 
-    /// Installa una singola app (usando la card App Store interna oppure la scheda diretta App Store).
+    /// Installa una singola app mostrando subito il mini-banner `SKOverlay` fisso in basso (o fallback automatico).
     func installSingleApp(_ app: InstalledAppRecord) {
         stopSequence()
-        presentAppCardOrExternalStore(app: app, partOfSequence: false)
+        currentActiveApp = app
+        isSingleOverlaySession = true
+        currentQueuePosition = 1
+        totalQueueCount = 1
+        startLiveInstallMonitor()
+        presentAppFastBannerOrFallback(app: app, partOfSequence: false)
     }
 
-    /// Avvia la coda automatica di tutte le app selezionate una dopo l'altra senza doverle cercare manualmente.
+    /// Avvia la sequenza rapida con mini-banner fisso in basso per tutte le app selezionate.
     func startAutomaticSequence() {
-        autoAdvanceTask?.cancel()
+        stopSequence()
         refreshInstalledStatuses()
         let pending = apps.filter {
             selectedIds.contains($0.id) && !alreadyInstalledIds.contains($0.id) && !completedIds.contains($0.id)
@@ -668,27 +781,91 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         guard !pending.isEmpty else { return }
 
         queue = pending
+        historyStack = []
         totalQueueCount = pending.count
         currentQueuePosition = 0
         isRunningSequence = true
+        isSingleOverlaySession = false
         waitingForExternalReturn = false
+        startLiveInstallMonitor()
         advanceToNextInQueue()
+    }
+
+    /// Conferma di aver premuto «Ottieni» sul mini-banner in basso e carica istantaneamente l'app successiva nello stesso punto.
+    func confirmCurrentAndAdvance() {
+        autoAdvanceTask?.cancel()
+        waitingForExternalReturn = false
+        isLoadingInlineCard = false
+
+        if let active = currentActiveApp {
+            completedIds.insert(active.id)
+            if isRunningSequence {
+                historyStack.append(active)
+            }
+        }
+
+        if isSingleOverlaySession {
+            stopSequence()
+            return
+        }
+
+        guard isRunningSequence else { return }
+        advanceToNextInQueue()
+    }
+
+    /// Torna immediatamente all'app precedente nel mini-banner se si è toccato «Prossima» per errore.
+    func goBackToPreviousApp() {
+        guard isRunningSequence, let previous = historyStack.popLast() else { return }
+        autoAdvanceTask?.cancel()
+        waitingForExternalReturn = false
+        isLoadingInlineCard = false
+
+        if let active = currentActiveApp {
+            queue.insert(active, at: 0)
+            currentQueuePosition = max(1, currentQueuePosition - 1)
+        } else {
+            currentQueuePosition = max(1, currentQueuePosition)
+        }
+
+        completedIds.remove(previous.id)
+        currentActiveApp = previous
+        presentAppFastBannerOrFallback(app: previous, partOfSequence: true)
+    }
+
+    /// Riapre il mini-banner `SKOverlay` dell'app corrente se l'utente lo ha chiuso scorrendo verso il basso.
+    func reopenCurrentOverlay() {
+        guard let active = currentActiveApp else { return }
+        presentAppFastBannerOrFallback(app: active, partOfSequence: isRunningSequence)
     }
 
     func skipCurrentAndContinue() {
         autoAdvanceTask?.cancel()
         waitingForExternalReturn = false
         isLoadingInlineCard = false
+        if let active = currentActiveApp, isRunningSequence {
+            historyStack.append(active)
+        }
+        if isSingleOverlaySession {
+            stopSequence()
+            return
+        }
         guard isRunningSequence else { return }
         advanceToNextInQueue()
     }
 
     func stopSequence() {
+        currentPresentationAttemptId = UUID()
         autoAdvanceTask?.cancel()
         autoAdvanceTask = nil
+        liveInstallMonitorTask?.cancel()
+        liveInstallMonitorTask = nil
+        dismissOverlayIfPresent()
         queue.removeAll()
+        historyStack.removeAll()
         isRunningSequence = false
+        isSingleOverlaySession = false
         isLoadingInlineCard = false
+        isOverlayVisible = false
         waitingForExternalReturn = false
         currentActiveApp = nil
     }
@@ -702,6 +879,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
 
         if let active = currentActiveApp {
             completedIds.insert(active.id)
+            historyStack.append(active)
         }
 
         if queue.isEmpty {
@@ -711,9 +889,25 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
 
         autoAdvanceTask?.cancel()
         autoAdvanceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 750_000_000)
+            try? await Task.sleep(nanoseconds: 650_000_000)
             guard let self, !Task.isCancelled, self.isRunningSequence else { return }
             self.advanceToNextInQueue()
+        }
+    }
+
+    private func startLiveInstallMonitor() {
+        liveInstallMonitorTask?.cancel()
+        guard !dryRunPresentationForTesting else { return }
+        liveInstallMonitorTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard self.isRunningSequence || self.isSingleOverlaySession else { return }
+                self.refreshInstalledStatuses()
+                if let active = self.currentActiveApp, self.alreadyInstalledIds.contains(active.id) {
+                    self.confirmCurrentAndAdvance()
+                }
+            }
         }
     }
 
@@ -726,21 +920,96 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
                 continue
             }
             currentActiveApp = candidate
-            presentAppCardOrExternalStore(app: candidate, partOfSequence: true)
+            presentAppFastBannerOrFallback(app: candidate, partOfSequence: true)
             return
         }
         stopSequence()
     }
 
-    private func presentAppCardOrExternalStore(app: InstalledAppRecord, partOfSequence: Bool) {
-        // Se non abbiamo un `trackId` numerico o la build sideloaded richiede apertura diretta App Store
+    private func dismissOverlayIfPresent() {
+        guard !dryRunPresentationForTesting else {
+            isOverlayVisible = false
+            return
+        }
+        isSwitchingOverlayProgrammatically = true
+        activeOverlayInstance = nil
+        if let scene = Self.activeWindowScene() {
+            SKOverlay.dismiss(in: scene)
+        }
+        isOverlayVisible = false
+    }
+
+    private func presentAppFastBannerOrFallback(app: InstalledAppRecord, partOfSequence: Bool) {
+        let attemptId = UUID()
+        currentPresentationAttemptId = attemptId
+
+        if dryRunPresentationForTesting {
+            activeDeliveryMode = .fastBottomOverlay
+            isOverlayVisible = true
+            isLoadingInlineCard = false
+            return
+        }
+
+        // Livello 1: Mini-banner di sistema fisso in basso (`SKOverlay`) senza cambiare schermata
+        if !overlayUnsupportedOnDevice,
+           let trackId = app.appStoreId, trackId > 0,
+           let scene = Self.activeWindowScene() {
+            activeDeliveryMode = .fastBottomOverlay
+            isLoadingInlineCard = true
+
+            let hadVisibleOverlay = isOverlayVisible || activeOverlayInstance != nil
+            if hadVisibleOverlay {
+                isSwitchingOverlayProgrammatically = true
+                SKOverlay.dismiss(in: scene)
+                isOverlayVisible = false
+            }
+
+            Task { @MainActor [weak self] in
+                if hadVisibleOverlay {
+                    try? await Task.sleep(nanoseconds: 160_000_000)
+                }
+                guard let self, self.currentPresentationAttemptId == attemptId else { return }
+                guard let liveScene = Self.activeWindowScene() else {
+                    self.presentInlineSheetOrExternalFallback(app: app, partOfSequence: partOfSequence, attemptId: attemptId)
+                    return
+                }
+
+                self.isSwitchingOverlayProgrammatically = false
+                let config = SKOverlay.AppConfiguration(appIdentifier: String(trackId), position: .bottom)
+                config.userDismissible = true
+                let overlay = SKOverlay(configuration: config)
+                overlay.delegate = self
+                self.activeOverlayInstance = overlay
+                overlay.present(in: liveScene)
+
+                // Timeout di sicurezza (2.3s): se su build sideloaded Free-Install `storekitd` ignora SKOverlay senza chiamare il delegate, scala subito al fallback
+                try? await Task.sleep(nanoseconds: 2_300_000_000)
+                guard self.currentPresentationAttemptId == attemptId, !self.isOverlayVisible else { return }
+                self.isLoadingInlineCard = false
+                if !self.hasEverPresentedOverlaySuccessfully {
+                    self.overlayUnsupportedOnDevice = true
+                }
+                self.dismissOverlayIfPresent()
+                self.presentInlineSheetOrExternalFallback(app: app, partOfSequence: partOfSequence, attemptId: attemptId)
+            }
+            return
+        }
+
+        presentInlineSheetOrExternalFallback(app: app, partOfSequence: partOfSequence, attemptId: attemptId)
+    }
+
+    private func presentInlineSheetOrExternalFallback(app: InstalledAppRecord, partOfSequence: Bool, attemptId: UUID) {
+        guard currentPresentationAttemptId == attemptId else { return }
+
         guard !preferExternalAppStore,
               let trackId = app.appStoreId, trackId > 0,
-              let presenter = Self.topMostViewController() else {
+              Self.topMostViewController() != nil else {
+            activeDeliveryMode = .externalAppStore
             openExternalAndTrack(app: app, partOfSequence: partOfSequence)
             return
         }
 
+        activeDeliveryMode = .inlineStoreSheet
         isLoadingInlineCard = true
         inlineSheetHandledForCurrentStep = false
 
@@ -761,12 +1030,12 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         }
         let gate = LoadTimeoutGate()
 
-        // Timeout rapido di 2.8s: se su Free-Install.ipa il demone StoreKit non risponde, passa subito alla scheda diretta App Store
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_800_000_000)
-            guard gate.trySettle(), let self else { return }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard gate.trySettle(), let self, self.currentPresentationAttemptId == attemptId else { return }
             self.isLoadingInlineCard = false
             self.preferExternalAppStore = true
+            self.activeDeliveryMode = .externalAppStore
             self.openExternalAndTrack(app: app, partOfSequence: partOfSequence)
         }
 
@@ -775,7 +1044,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         ]
         storeVC.loadProduct(withParameters: params) { [weak self] loaded, _ in
             Task { @MainActor [weak self] in
-                guard gate.trySettle(), let self else { return }
+                guard gate.trySettle(), let self, self.currentPresentationAttemptId == attemptId else { return }
                 self.isLoadingInlineCard = false
                 if loaded, let livePresenter = Self.topMostViewController(), livePresenter.presentedViewController == nil {
                     livePresenter.present(storeVC, animated: true)
@@ -784,6 +1053,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
                     }
                 } else {
                     self.preferExternalAppStore = true
+                    self.activeDeliveryMode = .externalAppStore
                     self.openExternalAndTrack(app: app, partOfSequence: partOfSequence)
                 }
             }
@@ -795,8 +1065,25 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
             waitingForExternalReturn = true
         } else {
             completedIds.insert(app.id)
+            isSingleOverlaySession = false
         }
         iOSAppStoreCatalogResolver.openDirectAppStorePage(for: app)
+    }
+
+    private func updateSafeBottomPadding(from endFrame: CGRect) {
+        guard endFrame.height > 20 else { return }
+        let scene = Self.activeWindowScene()
+        let keyWindow = scene?.windows.first(where: \.isKeyWindow) ?? scene?.windows.first
+        let windowHeight = keyWindow?.bounds.height ?? UIScreen.main.bounds.height
+        let safeBottom = keyWindow?.safeAreaInsets.bottom ?? 0
+
+        let computed: CGFloat
+        if endFrame.minY > 100 && endFrame.minY < windowHeight {
+            computed = max(68, (windowHeight - endFrame.minY) - safeBottom)
+        } else {
+            computed = max(68, endFrame.height)
+        }
+        overlaySafeBottomPadding = min(140, computed)
     }
 
     private func handleInlineStoreDismissed() {
@@ -805,17 +1092,79 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
 
         if let active = currentActiveApp {
             completedIds.insert(active.id)
+            if isRunningSequence {
+                historyStack.append(active)
+            }
         }
         refreshInstalledStatuses()
+
+        if isSingleOverlaySession {
+            stopSequence()
+            return
+        }
 
         guard isRunningSequence else { return }
         autoAdvanceTask?.cancel()
         autoAdvanceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 380_000_000)
+            try? await Task.sleep(nanoseconds: 350_000_000)
             guard let self, !Task.isCancelled, self.isRunningSequence else { return }
             self.advanceToNextInQueue()
         }
     }
+
+    // MARK: - SKOverlayDelegate
+
+    nonisolated func storeOverlayWillStartPresentation(_ overlay: SKOverlay, transitionContext: SKOverlay.TransitionContext) {
+        let endFrame = transitionContext.endFrame
+        Task { @MainActor [weak self] in
+            guard let self, overlay === self.activeOverlayInstance else { return }
+            self.updateSafeBottomPadding(from: endFrame)
+            self.isOverlayVisible = true
+            self.isLoadingInlineCard = false
+            self.hasEverPresentedOverlaySuccessfully = true
+        }
+    }
+
+    nonisolated func storeOverlayDidFinishPresentation(_ overlay: SKOverlay, transitionContext: SKOverlay.TransitionContext) {
+        let endFrame = transitionContext.endFrame
+        Task { @MainActor [weak self] in
+            guard let self, overlay === self.activeOverlayInstance else { return }
+            self.updateSafeBottomPadding(from: endFrame)
+            self.isOverlayVisible = true
+            self.isLoadingInlineCard = false
+            self.hasEverPresentedOverlaySuccessfully = true
+        }
+    }
+
+    nonisolated func storeOverlayDidFinishDismissal(_ overlay: SKOverlay, transitionContext: SKOverlay.TransitionContext) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if !self.isSwitchingOverlayProgrammatically && overlay === self.activeOverlayInstance {
+                self.isOverlayVisible = false
+            }
+        }
+    }
+
+    nonisolated func storeOverlayDidFailToLoad(_ overlay: SKOverlay, error: Error) {
+        Task { @MainActor [weak self] in
+            guard let self, overlay === self.activeOverlayInstance else { return }
+            self.isLoadingInlineCard = false
+            self.isOverlayVisible = false
+            self.activeOverlayInstance = nil
+            if !self.hasEverPresentedOverlaySuccessfully {
+                self.overlayUnsupportedOnDevice = true
+            }
+            if let active = self.currentActiveApp {
+                self.presentInlineSheetOrExternalFallback(
+                    app: active,
+                    partOfSequence: self.isRunningSequence,
+                    attemptId: self.currentPresentationAttemptId
+                )
+            }
+        }
+    }
+
+    // MARK: - SKStoreProductViewControllerDelegate
 
     nonisolated func productViewControllerDidFinish(_ viewController: SKStoreProductViewController) {
         Task { @MainActor [weak self] in
@@ -833,11 +1182,15 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKStoreProduc
         }
     }
 
-    private static func topMostViewController() -> UIViewController? {
+    private static func activeWindowScene() -> UIWindowScene? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let activeScene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        guard let root = activeScene?.windows.first(where: \.isKeyWindow)?.rootViewController
-                ?? activeScene?.windows.first?.rootViewController else {
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    }
+
+    private static func topMostViewController() -> UIViewController? {
+        guard let activeScene = activeWindowScene(),
+              let root = activeScene.windows.first(where: \.isKeyWindow)?.rootViewController
+                ?? activeScene.windows.first?.rootViewController else {
             return nil
         }
         var current = root

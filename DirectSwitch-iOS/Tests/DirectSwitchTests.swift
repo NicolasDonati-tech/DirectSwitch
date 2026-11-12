@@ -471,4 +471,52 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertFalse(inferred.photos)
         XCTAssertFalse(inferred.whatsApp)
     }
+
+    @MainActor
+    func testFastOverlayAppInstallerQueueAndBackNavigation() {
+        let installer = iOSSequentialAppInstaller()
+        installer.dryRunPresentationForTesting = true
+
+        let sampleApps = [
+            InstalledAppRecord(packageName: "com.test.alpha", appName: "Alpha", appStoreId: 100001),
+            InstalledAppRecord(packageName: "com.test.beta", appName: "Beta", appStoreId: 100002),
+            InstalledAppRecord(packageName: "com.test.gamma", appName: "Gamma", appStoreId: 100003)
+        ]
+
+        installer.configure(with: sampleApps)
+        XCTAssertEqual(installer.pendingInstallableCount, 3)
+
+        installer.startAutomaticSequence()
+        XCTAssertTrue(installer.isRunningSequence)
+        XCTAssertTrue(installer.showsFloatingBottomBar)
+        XCTAssertEqual(installer.currentQueuePosition, 1)
+        XCTAssertEqual(installer.totalQueueCount, 3)
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.alpha")
+        XCTAssertFalse(installer.canGoBackInQueue)
+
+        // Conferma 1ª app -> passa subito alla 2ª nello stesso banner in basso
+        installer.confirmCurrentAndAdvance()
+        XCTAssertEqual(installer.currentQueuePosition, 2)
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.beta")
+        XCTAssertTrue(installer.completedIds.contains("com.test.alpha"))
+        XCTAssertTrue(installer.canGoBackInQueue)
+
+        // Torna indietro alla 1ª app se si era premuto Prossima troppo presto
+        installer.goBackToPreviousApp()
+        XCTAssertEqual(installer.currentQueuePosition, 1)
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.alpha")
+        XCTAssertFalse(installer.completedIds.contains("com.test.alpha"))
+
+        // Avanza fino a fine coda
+        installer.confirmCurrentAndAdvance() // -> Beta
+        installer.skipCurrentAndContinue()   // salta Beta -> Gamma
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.gamma")
+        XCTAssertFalse(installer.completedIds.contains("com.test.beta"))
+
+        installer.confirmCurrentAndAdvance() // fine coda -> chiusura automatica pulita
+        XCTAssertFalse(installer.isRunningSequence)
+        XCTAssertFalse(installer.showsFloatingBottomBar)
+        XCTAssertNil(installer.currentActiveApp)
+        XCTAssertTrue(installer.completedIds.contains("com.test.gamma"))
+    }
 }
