@@ -433,6 +433,11 @@ struct SendCategoriesStepView: View {
     let selectedAppsCount: Int
     let totalDetectedAppsCount: Int
     let selectedAppsPreview: [InstalledAppRecord]
+    let isAwaitingAutoAppCapture: Bool
+    let isExtractingAutoAppScreenshots: Bool
+    let hasCompletedAutoAppCapture: Bool
+    let autoAppCaptureStatusNote: String?
+    let canDeleteTempAutoRecording: Bool
 
     @Binding var includeContacts: Bool
     @Binding var includePhotos: Bool
@@ -444,6 +449,9 @@ struct SendCategoriesStepView: View {
     @Binding var includeWhatsApp: Bool
 
     var onScanExactCounts: () -> Void
+    var onStartAutoAppCapture: () -> Void
+    var onExtractRecentAutoCaptureNow: () -> Void
+    var onDeleteTempAutoRecording: () -> Void
     var onManageApps: () -> Void
     var onAddFilesOrWhatsApp: () -> Void
     var onClearStagedFiles: () -> Void
@@ -717,44 +725,141 @@ struct SendCategoriesStepView: View {
 
                 // Visibile ESCLUSIVAMENTE quando la spunta «App scaricate» è attiva in blu
                 if includeApps {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("App scaricate selezionate (\(selectedAppsCount))")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                            Spacer()
-                            InfoCircleButton(
-                                title: "Tutte le App di questo iPhone",
-                                message: "Tutte le app rilevate sul telefono vengono selezionate automaticamente quando attivi «App scaricate».\n\nTocca il pulsante qui sotto per controllare l'elenco, deselezionarne qualcuna oppure importare il 100% delle tue app anche da uno screenshot della Home o di «Impostazioni → App»!"
-                            )
-                        }
+                    VStack(alignment: .leading, spacing: 12) {
+                        // PASSO 1: Screenshot automatici di tutte le App (scorrimento rapido)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Image(systemName: hasCompletedAutoAppCapture ? "checkmark.seal.fill" : "rectangle.stack.badge.play.fill")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(hasCompletedAutoAppCapture ? AppleTheme.green : AppleTheme.blue)
+                                Text("Passo 1: Screenshot automatici di tutte le App")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                Spacer()
+                                InfoCircleButton(
+                                    title: "Passo 1: Cattura automatica del 100% delle App",
+                                    message: "Apple rileva in automatico le prime app principali, ma per includere il 100% delle app del telefono (banche, utility, giochi) senza fare 15 screenshot a mano:\n\n1. Tocca «Avvia Screenshot Automatici di Tutte le App».\n2. Attiva 5 secondi la Registrazione Schermo ⏺ mentre scorri l'elenco di «Impostazioni → App» (o la Libreria App).\n3. Appena torni su DirectSwitch, tutti gli screenshot vengono estratti e aggiunti da soli!"
+                                )
+                            }
 
-                        if !selectedAppsPreview.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
+                            if isExtractingAutoAppScreenshots {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .tint(AppleTheme.blue)
+                                    Text("Estrazione screenshot automatici e lettura di tutte le App in corso...")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(AppleTheme.blue)
+                                }
+                                .padding(.vertical, 6)
+                            } else if isAwaitingAutoAppCapture {
+                                Text("Cattura automatica pronta: avvia Registrazione Schermo ⏺, scorri «Impostazioni → App» fino in fondo e torna qui per l'estrazione automatica!")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(AppleTheme.orange)
+
                                 HStack(spacing: 8) {
-                                    ForEach(selectedAppsPreview.prefix(12)) { app in
-                                        AppIconThumbnailView(iconUrl: app.iconUrl, size: 34)
+                                    Button(action: {
+                                        iOSPermissionsHelper.openDirectSwitchSettings()
+                                    }) {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: "arrow.up.forward.app.fill")
+                                                .font(.system(size: 12, weight: .bold))
+                                            Text("Apri Elenco App")
+                                                .font(.system(size: 12, weight: .bold))
+                                        }
+                                        .foregroundColor(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 38)
+                                        .background(AppleTheme.blue)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                     }
-                                    if selectedAppsCount > 12 {
-                                        Text("+\(selectedAppsCount - 12)")
-                                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .buttonStyle(.plain)
+
+                                    Button(action: onExtractRecentAutoCaptureNow) {
+                                        Text("Estrai ora")
+                                            .font(.system(size: 12, weight: .bold))
                                             .foregroundColor(AppleTheme.blue)
-                                            .frame(width: 34, height: 34)
-                                            .background(AppleTheme.cardSelected)
-                                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            .padding(.horizontal, 14)
+                                            .frame(height: 38)
+                                            .background(Color.white)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            } else {
+                                if !hasCompletedAutoAppCapture {
+                                    Text("Scorri per 5 secondi «Impostazioni → App» (o la Home): DirectSwitch genera da solo tutti gli screenshot delle pagine al tuo rientro!")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                }
+
+                                ApplePrimaryButton(
+                                    title: hasCompletedAutoAppCapture
+                                        ? "Ripeti Screenshot Automatici App"
+                                        : "Avvia Screenshot Automatici di Tutte le App",
+                                    icon: "record.circle.fill",
+                                    color: hasCompletedAutoAppCapture ? AppleTheme.teal : AppleTheme.blue,
+                                    action: onStartAutoAppCapture
+                                )
+                            }
+
+                            if let note = autoAppCaptureStatusNote, !note.isEmpty {
+                                Text(note)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(AppleTheme.green)
+                            }
+
+                            if canDeleteTempAutoRecording {
+                                Button(action: onDeleteTempAutoRecording) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "trash")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text("Elimina registrazione temporanea dal Rullino")
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .foregroundColor(AppleTheme.textSecondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(12)
+                        .background(hasCompletedAutoAppCapture ? AppleTheme.green.opacity(0.08) : AppleTheme.cardSelected)
+                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+                        Divider()
+
+                        // PASSO 2: App selezionate pronte al trasferimento
+                        VStack(alignment: .leading, spacing: 9) {
+                            Text("Passo 2: App selezionate da trasferire (\(selectedAppsCount))")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+
+                            if !selectedAppsPreview.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(selectedAppsPreview.prefix(12)) { app in
+                                            AppIconThumbnailView(iconUrl: app.iconUrl, size: 34)
+                                        }
+                                        if selectedAppsCount > 12 {
+                                            Text("+\(selectedAppsCount - 12)")
+                                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                                .foregroundColor(AppleTheme.blue)
+                                                .frame(width: 34, height: 34)
+                                                .background(AppleTheme.cardSelected)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        AppleSecondaryButton(
-                            title: selectedAppsCount > 0
-                                ? "Vedi elenco o aggiungi altre App (\(selectedAppsCount) selezionate)"
-                                : "Aggiungi le App di questo iPhone",
-                            icon: "square.grid.2x2.fill",
-                            tint: AppleTheme.blue,
-                            action: onManageApps
-                        )
+                            AppleSecondaryButton(
+                                title: selectedAppsCount > 0
+                                    ? "Vedi o modifica elenco App (\(selectedAppsCount) selezionate)"
+                                    : "Gestisci elenco App di questo iPhone",
+                                icon: "square.grid.2x2.fill",
+                                tint: AppleTheme.blue,
+                                action: onManageApps
+                            )
+                        }
                     }
                     .appleCard(padding: 14)
                     .transition(.opacity.combined(with: .move(edge: .top)))

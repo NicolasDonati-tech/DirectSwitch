@@ -6,12 +6,20 @@
 //  Copyright © 2026 Nicolas Donati. Tutti i diritti riservati.
 //
 
+import AVFoundation
 import Foundation
 import Photos
 import SwiftUI
 import StoreKit
 import UIKit
 import Vision
+
+/// Risultato della cattura automatica di tutti gli screenshot a scorrimento (da registrazione schermo o istantanee).
+struct AutoScreenshotCaptureResult: Sendable {
+    let discoveredApps: [InstalledAppRecord]
+    let generatedScreenshotsCount: Int
+    let analyzedVideoAssetLocalIdentifier: String?
+}
 
 /// Descrittore delle app più diffuse su iOS interrogabili istantaneamente tramite `LSApplicationQueriesSchemes`.
 struct iOSKnownAppProbe: Sendable {
@@ -248,8 +256,8 @@ enum iOSInstalledAppsScanner {
         saveCustomApps(existing)
     }
 
-    /// Filtra le stringhe estratte tramite OCR da screenshot della schermata Home o di «Impostazioni → App»,
-    /// scartando orari, percentuali batteria, operatori e app preinstallate di sistema Apple.
+    /// Filtra le stringhe estratte tramite OCR dagli screenshot automatici della schermata Home, «Libreria app» o «Impostazioni → App»,
+    /// scartando orari, dimensioni in MB/GB, intestazioni di sistema e app preinstallate Apple, fino a 200 app utente.
     static func filterPlausibleAppNames(_ rawStrings: [String]) -> [String] {
         let ignoredTerms: Set<String> = [
             "impostazioni", "settings", "app", "applicazioni", "cerca", "search", "indietro",
@@ -259,7 +267,16 @@ enum iOSInstalledAppsScanner {
             "metro", "memo vocali", "contatti", "suggerimenti", "comandi rapidi", "lente",
             "traduzi", "traduttore", "libri", "podcast", "tv", "musica", "fitness", "diario",
             "password", "freeform", "watch", "facetime", "mail", "directswitch", "libreria app",
+            "app di default", "app predefinite", "app nascoste", "generali", "accessibilità",
+            "notifiche", "suoni e feedback", "full immersion", "tempo di utilizzo", "batteria",
+            "privacy e sicurezza", "spazio su iphone", "documenti e dati", "scarica app",
+            "elimina app", "registrazione schermo", "interrompi", "annulla", "fine",
             "5g", "4g", "lte", "wifi", "wi-fi", "iliad", "vodafone", "tim", "windtre", "fastweb", "ho."
+        ]
+
+        let ignoredSubstrings: [String] = [
+            "ultimo utilizzo", "mai utilizzat", "kb/s", "mb/s", "registrazione dello schermo",
+            "spazio disponibile", "in uso", "elementi nascosti"
         ]
 
         var out: [String] = []
@@ -270,13 +287,22 @@ enum iOSInstalledAppsScanner {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "•›<>-–—_·:"))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard cleaned.count >= 2, cleaned.count <= 28 else { continue }
+            guard cleaned.count >= 2, cleaned.count <= 30 else { continue }
 
             let lower = cleaned.lowercased()
             if ignoredTerms.contains(lower) { continue }
-            if lower.hasSuffix("%") || lower.contains("kb/s") || lower.contains("mb/s") { continue }
+            if lower.hasSuffix("%") { continue }
+            if ignoredSubstrings.contains(where: { lower.contains($0) }) { continue }
 
-            // Scarta orari (es. 21:10) o soli numeri/simboli
+            // Scarta dimensioni spazio (es. "348,2 MB", "1.4 GB", "820 KB")
+            if lower.hasSuffix(" mb") || lower.hasSuffix(" gb") || lower.hasSuffix(" kb") || lower.hasSuffix(" tb") {
+                let prefixPart = lower.dropLast(3).trimmingCharacters(in: .whitespaces)
+                if prefixPart.allSatisfy({ $0.isNumber || $0 == "," || $0 == "." }) {
+                    continue
+                }
+            }
+
+            // Scarta orari (es. 21:10), date o soli numeri/simboli
             let lettersCount = cleaned.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
             if lettersCount < 2 { continue }
 
@@ -285,44 +311,37 @@ enum iOSInstalledAppsScanner {
                 out.append(cleaned)
             }
         }
-        return Array(out.prefix(45))
+        return Array(out.prefix(200))
     }
 
-    /// Legge tramite Apple `Vision` (`VNRecognizeTextRequest` 100% locale su dispositivo) i nomi di tutte le app
-    /// presenti negli screenshot della schermata Home o di «Impostazioni → App» e ne risolve icona e ID su App Store.
-    static func recognizeAppsFromScreenshots(_ images: [UIImage]) async -> [InstalledAppRecord] {
-        guard !images.isEmpty else { return [] }
-        let cgImages = images.compactMap(\.cgImage)
-        guard !cgImages.isEmpty else { return [] }
-
-        let extractedLines: [String] = await Task.detached(priority: .userInitiated) {
-            var lines: [String] = []
-            for cgImg in cgImages {
-                let req = VNRecognizeTextRequest()
-                req.recognitionLevel = .accurate
-                req.usesLanguageCorrection = false
-                req.recognitionLanguages = ["it-IT", "en-US"]
-                let handler = VNImageRequestHandler(cgImage: cgImg, options: [:])
-                try? handler.perform([req])
-                if let observations = req.results {
-                    for obs in observations {
-                        if let top = obs.topCandidates(1).first, top.confidence >= 0.45 {
-                            lines.append(top.string)
-                        }
-                    }
+    /// Esegue l'OCR locale Apple `Vision` su un singolo `CGImage`.
+    private static func recognizeTextLines(in cgImg: CGImage) -> [String] {
+        var lines: [String] = []
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .accurate
+        req.usesLanguageCorrection = false
+        req.recognitionLanguages = ["it-IT", "en-US"]
+        let handler = VNImageRequestHandler(cgImage: cgImg, options: [:])
+        try? handler.perform([req])
+        if let observations = req.results {
+            for obs in observations {
+                if let top = obs.topCandidates(1).first, top.confidence >= 0.45 {
+                    lines.append(top.string)
                 }
             }
-            return lines
-        }.value
+        }
+        return lines
+    }
 
+    /// Risolve i candidati testuali estratti dagli screenshot automatici in record completi App Store (con icona e `trackId`).
+    private static func resolveCandidateAppLines(_ extractedLines: [String]) async -> [InstalledAppRecord] {
         let candidates = filterPlausibleAppNames(extractedLines)
         guard !candidates.isEmpty else { return [] }
 
         var resolved: [InstalledAppRecord] = []
         var seenKeys = Set<String>()
 
-        // Risolve a blocchi concorrenti da 6 per velocità (~1.5s) senza saturare la rete
-        let chunkSize = 6
+        let chunkSize = 8
         var idx = 0
         while idx < candidates.count {
             let slice = Array(candidates[idx..<min(idx + chunkSize, candidates.count)])
@@ -355,9 +374,194 @@ enum iOSInstalledAppsScanner {
         return resolved
     }
 
-    /// Legge con 1 solo tocco gli ultimi screenshot recenti dall'album «Istantanee» (ultime 48 ore)
-    /// per importare decine di app dalla Home o da «Impostazioni → App» senza selezionarle manualmente una per una.
-    static func fetchRecentScreenshotsFromLibrary(maxCount: Int = 12) async -> [UIImage] {
+    /// Legge tramite Apple `Vision` (`VNRecognizeTextRequest` 100% locale su dispositivo) i nomi di tutte le app
+    /// presenti negli screenshot della schermata Home o di «Impostazioni → App» e ne risolve icona e ID su App Store.
+    static func recognizeAppsFromScreenshots(_ images: [UIImage]) async -> [InstalledAppRecord] {
+        guard !images.isEmpty else { return [] }
+        let cgImages = images.compactMap(\.cgImage)
+        guard !cgImages.isEmpty else { return [] }
+
+        let extractedLines: [String] = await Task.detached(priority: .userInitiated) {
+            var lines: [String] = []
+            for cgImg in cgImages {
+                autoreleasepool {
+                    lines.append(contentsOf: recognizeTextLines(in: cgImg))
+                }
+            }
+            return lines
+        }.value
+
+        return await resolveCandidateAppLines(extractedLines)
+    }
+
+    /// Estrae automaticamente tutti gli screenshot nitidi da un video di scorrimento schermo (`AVAsset`),
+    /// elaborando 1 fotogramma alla volta in `autoreleasepool` (~12 MB RAM costanti) senza salvare 30 foto nel Rullino.
+    static func extractLinesFromScrollVideoAsset(_ avAsset: AVAsset, maxScreenshots: Int = 30) async -> (lines: [String], generatedCount: Int) {
+        final class UncheckedAssetBox: @unchecked Sendable {
+            let asset: AVAsset
+            init(_ asset: AVAsset) { self.asset = asset }
+        }
+        let box = UncheckedAssetBox(avAsset)
+        let durationTime = (try? await avAsset.load(.duration)) ?? .zero
+        let totalSeconds = max(0.0, CMTimeGetSeconds(durationTime))
+        guard totalSeconds > 0.15 else { return ([], 0) }
+
+        // Analizza fino a 60 secondi di scorrimento, scattando in automatico 1 screenshot ogni ~0.65s
+        let effectiveDuration = min(totalSeconds, 60.0)
+        let stepSeconds = max(0.65, effectiveDuration / Double(max(1, maxScreenshots)))
+        var sampleTimes: [CMTime] = []
+        var cursor = 0.20
+        while cursor < effectiveDuration && sampleTimes.count < maxScreenshots {
+            sampleTimes.append(CMTime(seconds: cursor, preferredTimescale: 600))
+            cursor += stepSeconds
+        }
+        if sampleTimes.isEmpty {
+            sampleTimes.append(CMTime(seconds: min(0.1, effectiveDuration * 0.5), preferredTimescale: 600))
+        }
+
+        return await Task.detached(priority: .userInitiated) {
+            let generator = AVAssetImageGenerator(asset: box.asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 1170, height: 2532)
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.15, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.15, preferredTimescale: 600)
+
+            var allLines: [String] = []
+            var count = 0
+            for t in sampleTimes {
+                autoreleasepool {
+                    if let cgImg = try? generator.copyCGImage(at: t, actualTime: nil) {
+                        count += 1
+                        allLines.append(contentsOf: recognizeTextLines(in: cgImg))
+                    }
+                }
+            }
+            return (allLines, count)
+        }.value
+    }
+
+    /// Analizza un file video locale (es. scelto da `PhotosPicker`) generando automaticamente gli screenshot di scorrimento.
+    static func recognizeAppsFromScrollVideoURL(_ url: URL) async -> (apps: [InstalledAppRecord], generatedScreenshots: Int) {
+        let asset = AVURLAsset(url: url)
+        let (lines, framesCount) = await extractLinesFromScrollVideoAsset(asset, maxScreenshots: 30)
+        guard !lines.isEmpty else { return ([], framesCount) }
+        let apps = await resolveCandidateAppLines(lines)
+        return (apps, framesCount)
+    }
+
+    /// PASSO 1 AUTOMATICO: genera automaticamente tutti gli screenshot dall'ultima registrazione schermo a scorrimento
+    /// (e/o dagli screenshot appena fatti) al rientro in DirectSwitch, riconoscendo fino a 200 app in pochi secondi.
+    static func extractAutomaticScreenshotsAndRecognizeApps(since armedDate: Date?) async -> AutoScreenshotCaptureResult {
+        var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .notDetermined {
+            status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        }
+        guard status == .authorized || status == .limited else {
+            return AutoScreenshotCaptureResult(discoveredApps: [], generatedScreenshotsCount: 0, analyzedVideoAssetLocalIdentifier: nil)
+        }
+
+        let cutoffDate: Date
+        if let armed = armedDate {
+            cutoffDate = armed.addingTimeInterval(-30)
+        } else {
+            cutoffDate = Date().addingTimeInterval(-48 * 3600)
+        }
+
+        var collectedLines: [String] = []
+        var totalGeneratedFrames = 0
+        var newestAnalyzedVideoId: String? = nil
+
+        // 1. Cerca prima il video di scorrimento schermo registrato nella finestra temporale e genera i fotogrammi automatici
+        let videoFetch = PHFetchOptions()
+        videoFetch.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        videoFetch.predicate = NSPredicate(format: "creationDate >= %@ AND duration <= 240", cutoffDate as NSDate)
+        videoFetch.fetchLimit = armedDate != nil ? 2 : 3
+
+        let videoAssets = PHAsset.fetchAssets(with: .video, options: videoFetch)
+        if videoAssets.count > 0 {
+            var videos: [PHAsset] = []
+            videoAssets.enumerateObjects { asset, _, _ in
+                videos.append(asset)
+            }
+
+            let imageManager = PHImageManager.default()
+            let vidOptions = PHVideoRequestOptions()
+            vidOptions.isNetworkAccessAllowed = true
+            vidOptions.deliveryMode = .highQualityFormat
+
+            for videoPhAsset in videos {
+                let loadedAVAsset: AVAsset? = await withCheckedContinuation { continuation in
+                    var settled = false
+                    let lock = NSLock()
+                    imageManager.requestAVAsset(forVideo: videoPhAsset, options: vidOptions) { avAsset, _, _ in
+                        lock.lock()
+                        defer { lock.unlock() }
+                        guard !settled else { return }
+                        settled = true
+                        continuation.resume(returning: avAsset)
+                    }
+                }
+                if let avAsset = loadedAVAsset {
+                    let (videoLines, framesCount) = await extractLinesFromScrollVideoAsset(avAsset, maxScreenshots: 30)
+                    if framesCount > 0 {
+                        totalGeneratedFrames += framesCount
+                        collectedLines.append(contentsOf: videoLines)
+                        if newestAnalyzedVideoId == nil {
+                            newestAnalyzedVideoId = videoPhAsset.localIdentifier
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Unisce anche eventuali istantanee statiche presenti nella stessa finestra temporale
+        let recentScreenshots = await fetchRecentScreenshotsFromLibrary(maxCount: 16, since: cutoffDate)
+        if !recentScreenshots.isEmpty {
+            let cgImgs = recentScreenshots.compactMap(\.cgImage)
+            let shotLines: [String] = await Task.detached(priority: .userInitiated) {
+                var out: [String] = []
+                for cg in cgImgs {
+                    autoreleasepool {
+                        out.append(contentsOf: recognizeTextLines(in: cg))
+                    }
+                }
+                return out
+            }.value
+            totalGeneratedFrames += cgImgs.count
+            collectedLines.append(contentsOf: shotLines)
+        }
+
+        guard !collectedLines.isEmpty else {
+            return AutoScreenshotCaptureResult(
+                discoveredApps: [],
+                generatedScreenshotsCount: totalGeneratedFrames,
+                analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId
+            )
+        }
+
+        let resolvedApps = await resolveCandidateAppLines(collectedLines)
+        return AutoScreenshotCaptureResult(
+            discoveredApps: resolvedApps,
+            generatedScreenshotsCount: totalGeneratedFrames,
+            analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId
+        )
+    }
+
+    /// Consente di eliminare con 1 tocco dal Rullino la registrazione schermo temporanea usata per generare gli screenshot automatici.
+    static func deleteTemporaryRecordingAsset(localIdentifier: String) async -> Bool {
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
+        guard fetched.count > 0 else { return false }
+        return await withCheckedContinuation { continuation in
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets(fetched)
+            }) { success, _ in
+                continuation.resume(returning: success)
+            }
+        }
+    }
+
+    /// Legge gli screenshot dall'album «Istantanee» a partire da una data (default ultime 48 ore).
+    static func fetchRecentScreenshotsFromLibrary(maxCount: Int = 12, since customCutoff: Date? = nil) async -> [UIImage] {
         var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if status == .notDetermined {
             status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
@@ -366,7 +570,7 @@ enum iOSInstalledAppsScanner {
             return []
         }
 
-        let cutoffDate = Date().addingTimeInterval(-48 * 3600)
+        let cutoffDate = customCutoff ?? Date().addingTimeInterval(-48 * 3600)
         let fetchOptions = PHFetchOptions()
         fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         fetchOptions.predicate = NSPredicate(format: "creationDate >= %@", cutoffDate as NSDate)

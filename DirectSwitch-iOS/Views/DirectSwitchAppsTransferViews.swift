@@ -8,7 +8,129 @@
 
 import SwiftUI
 import PhotosUI
+import UniformTypeIdentifiers
 import UIKit
+
+private struct PickedScrollVideoFile: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in
+            SentTransferredFile(movie.url)
+        } importing: { received in
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ds_appscroll_\(UUID().uuidString).mov")
+            try? FileManager.default.removeItem(at: tempURL)
+            try FileManager.default.copyItem(at: received.file, to: tempURL)
+            return Self(url: tempURL)
+        }
+    }
+}
+
+// MARK: - Sheet Guidata Passo 1: Screenshot Automatici a Scorrimento di Tutte le App
+
+struct AutoAppScrollCaptureGuideSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var onArmAndOpenSettings: () -> Void
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                AppleTheme.backgroundGradient
+                    .ignoresSafeArea()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 10) {
+                                AppleSettingsIcon(systemName: "rectangle.stack.badge.play.fill", color: AppleTheme.blue)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Passo 1: Screenshot Automatici")
+                                        .font(.system(size: 18, weight: .bold))
+                                        .foregroundColor(AppleTheme.textPrimary)
+                                    Text("Cattura il 100% delle tue App in 5 secondi senza scattare foto a mano")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                }
+                            }
+                        }
+                        .appleCard(padding: 14, selected: true)
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            guideStepRow(
+                                number: "1",
+                                title: "Avvia Registrazione Schermo ⏺ dal Centro di Controllo",
+                                detail: "Scorri col dito dall'angolo in alto a destra dello schermo e tocca il pallino «Registrazione schermo»."
+                            )
+                            Divider()
+                            guideStepRow(
+                                number: "2",
+                                title: "Scorri l'elenco completo delle tue App",
+                                detail: "Tocca il pulsante blu qui sotto, vai in «◀ Impostazioni → App» (oppure nella «Libreria app» A–Z in fondo alla Home) e scorri fino in fondo per 5 secondi."
+                            )
+                            Divider()
+                            guideStepRow(
+                                number: "3",
+                                title: "Torna su DirectSwitch: estrazione automatica!",
+                                detail: "Tocca l'indicatore rosso in alto per fermare e riapri DirectSwitch: l'app genererà da sola tutti gli screenshot dello scorrimento e selezionerà tutte le tue App in blu!"
+                            )
+                        }
+                        .appleCard(padding: 16)
+
+                        ApplePrimaryButton(
+                            title: "Attiva Cattura Automatica e Apri Elenco App",
+                            icon: "arrow.up.forward.app.fill",
+                            color: AppleTheme.blue
+                        ) {
+                            onArmAndOpenSettings()
+                            dismiss()
+                        }
+
+                        AppleSecondaryButton(
+                            title: "Rimani qui (scorro io la Home / Libreria App)",
+                            icon: "hand.draw.fill",
+                            tint: AppleTheme.teal
+                        ) {
+                            dismiss()
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                }
+            }
+            .navigationTitle("Screenshot Automatici App")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Chiudi") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.light)
+    }
+
+    private func guideStepRow(number: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+                .frame(width: 26, height: 26)
+                .background(AppleTheme.blue)
+                .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Text(detail)
+                    .font(.system(size: 13))
+                    .foregroundColor(AppleTheme.textSecondary)
+            }
+        }
+    }
+}
 
 // MARK: - Miniatura Icona App Store arrotondata in stile iOS
 
@@ -61,6 +183,7 @@ struct SenderAppsSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var appsCatalog: [InstalledAppRecord]
     @Binding var deselectedAppIds: Set<String>
+    var onStartGuidedAutoCapture: (() -> Void)? = nil
 
     @State private var searchQuery: String = ""
     @State private var searchResults: [InstalledAppRecord] = []
@@ -68,6 +191,8 @@ struct SenderAppsSelectionSheet: View {
     @State private var screenshotPickerItems: [PhotosPickerItem] = []
     @State private var isScanningScreenshots: Bool = false
     @State private var ocrStatusNote: String? = nil
+    @State private var temporaryRecordingAssetId: String? = nil
+    @State private var showLocalAutoGuideSheet: Bool = false
 
     private var selectedCount: Int {
         appsCatalog.filter { !deselectedAppIds.contains($0.id) }.count
@@ -91,38 +216,39 @@ struct SenderAppsSelectionSheet: View {
 
                 ScrollView {
                     VStack(spacing: 16) {
-                        // Card 1: Scansione automatica da Screenshot (per includere il 100% delle app anche oltre il limite Apple di 50 schemi)
+                        // PASSO 1: Screenshot Automatici a Scorrimento di tutte le App del telefono
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 10) {
-                                AppleSettingsIcon(systemName: "text.viewfinder", color: AppleTheme.blue)
+                                AppleSettingsIcon(systemName: "rectangle.stack.badge.play.fill", color: AppleTheme.blue)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Importa tutte le app da Screenshot")
+                                    Text("Passo 1: Screenshot automatici di tutte le App")
                                         .font(.system(size: 15, weight: .bold))
                                         .foregroundColor(AppleTheme.textPrimary)
-                                    Text("Fai lo screenshot della Home o di «Impostazioni → App»")
+                                    Text("Scorri per 5 sec «Impostazioni → App» o la Home: estrazione automatica!")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
                                 Spacer()
                                 InfoCircleButton(
-                                    title: "Come rilevare il 100% delle tue App",
-                                    message: "Per privacy Apple consente il rilevamento diretto immediato fino a 50 schemi di sistema (già eseguito qui sotto!).\n\nSe hai altre app bancarie, giochi o utility sulla Home o in «Impostazioni → App», fai 1 o 2 screenshot e selezionali qui: il motore Vision di iPhone legge tutti i nomi in 2 secondi senza inviare foto sul cloud e le aggiunge con la loro icona ufficiale!"
+                                    title: "Screenshot automatici da scorrimento",
+                                    message: "Non devi scattare 15 screenshot a mano:\n\n1. Tocca «Avvia Screenshot Automatici a Scorrimento».\n2. Attiva 5 secondi la Registrazione Schermo ⏺ mentre scorri «Impostazioni → App» (o la «Libreria app» A–Z).\n3. Appena torni su DirectSwitch, il motore video estrae da solo fino a 30 screenshot nitidi, riconosce fino a 200 app con le icone ufficiali e le seleziona tutte!"
                                 )
                             }
 
-                            Button(action: scanRecentScreenshotsAutomatically) {
-                                HStack(spacing: 8) {
-                                    if isScanningScreenshots {
-                                        ProgressView()
-                                            .scaleEffect(0.85)
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: "bolt.viewfinder")
-                                            .font(.system(size: 14, weight: .bold))
+                            Button(action: {
+                                if let external = onStartGuidedAutoCapture {
+                                    dismiss()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                        external()
                                     }
-                                    Text(isScanningScreenshots
-                                         ? "Lettura nomi app dagli screenshot..."
-                                         : "Rileva con 1 tocco dagli ultimi screenshot")
+                                } else {
+                                    showLocalAutoGuideSheet = true
+                                }
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "record.circle.fill")
+                                        .font(.system(size: 15, weight: .bold))
+                                    Text("Avvia Screenshot Automatici a Scorrimento")
                                         .font(.system(size: 14, weight: .bold))
                                 }
                                 .foregroundColor(.white)
@@ -134,36 +260,145 @@ struct SenderAppsSelectionSheet: View {
                             .buttonStyle(.plain)
                             .disabled(isScanningScreenshots)
 
-                            PhotosPicker(
-                                selection: $screenshotPickerItems,
-                                maxSelectionCount: 14,
-                                matching: .images
-                            ) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "photo.badge.plus")
-                                        .font(.system(size: 13, weight: .semibold))
-                                    Text("Oppure scegli screenshot manualmente dalla galleria")
-                                        .font(.system(size: 13, weight: .semibold))
+                            HStack(spacing: 8) {
+                                Button(action: scanRecentScreenshotsAutomatically) {
+                                    HStack(spacing: 6) {
+                                        if isScanningScreenshots {
+                                            ProgressView()
+                                                .scaleEffect(0.82)
+                                                .tint(AppleTheme.blue)
+                                        } else {
+                                            Image(systemName: "bolt.viewfinder")
+                                                .font(.system(size: 13, weight: .bold))
+                                        }
+                                        Text(isScanningScreenshots ? "Estrazione..." : "Estrai da ultima cattura")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .lineLimit(1)
+                                    }
+                                    .foregroundColor(AppleTheme.blue)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 38)
+                                    .background(AppleTheme.cardSelected)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
-                                .foregroundColor(AppleTheme.blue)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 38)
-                                .background(AppleTheme.cardSelected)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .buttonStyle(.plain)
+                                .disabled(isScanningScreenshots)
+
+                                PhotosPicker(
+                                    selection: $screenshotPickerItems,
+                                    maxSelectionCount: 14,
+                                    matching: .any(of: [.videos, .images])
+                                ) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "photo.on.rectangle.angled")
+                                            .font(.system(size: 12, weight: .semibold))
+                                        Text("Scegli video/foto")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .lineLimit(1)
+                                    }
+                                    .foregroundColor(AppleTheme.teal)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 38)
+                                    .background(AppleTheme.teal.opacity(0.10))
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .disabled(isScanningScreenshots)
                             }
-                            .disabled(isScanningScreenshots)
 
                             if let note = ocrStatusNote, !note.isEmpty {
                                 Text(note)
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(AppleTheme.green)
                             }
+
+                            if let tempVidId = temporaryRecordingAssetId {
+                                Button(action: {
+                                    Task {
+                                        if await iOSInstalledAppsScanner.deleteTemporaryRecordingAsset(localIdentifier: tempVidId) {
+                                            temporaryRecordingAssetId = nil
+                                        }
+                                    }
+                                }) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "trash")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text("Elimina registrazione temporanea dal Rullino")
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .foregroundColor(AppleTheme.textSecondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .appleCard(padding: 14, selected: true)
+
+                        // PASSO 2: Elenco completo app rilevate e selezionate su questo iPhone
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Passo 2: App selezionate (\(selectedCount)/\(appsCatalog.count))")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                Spacer()
+                                if !appsCatalog.isEmpty {
+                                    Button(action: {
+                                        if deselectedAppIds.isEmpty {
+                                            deselectedAppIds = Set(appsCatalog.map(\.id))
+                                        } else {
+                                            deselectedAppIds.removeAll()
+                                        }
+                                    }) {
+                                        Text(deselectedAppIds.isEmpty ? "Deseleziona" : "Seleziona tutte")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(AppleTheme.blue)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+
+                            if appsCatalog.isEmpty {
+                                Text("Avvia il Passo 1 qui sopra per catturare automaticamente tutte le tue app.")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                                    .padding(.vertical, 6)
+                            } else {
+                                VStack(spacing: 0) {
+                                    ForEach(Array(appsCatalog.enumerated()), id: \.element.id) { index, app in
+                                        let isSelected = !deselectedAppIds.contains(app.id)
+                                        Button(action: {
+                                            if isSelected {
+                                                deselectedAppIds.insert(app.id)
+                                            } else {
+                                                deselectedAppIds.remove(app.id)
+                                            }
+                                        }) {
+                                            HStack(spacing: 12) {
+                                                AppIconThumbnailView(iconUrl: app.iconUrl, size: 38)
+                                                Text(app.appName)
+                                                    .font(.system(size: 15, weight: .medium))
+                                                    .foregroundColor(AppleTheme.textPrimary)
+                                                    .lineLimit(1)
+                                                Spacer()
+                                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                                    .font(.system(size: 21))
+                                                    .foregroundColor(isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
+                                            }
+                                            .padding(.vertical, 9)
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        if index < appsCatalog.count - 1 {
+                                            Divider().padding(.leading, 50)
+                                        }
+                                    }
+                                }
+                            }
                         }
                         .appleCard(padding: 14)
 
-                        // Card 2: Ricerca istantanea su App Store + Chip suggeriti italiani
+                        // Card 3: Ricerca rapida opzionale su App Store + Chip suggeriti italiani
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Aggiungi altre app manualmente")
+                            Text("Aggiungi singole app manualmente (opzionale)")
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
 
@@ -272,70 +507,6 @@ struct SenderAppsSelectionSheet: View {
                             }
                         }
                         .appleCard(padding: 14)
-
-                        // Card 3: Elenco completo app rilevate su questo iPhone
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Text("App da passare al nuovo telefono (\(selectedCount)/\(appsCatalog.count))")
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                Spacer()
-                                if !appsCatalog.isEmpty {
-                                    Button(action: {
-                                        if deselectedAppIds.isEmpty {
-                                            deselectedAppIds = Set(appsCatalog.map(\.id))
-                                        } else {
-                                            deselectedAppIds.removeAll()
-                                        }
-                                    }) {
-                                        Text(deselectedAppIds.isEmpty ? "Deseleziona" : "Tutte")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundColor(AppleTheme.blue)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-
-                            if appsCatalog.isEmpty {
-                                Text("Nessuna app aggiuntiva rilevata: usa la ricerca o importa uno screenshot della Home qui sopra.")
-                                    .font(.system(size: 13))
-                                    .foregroundColor(AppleTheme.textSecondary)
-                                    .padding(.vertical, 6)
-                            } else {
-                                VStack(spacing: 0) {
-                                    ForEach(Array(appsCatalog.enumerated()), id: \.element.id) { index, app in
-                                        let isSelected = !deselectedAppIds.contains(app.id)
-                                        Button(action: {
-                                            if isSelected {
-                                                deselectedAppIds.insert(app.id)
-                                            } else {
-                                                deselectedAppIds.remove(app.id)
-                                            }
-                                        }) {
-                                            HStack(spacing: 12) {
-                                                AppIconThumbnailView(iconUrl: app.iconUrl, size: 38)
-                                                Text(app.appName)
-                                                    .font(.system(size: 15, weight: .medium))
-                                                    .foregroundColor(AppleTheme.textPrimary)
-                                                    .lineLimit(1)
-                                                Spacer()
-                                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                                    .font(.system(size: 21))
-                                                    .foregroundColor(isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
-                                            }
-                                            .padding(.vertical, 9)
-                                            .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
-
-                                        if index < appsCatalog.count - 1 {
-                                            Divider().padding(.leading, 50)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .appleCard(padding: 14)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
@@ -353,6 +524,11 @@ struct SenderAppsSelectionSheet: View {
             }
         }
         .preferredColorScheme(.light)
+        .sheet(isPresented: $showLocalAutoGuideSheet) {
+            AutoAppScrollCaptureGuideSheet {
+                iOSPermissionsHelper.openDirectSwitchSettings()
+            }
+        }
         .onChange(of: screenshotPickerItems) { picked in
             guard !picked.isEmpty else { return }
             processPickedScreenshots(picked)
@@ -386,13 +562,14 @@ struct SenderAppsSelectionSheet: View {
         isScanningScreenshots = true
         ocrStatusNote = nil
         Task {
-            let recentImages = await iOSInstalledAppsScanner.fetchRecentScreenshotsFromLibrary(maxCount: 14)
-            guard !recentImages.isEmpty else {
+            let result = await iOSInstalledAppsScanner.extractAutomaticScreenshotsAndRecognizeApps(since: nil)
+            temporaryRecordingAssetId = result.analyzedVideoAssetLocalIdentifier
+            guard result.generatedScreenshotsCount > 0 else {
                 isScanningScreenshots = false
-                ocrStatusNote = "Nessuno screenshot delle ultime 48 ore trovato (oppure permesso Foto disattivato). Fai uno screenshot della Home o di «Impostazioni → App» e riprova!"
+                ocrStatusNote = "Nessuna registrazione schermo o screenshot recente trovato (oppure permesso Foto disattivato). Avvia il Passo 1 qui sopra!"
                 return
             }
-            await ingestRecognizedScreenshotImages(recentImages)
+            mergeDiscoveredAppsIntoCatalog(result.discoveredApps, generatedFramesCount: result.generatedScreenshotsCount)
         }
     }
 
@@ -400,20 +577,34 @@ struct SenderAppsSelectionSheet: View {
         isScanningScreenshots = true
         ocrStatusNote = nil
         Task {
+            var allDiscovered: [InstalledAppRecord] = []
+            var totalFrames = 0
             var uiImages: [UIImage] = []
+
             for item in items {
-                if let data = try? await item.loadTransferable(type: Data.self),
-                   let img = UIImage(data: data) {
+                if let pickedVideo = try? await item.loadTransferable(type: PickedScrollVideoFile.self) {
+                    let (videoApps, videoFrames) = await iOSInstalledAppsScanner.recognizeAppsFromScrollVideoURL(pickedVideo.url)
+                    allDiscovered.append(contentsOf: videoApps)
+                    totalFrames += videoFrames
+                    try? FileManager.default.removeItem(at: pickedVideo.url)
+                } else if let data = try? await item.loadTransferable(type: Data.self),
+                          let img = UIImage(data: data) {
                     uiImages.append(img)
                 }
             }
+
+            if !uiImages.isEmpty {
+                let imageApps = await iOSInstalledAppsScanner.recognizeAppsFromScreenshots(uiImages)
+                allDiscovered.append(contentsOf: imageApps)
+                totalFrames += uiImages.count
+            }
+
             screenshotPickerItems = []
-            await ingestRecognizedScreenshotImages(uiImages)
+            mergeDiscoveredAppsIntoCatalog(allDiscovered, generatedFramesCount: totalFrames)
         }
     }
 
-    private func ingestRecognizedScreenshotImages(_ uiImages: [UIImage]) async {
-        let discovered = await iOSInstalledAppsScanner.recognizeAppsFromScreenshots(uiImages)
+    private func mergeDiscoveredAppsIntoCatalog(_ discovered: [InstalledAppRecord], generatedFramesCount: Int) {
         var newlyAdded = 0
         for app in discovered {
             let exists = appsCatalog.contains {
@@ -430,9 +621,13 @@ struct SenderAppsSelectionSheet: View {
             iOSInstalledAppsScanner.appendCustomApps(discovered)
         }
         isScanningScreenshots = false
-        ocrStatusNote = newlyAdded > 0
-            ? "Aggiunte \(newlyAdded) nuove app rilevate dagli screenshot!"
-            : "Tutte le app leggibili negli screenshot sono già presenti nell'elenco."
+        if newlyAdded > 0 {
+            ocrStatusNote = "Estratti \(generatedFramesCount) screenshot automatici: aggiunte \(newlyAdded) nuove app (totale \(appsCatalog.count))!"
+        } else if !discovered.isEmpty {
+            ocrStatusNote = "Analizzati \(generatedFramesCount) fotogrammi: tutte le app trovate sono già selezionate."
+        } else {
+            ocrStatusNote = "Analizzati \(generatedFramesCount) fotogrammi: nessuna nuova app rilevata."
+        }
     }
 }
 

@@ -519,4 +519,22 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertNil(installer.currentActiveApp)
         XCTAssertTrue(installer.completedIds.contains("com.test.gamma"))
     }
+
+    func testAutoScrollScreenshotFilterHandlesOver100AppsAndIgnoresSystemLabels() {
+        var ocrLines = [
+            "App di default", "App nascoste", "348,2 MB", "1.24 GB", "Ultimo utilizzo: ieri",
+            "Registrazione schermo", "BANCOMAT", "NexiPay", "Ryanair", "Klarna", "Speedtest", "Shelly", "EZVIZ"
+        ]
+        for idx in 1...110 {
+            ocrLines.append("CustomApp\(idx)")
+        }
+        let filtered = iOSInstalledAppsScanner.filterPlausibleAppNames(ocrLines)
+        XCTAssertEqual(filtered.count, 117)
+        XCTAssertTrue(filtered.contains("BANCOMAT"))
+        XCTAssertTrue(filtered.contains("NexiPay"))
+        XCTAssertTrue(filtered.contains("Ryanair"))
+        XCTAssertFalse(filtered.contains("App di default"))
+        XCTAssertFalse(filtered.contains("348,2 MB"))
+        XCTAssertFalse(filtered.contains("1.24 GB"))
+    }
 }

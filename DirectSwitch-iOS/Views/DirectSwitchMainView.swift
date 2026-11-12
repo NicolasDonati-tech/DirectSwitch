@@ -48,10 +48,17 @@ struct DirectSwitchMainView: View {
     @State private var includeApps: Bool = true
     @State private var includeWhatsApp: Bool = true
 
-    // Catalogo App rilevate sull'iPhone che invia
+    // Catalogo App rilevate sull'iPhone che invia + Passo 1 Screenshot Automatici a scorrimento
     @State private var senderAppsCatalog: [InstalledAppRecord] = []
     @State private var deselectedSenderAppIds: Set<String> = []
     @State private var showSenderAppsSheet: Bool = false
+    @State private var showAutoAppCaptureGuideSheet: Bool = false
+    @State private var isAwaitingAutoAppCapture: Bool = false
+    @State private var autoCaptureArmedAt: Date? = nil
+    @State private var isExtractingAutoAppScreenshots: Bool = false
+    @State private var hasCompletedAutoAppCapture: Bool = !iOSInstalledAppsScanner.loadSavedCustomApps().isEmpty
+    @State private var autoAppCaptureStatusNote: String? = nil
+    @State private var lastTemporaryRecordingAssetId: String? = nil
 
     private var selectedSenderApps: [InstalledAppRecord] {
         senderAppsCatalog.filter { !deselectedSenderAppIds.contains($0.id) }
@@ -198,6 +205,11 @@ struct DirectSwitchMainView: View {
                                     selectedAppsCount: selectedSenderApps.count,
                                     totalDetectedAppsCount: senderAppsCatalog.count,
                                     selectedAppsPreview: selectedSenderApps,
+                                    isAwaitingAutoAppCapture: isAwaitingAutoAppCapture,
+                                    isExtractingAutoAppScreenshots: isExtractingAutoAppScreenshots,
+                                    hasCompletedAutoAppCapture: hasCompletedAutoAppCapture,
+                                    autoAppCaptureStatusNote: autoAppCaptureStatusNote,
+                                    canDeleteTempAutoRecording: lastTemporaryRecordingAssetId != nil,
                                     includeContacts: $includeContacts,
                                     includePhotos: $includePhotos,
                                     includeVideos: $includeVideos,
@@ -207,6 +219,11 @@ struct DirectSwitchMainView: View {
                                     includeApps: $includeApps,
                                     includeWhatsApp: $includeWhatsApp,
                                     onScanExactCounts: scanExactDeviceCounts,
+                                    onStartAutoAppCapture: armAndPresentAutoAppCapture,
+                                    onExtractRecentAutoCaptureNow: {
+                                        runAutomaticAppScreenshotExtraction(fromForegroundReturn: false)
+                                    },
+                                    onDeleteTempAutoRecording: deleteTemporaryAutoRecording,
                                     onManageApps: { showSenderAppsSheet = true },
                                     onAddFilesOrWhatsApp: { showDocumentImporter = true },
                                     onClearStagedFiles: {
@@ -299,6 +316,9 @@ struct DirectSwitchMainView: View {
                 refreshAuthorizedSummary()
                 refreshSenderAppsCatalog()
                 appInstaller.handleSceneBecameActive()
+                if isAwaitingAutoAppCapture && !isExtractingAutoAppScreenshots {
+                    runAutomaticAppScreenshotExtraction(fromForegroundReturn: true)
+                }
                 receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
                 if activeStep == .sendConnect {
                     transport.startUdpAutoDiscovery()
@@ -322,8 +342,14 @@ struct DirectSwitchMainView: View {
         .sheet(isPresented: $showSenderAppsSheet) {
             SenderAppsSelectionSheet(
                 appsCatalog: $senderAppsCatalog,
-                deselectedAppIds: $deselectedSenderAppIds
+                deselectedAppIds: $deselectedSenderAppIds,
+                onStartGuidedAutoCapture: armAndPresentAutoAppCapture
             )
+        }
+        .sheet(isPresented: $showAutoAppCaptureGuideSheet) {
+            AutoAppScrollCaptureGuideSheet {
+                iOSPermissionsHelper.openDirectSwitchSettings()
+            }
         }
         .sheet(isPresented: $showProSheet) {
             DirectSwitchProPassSheet(
@@ -496,6 +522,79 @@ struct DirectSwitchMainView: View {
             let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(snapshot)
             if !enriched.isEmpty {
                 self.senderAppsCatalog = enriched
+            }
+        }
+    }
+
+    private func armAndPresentAutoAppCapture() {
+        autoCaptureArmedAt = Date()
+        isAwaitingAutoAppCapture = true
+        autoAppCaptureStatusNote = nil
+        showAutoAppCaptureGuideSheet = true
+    }
+
+    private func runAutomaticAppScreenshotExtraction(fromForegroundReturn: Bool) {
+        guard !isExtractingAutoAppScreenshots else { return }
+        isExtractingAutoAppScreenshots = true
+        autoAppCaptureStatusNote = nil
+        let armedSince = fromForegroundReturn ? autoCaptureArmedAt : nil
+
+        Task {
+            var result = await iOSInstalledAppsScanner.extractAutomaticScreenshotsAndRecognizeApps(since: armedSince)
+
+            // Se l'utente è appena tornato a DirectSwitch e `replayd` stava ancora salvando il video nel Rullino (~1 sec),
+            // riprova automaticamente una seconda volta dopo 1.4s senza che l'utente debba premere nulla!
+            if fromForegroundReturn && result.generatedScreenshotsCount == 0 {
+                try? await Task.sleep(nanoseconds: 1_400_000_000)
+                result = await iOSInstalledAppsScanner.extractAutomaticScreenshotsAndRecognizeApps(since: armedSince)
+            }
+
+            isExtractingAutoAppScreenshots = false
+
+            guard result.generatedScreenshotsCount > 0 else {
+                if !fromForegroundReturn {
+                    autoAppCaptureStatusNote = "Nessuna registrazione schermo o screenshot recente trovato. Tocca «Avvia Screenshot Automatici» qui sopra!"
+                }
+                return
+            }
+
+            isAwaitingAutoAppCapture = false
+            lastTemporaryRecordingAssetId = result.analyzedVideoAssetLocalIdentifier
+
+            var newlyAdded = 0
+            for app in result.discoveredApps {
+                let exists = senderAppsCatalog.contains {
+                    $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+                }
+                if !exists {
+                    senderAppsCatalog.append(app)
+                    newlyAdded += 1
+                }
+                deselectedSenderAppIds.remove(app.id)
+            }
+
+            if !result.discoveredApps.isEmpty {
+                iOSInstalledAppsScanner.appendCustomApps(result.discoveredApps)
+                hasCompletedAutoAppCapture = true
+            }
+
+            if newlyAdded > 0 {
+                autoAppCaptureStatusNote = "✓ Estratti \(result.generatedScreenshotsCount) screenshot automatici: +\(newlyAdded) app aggiunte (\(senderAppsCatalog.count) selezionate)!"
+            } else if !result.discoveredApps.isEmpty {
+                hasCompletedAutoAppCapture = true
+                autoAppCaptureStatusNote = "✓ Analizzati \(result.generatedScreenshotsCount) screenshot automatici: tutte le \(senderAppsCatalog.count) app sono selezionate!"
+            } else {
+                autoAppCaptureStatusNote = "Analizzati \(result.generatedScreenshotsCount) fotogrammi: nessuna nuova app rilevata."
+            }
+        }
+    }
+
+    private func deleteTemporaryAutoRecording() {
+        guard let vidId = lastTemporaryRecordingAssetId else { return }
+        Task {
+            if await iOSInstalledAppsScanner.deleteTemporaryRecordingAsset(localIdentifier: vidId) {
+                lastTemporaryRecordingAssetId = nil
             }
         }
     }
