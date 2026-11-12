@@ -643,10 +643,13 @@ enum iOSInstalledAppsScanner {
                 }
             }
 
-            // Scarta orari (es. 20:09), date (12/11) o stringhe prive di almeno 2 lettere
+            // Scarta orari (es. 20:09), date (12/11) o stringhe prive di lettere (ammette marchi alfanumerici noti come "N26")
             if cleaned.contains(":") && cleaned.filter(\.isNumber).count >= 2 { continue }
             let lettersCount = cleaned.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
-            if lettersCount < 2 { continue }
+            if lettersCount == 0 { continue }
+            if lettersCount < 2 && !isKnownShortAlias && !allowedThreeCharAppTokens.contains(lower) {
+                continue
+            }
 
             // Evita falsi positivi da "io" minuscolo in frasi italiane (l'app ufficiale PagoPA è scritta "IO" maiuscolo)
             if lower == "io" && cleaned != "IO" { continue }

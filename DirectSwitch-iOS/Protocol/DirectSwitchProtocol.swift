@@ -292,6 +292,57 @@ struct TransferManifest: Codable, Sendable {
     var installedAppsPayload: [InstalledAppRecord]? = nil
     var requestNativeWhatsAppMigration: Bool? = nil
     var transferScope: ActiveTransferScope? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId
+        case senderPlatform
+        case items
+        case contactsPayload
+        case calendarsPayload
+        case remindersPayload
+        case smsPayload
+        case installedAppsPayload
+        case requestNativeWhatsAppMigration
+        case transferScope
+    }
+
+    init(
+        sessionId: String,
+        senderPlatform: DevicePlatform,
+        items: [ManifestItem],
+        contactsPayload: [ContactTransferRecord] = [],
+        calendarsPayload: [CalendarEventRecord] = [],
+        remindersPayload: [ReminderTransferRecord]? = nil,
+        smsPayload: [SmsTransferRecord] = [],
+        installedAppsPayload: [InstalledAppRecord]? = nil,
+        requestNativeWhatsAppMigration: Bool? = nil,
+        transferScope: ActiveTransferScope? = nil
+    ) {
+        self.sessionId = sessionId
+        self.senderPlatform = senderPlatform
+        self.items = items
+        self.contactsPayload = contactsPayload
+        self.calendarsPayload = calendarsPayload
+        self.remindersPayload = remindersPayload
+        self.smsPayload = smsPayload
+        self.installedAppsPayload = installedAppsPayload
+        self.requestNativeWhatsAppMigration = requestNativeWhatsAppMigration
+        self.transferScope = transferScope
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        senderPlatform = try container.decode(DevicePlatform.self, forKey: .senderPlatform)
+        items = try container.decodeIfPresent([ManifestItem].self, forKey: .items) ?? []
+        contactsPayload = try container.decodeIfPresent([ContactTransferRecord].self, forKey: .contactsPayload) ?? []
+        calendarsPayload = try container.decodeIfPresent([CalendarEventRecord].self, forKey: .calendarsPayload) ?? []
+        remindersPayload = try container.decodeIfPresent([ReminderTransferRecord].self, forKey: .remindersPayload)
+        smsPayload = try container.decodeIfPresent([SmsTransferRecord].self, forKey: .smsPayload) ?? []
+        installedAppsPayload = try container.decodeIfPresent([InstalledAppRecord].self, forKey: .installedAppsPayload)
+        requestNativeWhatsAppMigration = try container.decodeIfPresent(Bool.self, forKey: .requestNativeWhatsAppMigration)
+        transferScope = try container.decodeIfPresent(ActiveTransferScope.self, forKey: .transferScope)
+    }
 }
 
 struct ManifestResponse: Codable, Sendable {
