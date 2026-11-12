@@ -56,7 +56,7 @@
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>DirectSwitch legge e importa tutti i promemoria sul nuovo iPhone evitando duplicati.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>DirectSwitch utilizza la fotocamera per inquadrare il codice QR di collegamento o il codice QR di trasferimento chat di WhatsApp.</string>
+	<string>DirectSwitch utilizza la fotocamera per inquadrare il codice QR, scansionare rapidamente le app dallo schermo del vecchio telefono o avviare il trasferimento chat di WhatsApp.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>processing</string>

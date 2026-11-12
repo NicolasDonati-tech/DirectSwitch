@@ -319,6 +319,25 @@ struct TransferCompletionReport: Codable, Sendable {
     let elapsedMillis: Int64
 }
 
+/// Richiesta cifrata inviata dal vecchio iPhone al nuovo iPhone per aprire automaticamente
+/// lo Scanner Fotocamera Live delle App e sincronizzare in tempo reale l'elenco completo delle app installate.
+struct RemoteAppScannerStartRequest: Codable, Equatable, Sendable {
+    let sessionId: String
+    let senderName: String
+    var seedApps: [InstalledAppRecord] = []
+}
+
+struct RemoteAppScannerPollRequest: Codable, Equatable, Sendable {
+    let sessionId: String
+}
+
+struct RemoteAppScannerStatusResponse: Codable, Equatable, Sendable {
+    let isScannerOpen: Bool
+    let isCompleted: Bool
+    var senderName: String = ""
+    var discoveredApps: [InstalledAppRecord] = []
+}
+
 enum LicensePolicyEvaluator {
     static let crossOsPreviewMediaLimit = 25
 

@@ -433,6 +433,8 @@ struct SendCategoriesStepView: View {
     let selectedAppsCount: Int
     let totalDetectedAppsCount: Int
     let selectedAppsPreview: [InstalledAppRecord]
+    let isRemoteAppScannerActiveOnPeer: Bool
+    let isStartingRemoteAppScanner: Bool
     let isAwaitingAutoAppCapture: Bool
     let isExtractingAutoAppScreenshots: Bool
     let hasCompletedAutoAppCapture: Bool
@@ -449,6 +451,8 @@ struct SendCategoriesStepView: View {
     @Binding var includeWhatsApp: Bool
 
     var onScanExactCounts: () -> Void
+    var onStartRemoteCameraAppScan: () -> Void
+    var onRefreshRemoteCameraAppScanNow: () -> Void
     var onStartAutoAppCapture: () -> Void
     var onExtractRecentAutoCaptureNow: () -> Void
     var onDeleteTempAutoRecording: () -> Void
@@ -726,19 +730,23 @@ struct SendCategoriesStepView: View {
                 // Visibile ESCLUSIVAMENTE quando la spunta «App scaricate» è attiva in blu
                 if includeApps {
                     VStack(alignment: .leading, spacing: 12) {
-                        // PASSO 1: Screenshot automatici di tutte le App (scorrimento rapido)
-                        VStack(alignment: .leading, spacing: 8) {
+                        // PASSO 1: Registrazione semplice del 100% delle App (Fotocamera Live sul nuovo iPhone o Screenshot Home, zero Impostazioni)
+                        VStack(alignment: .leading, spacing: 9) {
                             HStack(spacing: 8) {
-                                Image(systemName: hasCompletedAutoAppCapture ? "checkmark.seal.fill" : "rectangle.stack.badge.play.fill")
+                                Image(systemName: hasCompletedAutoAppCapture
+                                      ? "checkmark.seal.fill"
+                                      : (!isCrossOs ? "camera.viewfinder" : "rectangle.stack.fill"))
                                     .font(.system(size: 16, weight: .bold))
                                     .foregroundColor(hasCompletedAutoAppCapture ? AppleTheme.green : AppleTheme.blue)
-                                Text("Passo 1: Screenshot automatici di tutte le App")
+                                Text("Passo 1: Registra tutte le App installate")
                                     .font(.system(size: 14, weight: .bold))
                                     .foregroundColor(AppleTheme.textPrimary)
                                 Spacer()
                                 InfoCircleButton(
-                                    title: "Passo 1: Cattura automatica del 100% delle App",
-                                    message: "Apple rileva in automatico le prime app principali, ma per includere il 100% delle app del telefono (banche, utility, giochi) senza fare 15 screenshot a mano:\n\n1. Tocca «Avvia Screenshot Automatici di Tutte le App».\n2. Attiva 5 secondi la Registrazione Schermo ⏺ mentre scorri l'elenco di «Impostazioni → App» (o la Libreria App).\n3. Appena torni su DirectSwitch, tutti gli screenshot vengono estratti e aggiunti da soli!"
+                                    title: "Passo 1: Come registrare il 100% delle App",
+                                    message: !isCrossOs
+                                        ? "• Metodo consigliato (5 secondi, zero registrazione schermo e zero impostazioni): tocca «Inquadra tutte le App col Nuovo iPhone». La fotocamera si aprirà da sola su \(pairedPayload.receiverName): ti basta andare sulla schermata Home di questo telefono e sfogliare le 2–4 pagine delle tue app davanti all'obiettivo!\n\n• In alternativa da questo iPhone: fai uno screenshot alle pagine della tua Home (Tasto Laterale + Volume Su) e riapri DirectSwitch per la lettura automatica."
+                                        : "Non serve attivare alcuna registrazione schermo:\n\n1. Vai sulla schermata Home di questo iPhone.\n2. Premi «Tasto Laterale + Volume Su» sulle 2–4 pagine delle tue App.\n3. Riapri DirectSwitch: tutte le tue app vengono lette e selezionate in automatico!"
                                 )
                             }
 
@@ -746,57 +754,141 @@ struct SendCategoriesStepView: View {
                                 HStack(spacing: 10) {
                                     ProgressView()
                                         .tint(AppleTheme.blue)
-                                    Text("Estrazione screenshot automatici e lettura di tutte le App in corso...")
+                                    Text("Lettura automatica delle App dalle pagine Home in corso...")
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundColor(AppleTheme.blue)
                                 }
                                 .padding(.vertical, 6)
+                            } else if !isCrossOs && isRemoteAppScannerActiveOnPeer {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(AppleTheme.green)
+                                            .frame(width: 8, height: 8)
+                                        Text("Fotocamera attiva su \(pairedPayload.receiverName)!")
+                                            .font(.system(size: 13, weight: .bold))
+                                            .foregroundColor(AppleTheme.green)
+                                    }
+
+                                    Text("Ora vai sulla **schermata Home** di questo iPhone e sfoglia lentamente le pagine delle tue App davanti alla fotocamera di \(pairedPayload.receiverName). Le app vengono aggiunte qui in tempo reale (**\(selectedAppsCount)** selezionate)!")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(AppleTheme.textPrimary)
+
+                                    HStack(spacing: 8) {
+                                        Button(action: onRefreshRemoteCameraAppScanNow) {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "arrow.triangle.2.circlepath")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                Text("Aggiorna elenco ora")
+                                                    .font(.system(size: 12, weight: .bold))
+                                            }
+                                            .foregroundColor(AppleTheme.blue)
+                                            .frame(maxWidth: .infinity)
+                                            .frame(height: 36)
+                                            .background(Color.white)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Button(action: onStartAutoAppCapture) {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "rectangle.stack.fill")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                Text("Usa screenshot Home")
+                                                    .font(.system(size: 12, weight: .bold))
+                                            }
+                                            .foregroundColor(AppleTheme.teal)
+                                            .padding(.horizontal, 12)
+                                            .frame(height: 36)
+                                            .background(Color.white)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
                             } else if isAwaitingAutoAppCapture {
-                                Text("Cattura automatica pronta: avvia Registrazione Schermo ⏺, scorri «Impostazioni → App» fino in fondo e torna qui per l'estrazione automatica!")
+                                Text("Vai ora sulla **schermata Home** di questo iPhone, premi **Tasto Laterale + Volume Su** su ciascuna pagina delle tue App e riapri DirectSwitch: verranno lette in automatico!")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundColor(AppleTheme.orange)
 
                                 HStack(spacing: 8) {
-                                    Button(action: {
-                                        iOSPermissionsHelper.openDirectSwitchSettings()
-                                    }) {
+                                    if !isCrossOs {
+                                        Button(action: onStartRemoteCameraAppScan) {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "camera.viewfinder")
+                                                    .font(.system(size: 12, weight: .bold))
+                                                Text("Usa Fotocamera nuovo iPhone")
+                                                    .font(.system(size: 12, weight: .bold))
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundColor(.white)
+                                            .frame(maxWidth: .infinity)
+                                            .frame(height: 38)
+                                            .background(AppleTheme.blue)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+
+                                    Button(action: onExtractRecentAutoCaptureNow) {
                                         HStack(spacing: 5) {
-                                            Image(systemName: "arrow.up.forward.app.fill")
+                                            Image(systemName: "sparkles")
                                                 .font(.system(size: 12, weight: .bold))
-                                            Text("Apri Elenco App")
+                                            Text("Estrai ora da Foto")
                                                 .font(.system(size: 12, weight: .bold))
                                         }
-                                        .foregroundColor(.white)
-                                        .frame(maxWidth: .infinity)
+                                        .foregroundColor(AppleTheme.blue)
+                                        .frame(maxWidth: isCrossOs ? .infinity : nil)
+                                        .padding(.horizontal, 14)
                                         .frame(height: 38)
-                                        .background(AppleTheme.blue)
+                                        .background(Color.white)
                                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                     }
                                     .buttonStyle(.plain)
-
-                                    Button(action: onExtractRecentAutoCaptureNow) {
-                                        Text("Estrai ora")
-                                            .font(.system(size: 12, weight: .bold))
-                                            .foregroundColor(AppleTheme.blue)
-                                            .padding(.horizontal, 14)
-                                            .frame(height: 38)
-                                            .background(Color.white)
-                                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    }
-                                    .buttonStyle(.plain)
                                 }
+                            } else if !isCrossOs {
+                                if !hasCompletedAutoAppCapture {
+                                    Text("Senza registrazione schermo né impostazioni: apri con 1 tocco la fotocamera su **\(pairedPayload.receiverName)** e sfoglia le pagine della tua Home per 5 secondi!")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                }
+
+                                ApplePrimaryButton(
+                                    title: isStartingRemoteAppScanner
+                                        ? "Apertura fotocamera su \(pairedPayload.receiverName)..."
+                                        : (hasCompletedAutoAppCapture
+                                            ? "Inquadra altre App col Nuovo iPhone"
+                                            : "Inquadra tutte le App col Nuovo iPhone"),
+                                    icon: "camera.viewfinder",
+                                    color: hasCompletedAutoAppCapture ? AppleTheme.teal : AppleTheme.blue,
+                                    isDisabled: isStartingRemoteAppScanner,
+                                    action: onStartRemoteCameraAppScan
+                                )
+
+                                Button(action: onStartAutoAppCapture) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "rectangle.stack.fill")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text("Oppure fai uno screenshot alle pagine della Home")
+                                            .font(.system(size: 12, weight: .semibold))
+                                    }
+                                    .foregroundColor(AppleTheme.teal)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 2)
+                                }
+                                .buttonStyle(.plain)
                             } else {
                                 if !hasCompletedAutoAppCapture {
-                                    Text("Scorri per 5 secondi «Impostazioni → App» (o la Home): DirectSwitch genera da solo tutti gli screenshot delle pagine al tuo rientro!")
+                                    Text("Senza registrazione schermo né impostazioni: fai uno screenshot alle 2–4 pagine della tua schermata Home e riapri DirectSwitch!")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
 
                                 ApplePrimaryButton(
                                     title: hasCompletedAutoAppCapture
-                                        ? "Ripeti Screenshot Automatici App"
-                                        : "Avvia Screenshot Automatici di Tutte le App",
-                                    icon: "record.circle.fill",
+                                        ? "Aggiungi altri screenshot delle pagine Home"
+                                        : "Cattura tutte le App dalle pagine Home",
+                                    icon: "iphone.and.arrow.forward",
                                     color: hasCompletedAutoAppCapture ? AppleTheme.teal : AppleTheme.blue,
                                     action: onStartAutoAppCapture
                                 )
@@ -805,7 +897,7 @@ struct SendCategoriesStepView: View {
                             if let note = autoAppCaptureStatusNote, !note.isEmpty {
                                 Text(note)
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(AppleTheme.green)
+                                    .foregroundColor(note.hasPrefix("⚠") ? AppleTheme.orange : AppleTheme.green)
                             }
 
                             if canDeleteTempAutoRecording {
@@ -813,7 +905,7 @@ struct SendCategoriesStepView: View {
                                     HStack(spacing: 5) {
                                         Image(systemName: "trash")
                                             .font(.system(size: 11, weight: .bold))
-                                        Text("Elimina registrazione temporanea dal Rullino")
+                                        Text("Elimina cattura temporanea dal Rullino")
                                             .font(.system(size: 12, weight: .semibold))
                                     }
                                     .foregroundColor(AppleTheme.textSecondary)

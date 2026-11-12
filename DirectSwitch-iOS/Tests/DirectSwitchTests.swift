@@ -537,4 +537,79 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertFalse(filtered.contains("348,2 MB"))
         XCTAssertFalse(filtered.contains("1.24 GB"))
     }
+
+    @MainActor
+    func testLiveCameraAppStabilizerTruncatedLabelsAndRemoteScannerProtocol() throws {
+        // 1. Etichette troncate dalla schermata Home di iOS (`…`) e alias brevi italiani
+        let truncatedBank = iOSInstalledAppsScanner.cleanHomeScreenAppLabel("Intesa Sanpa…")
+        XCTAssertEqual(truncatedBank.cleaned, "Intesa Sanpa")
+        XCTAssertTrue(truncatedBank.wasTruncated)
+        XCTAssertEqual(
+            iOSInstalledAppsScanner.canonicalAppQuery(for: "Intesa Sanpa…"),
+            "Intesa Sanpaolo Mobile"
+        )
+        XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "NexiPay"), "Nexi Pay")
+        XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "Maps"), "Google Maps")
+
+        // 2. Stabilizzatore multi-fotogramma della fotocamera live:
+        //    - conferma al 1° frame le app note
+        //    - scarta rumore transitorio da movimento (1 solo frame) e categorie/widget Home
+        //    - conferma al 2° frame le app arbitrarie senza mai riemetterle al 3° frame
+        var stabilizer = LiveCameraCandidateStabilizer()
+        let frame1 = stabilizer.ingestFrameLines([
+            "BANCOMAT", "Instagrx", "ClasseViva", "Produttività e finanza", "18°", "Nessun evento"
+        ])
+        XCTAssertEqual(frame1, ["BANCOMAT"])
+
+        let frame2 = stabilizer.ingestFrameLines([
+            "ClasseViva", "Ryanair", "Giochi", "21°C"
+        ])
+        XCTAssertEqual(frame2, ["ClasseViva", "Ryanair"])
+
+        let frame3 = stabilizer.ingestFrameLines([
+            "BANCOMAT", "ClasseViva", "Ryanair"
+        ])
+        XCTAssertTrue(frame3.isEmpty)
+
+        // 3. Protocollo cifrato AES-GCM per apertura/sincronizzazione fotocamera live sul nuovo iPhone + deduplica
+        let keyHex = DirectSwitchCrypto.generateSessionKeyHex()
+        let symKey = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: keyHex)
+
+        let seedApp = InstalledAppRecord(packageName: "com.spotify.client", appName: "Spotify", appStoreId: 324684580)
+        let startReq = RemoteAppScannerStartRequest(
+            sessionId: "sess-live-scan",
+            senderName: "iPhone Vecchio",
+            seedApps: [seedApp]
+        )
+        let startJson = String(data: try JSONEncoder().encode(startReq), encoding: .utf8)!
+        let sealedStart = try DirectSwitchCrypto.sealJsonEnvelope(startJson, key: symKey)
+        let openedStart = try DirectSwitchCrypto.openJsonEnvelope(sealedStart, key: symKey)
+        let decodedStart = try JSONDecoder().decode(RemoteAppScannerStartRequest.self, from: Data(openedStart.utf8))
+        XCTAssertEqual(decodedStart, startReq)
+
+        let scannedApp = InstalledAppRecord(packageName: "eu.spaggiari.classeviva", appName: "ClasseViva", appStoreId: 948135147)
+        let duplicateSeed = InstalledAppRecord(packageName: "COM.SPOTIFY.CLIENT", appName: "Spotify", appStoreId: 324684580)
+        let merged = DirectSwitchTransportViewModel.mergeUniqueApps([seedApp], [duplicateSeed, scannedApp])
+        XCTAssertEqual(merged.count, 2)
+
+        let statusResp = RemoteAppScannerStatusResponse(
+            isScannerOpen: false,
+            isCompleted: true,
+            senderName: "iPhone Vecchio",
+            discoveredApps: merged
+        )
+        let statusJson = String(data: try JSONEncoder().encode(statusResp), encoding: .utf8)!
+        let sealedStatus = try DirectSwitchCrypto.sealJsonEnvelope(statusJson, key: symKey)
+        let openedStatus = try DirectSwitchCrypto.openJsonEnvelope(sealedStatus, key: symKey)
+        let decodedStatus = try JSONDecoder().decode(RemoteAppScannerStatusResponse.self, from: Data(openedStatus.utf8))
+        XCTAssertEqual(decodedStatus, statusResp)
+
+        // 4. Append dinamico sul Ricevente nella coda `SKOverlay`
+        let installer = iOSSequentialAppInstaller()
+        installer.dryRunPresentationForTesting = true
+        installer.configure(with: [seedApp])
+        installer.appendAdditionalApps([scannedApp, duplicateSeed])
+        XCTAssertEqual(installer.apps.count, 2)
+        XCTAssertTrue(installer.selectedIds.contains(scannedApp.id))
+    }
 }

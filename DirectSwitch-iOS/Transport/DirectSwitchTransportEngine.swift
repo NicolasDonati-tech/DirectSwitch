@@ -104,6 +104,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var activePairingPin: String = ""
     @Published var discoveredBeacons: [DiscoveryBeaconPayload] = []
     @Published var bootstrapPortalUrl: String? = nil
+    @Published var showRemoteAppScannerOnReceiver: Bool = false
+    @Published var remoteScannerPeerName: String = ""
+    @Published var remoteScannedApps: [InstalledAppRecord] = []
+    @Published var remoteScannerCompleted: Bool = false
 
     private var listener: NWListener?
     private var activeRunIsResume: Bool = false
@@ -224,6 +228,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         contactsAlreadyPresentCount = 0
         receivedInstalledApps = []
         sentInstalledAppsCount = 0
+        showRemoteAppScannerOnReceiver = false
+        remoteScannerPeerName = ""
+        remoteScannedApps = []
+        remoteScannerCompleted = false
         activeTransferScope = ActiveTransferScope()
         visualStepProgress = 0.0
         activeRunIsResume = false
@@ -440,6 +448,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         contactsAlreadyPresentCount = 0
         receivedInstalledApps = []
         sentInstalledAppsCount = 0
+        showRemoteAppScannerOnReceiver = false
+        remoteScannerPeerName = ""
+        remoteScannedApps = []
+        remoteScannerCompleted = false
         activeTransferScope = ActiveTransferScope()
         visualStepProgress = 0.0
         activeRunIsResume = false
@@ -944,6 +956,55 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             return
         }
 
+        // Apertura e sincronizzazione cifrata dello Scanner Fotocamera Live sul nuovo iPhone (senza registrazione schermo)
+        if method == "POST" && path == "/v1/remote-app-scanner/start" {
+            guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                  let reqData = plainJson.data(using: .utf8),
+                  let req = try? JSONDecoder().decode(RemoteAppScannerStartRequest.self, from: reqData),
+                  req.sessionId == activeSessionId else {
+                sendPlainJson(connection: connection, status: 401, json: #"{"error":"remote_scanner_unauthorized"}"#)
+                return
+            }
+            remoteScannerPeerName = req.senderName
+            remoteScannedApps = Self.mergeUniqueApps(remoteScannedApps, req.seedApps)
+            remoteScannerCompleted = false
+            showRemoteAppScannerOnReceiver = true
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+            let resp = RemoteAppScannerStatusResponse(
+                isScannerOpen: true,
+                isCompleted: false,
+                senderName: remoteScannerPeerName,
+                discoveredApps: remoteScannedApps
+            )
+            if let encoded = try? JSONEncoder().encode(resp),
+               let jsonStr = String(data: encoded, encoding: .utf8) {
+                sendEncryptedJson(connection: connection, status: 200, plainJson: jsonStr, key: key)
+            }
+            return
+        }
+
+        if method == "POST" && path == "/v1/remote-app-scanner/poll" {
+            guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                  let reqData = plainJson.data(using: .utf8),
+                  let req = try? JSONDecoder().decode(RemoteAppScannerPollRequest.self, from: reqData),
+                  req.sessionId == activeSessionId else {
+                sendPlainJson(connection: connection, status: 401, json: #"{"error":"remote_scanner_unauthorized"}"#)
+                return
+            }
+            let resp = RemoteAppScannerStatusResponse(
+                isScannerOpen: showRemoteAppScannerOnReceiver,
+                isCompleted: remoteScannerCompleted,
+                senderName: remoteScannerPeerName,
+                discoveredApps: remoteScannedApps
+            )
+            if let encoded = try? JSONEncoder().encode(resp),
+               let jsonStr = String(data: encoded, encoding: .utf8) {
+                sendEncryptedJson(connection: connection, status: 200, plainJson: jsonStr, key: key)
+            }
+            return
+        }
+
         if method == "POST" && path == "/v1/handshake" {
             guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
                   let reqData = plainJson.data(using: .utf8),
@@ -1014,6 +1075,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let allowProceedToManifest = hasMinimalWorkingRoom
             handshakeAuthenticated = allowProceedToManifest
             if allowProceedToManifest {
+                showRemoteAppScannerOnReceiver = false
                 isSessionConnected = true
                 isTransferring = true
                 errorMessage = nil
@@ -1113,7 +1175,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             visualStepProgress = acceptedItems.isEmpty ? 0.75 : 0.05
             if fullAllowed {
                 if let incomingApps = manifest.installedAppsPayload, !incomingApps.isEmpty {
-                    receivedInstalledApps = incomingApps
+                    receivedInstalledApps = activeTransferScope.apps
+                        ? Self.mergeUniqueApps(incomingApps, remoteScannedApps)
+                        : incomingApps
+                } else if activeTransferScope.apps && !remoteScannedApps.isEmpty {
+                    receivedInstalledApps = remoteScannedApps
                 } else if !activeRunIsResume {
                     receivedInstalledApps = []
                 }
@@ -1471,6 +1537,88 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             wifiPass: decoded.wifiPass,
             receiverHasPro: decoded.receiverHasPro
         )
+    }
+
+    /// Unisce due elenchi di `InstalledAppRecord` evitando duplicati per `packageName` o `appStoreId`.
+    nonisolated static func mergeUniqueApps(_ primary: [InstalledAppRecord], _ secondary: [InstalledAppRecord]) -> [InstalledAppRecord] {
+        var merged = primary
+        for app in secondary {
+            let exists = merged.contains {
+                $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                    || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+            }
+            if !exists {
+                merged.append(app)
+            }
+        }
+        return merged
+    }
+
+    /// Aggiorna sul ricevente le app scansionate dal vivo con la fotocamera puntando lo schermo del vecchio telefono.
+    func updateReceiverScannedApps(_ apps: [InstalledAppRecord], replaceExisting: Bool = true, completed: Bool) {
+        remoteScannedApps = replaceExisting
+            ? Self.mergeUniqueApps([], apps)
+            : Self.mergeUniqueApps(remoteScannedApps, apps)
+        if completed {
+            remoteScannerCompleted = true
+            showRemoteAppScannerOnReceiver = false
+        }
+        if isCompleted && activeTransferScope.apps {
+            receivedInstalledApps = Self.mergeUniqueApps(receivedInstalledApps, remoteScannedApps)
+        }
+    }
+
+    /// Dal vecchio iPhone apre automaticamente lo Scanner Fotocamera Live sul nuovo iPhone già accoppiato.
+    func requestRemoteAppScannerStart(
+        pairedPayload: QrPairingPayload,
+        seedApps: [InstalledAppRecord]
+    ) async throws -> RemoteAppScannerStatusResponse {
+        var candidateIps = pairedPayload.ips
+        for b in discoveredBeacons where b.sessionId == pairedPayload.sessionId || b.receiverName == pairedPayload.receiverName {
+            for ip in b.ips where !candidateIps.contains(ip) {
+                candidateIps.insert(ip, at: 0)
+            }
+        }
+        guard let reachableIp = await findReachableIp(ips: candidateIps, port: pairedPayload.port) else {
+            throw NSError(
+                domain: "DirectSwitch",
+                code: -31,
+                userInfo: [NSLocalizedDescriptionKey: "Assicurati che DirectSwitch sia aperta sulla schermata «Ricevi» di \(pairedPayload.receiverName)."]
+            )
+        }
+        let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: pairedPayload.sessionKeyHex)
+        let req = RemoteAppScannerStartRequest(
+            sessionId: pairedPayload.sessionId,
+            senderName: UIDevice.current.name,
+            seedApps: seedApps
+        )
+        let respData = try await postEncryptedJson(
+            url: "http://\(reachableIp):\(pairedPayload.port)/v1/remote-app-scanner/start",
+            payload: req,
+            key: key
+        )
+        return try JSONDecoder().decode(RemoteAppScannerStatusResponse.self, from: respData)
+    }
+
+    /// Interroga in modo cifrato lo stato e le app già lette dallo Scanner Fotocamera Live sul nuovo iPhone.
+    func pollRemoteAppScannerStatus(pairedPayload: QrPairingPayload) async throws -> RemoteAppScannerStatusResponse {
+        var candidateIps = pairedPayload.ips
+        for b in discoveredBeacons where b.sessionId == pairedPayload.sessionId || b.receiverName == pairedPayload.receiverName {
+            for ip in b.ips where !candidateIps.contains(ip) {
+                candidateIps.insert(ip, at: 0)
+            }
+        }
+        guard let reachableIp = await findReachableIp(ips: candidateIps, port: pairedPayload.port) else {
+            throw NSError(domain: "DirectSwitch", code: -32, userInfo: nil)
+        }
+        let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: pairedPayload.sessionKeyHex)
+        let req = RemoteAppScannerPollRequest(sessionId: pairedPayload.sessionId)
+        let respData = try await postEncryptedJson(
+            url: "http://\(reachableIp):\(pairedPayload.port)/v1/remote-app-scanner/poll",
+            payload: req,
+            key: key
+        )
+        return try JSONDecoder().decode(RemoteAppScannerStatusResponse.self, from: respData)
     }
 
     /// Modalità Mittente (iPhone -> Android oppure iPhone -> iPhone) con cifratura, Live Photos, Promemoria, Keep-Alive in background e Resume automatico.

@@ -16,6 +16,8 @@ struct ReceivePairingStepView: View {
     let isLocalNetworkDenied: Bool
     let deniedPermissionsNote: String?
     let errorMessage: String?
+    var preScannedAppsCount: Int = 0
+    var onOpenLiveAppScanner: (() -> Void)? = nil
     var onOpenAppSettings: () -> Void
     var onCancel: () -> Void
 
@@ -142,6 +144,38 @@ struct ReceivePairingStepView: View {
                     }
                 }
                 .appleCard()
+
+                if let openScanner = onOpenLiveAppScanner {
+                    Button(action: openScanner) {
+                        HStack(spacing: 11) {
+                            AppleSettingsIcon(
+                                systemName: preScannedAppsCount > 0 ? "checkmark.seal.fill" : "camera.viewfinder",
+                                color: preScannedAppsCount > 0 ? AppleTheme.green : AppleTheme.blue,
+                                size: 34
+                            )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preScannedAppsCount > 0
+                                     ? "App già lette dal vecchio telefono (\(preScannedAppsCount))"
+                                     : "Scansiona le App inquadrando il vecchio telefono")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                    .lineLimit(1)
+                                Text(preScannedAppsCount > 0
+                                     ? "Tocca se vuoi inquadrare altre pagine della schermata Home"
+                                     : "Opzionale: inquadra le pagine Home per 5 sec senza registrazione schermo")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(AppleTheme.textTertiary)
+                        }
+                        .appleCard(padding: 13)
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 if let err = errorMessage, !err.isEmpty {
                     HStack(spacing: 10) {

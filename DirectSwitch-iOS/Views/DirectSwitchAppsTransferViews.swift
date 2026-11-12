@@ -6,6 +6,7 @@
 //  Copyright © 2026 Nicolas Donati. Tutti i diritti riservati.
 //
 
+import AVFoundation
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
@@ -27,11 +28,286 @@ private struct PickedScrollVideoFile: Transferable {
     }
 }
 
-// MARK: - Sheet Guidata Passo 1: Screenshot Automatici a Scorrimento di Tutte le App
+// MARK: - Anteprima Fotocamera Live 60fps per Lettura App dallo Schermo del Vecchio Telefono
+
+private final class LiveAppCameraHostController: UIViewController {
+    let previewLayer = AVCaptureVideoPreviewLayer()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        previewLayer.videoGravity = .resizeAspectFill
+        view.layer.addSublayer(previewLayer)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer.frame = view.bounds
+    }
+}
+
+private struct LiveAppCameraPreviewView: UIViewControllerRepresentable {
+    let session: AVCaptureSession
+
+    func makeUIViewController(context: Context) -> LiveAppCameraHostController {
+        let vc = LiveAppCameraHostController()
+        vc.previewLayer.session = session
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: LiveAppCameraHostController, context: Context) {
+        if uiViewController.previewLayer.session !== session {
+            uiViewController.previewLayer.session = session
+        }
+        uiViewController.previewLayer.frame = uiViewController.view.bounds
+    }
+}
+
+// MARK: - Scanner Fotocamera Live: Inquadra le Pagine Home del Vecchio Telefono (Zero Registrazione Schermo)
+
+struct LiveCameraAppScannerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let seedApps: [InstalledAppRecord]
+    var senderPhoneLabel: String = ""
+    var onLiveAppsUpdated: (([InstalledAppRecord]) -> Void)? = nil
+    var onConfirmApps: ([InstalledAppRecord]) -> Void
+
+    @StateObject private var scanner = LiveCameraAppScannerViewModel()
+    @State private var didConfirmExplicitly: Bool = false
+
+    private var subtitleText: String {
+        if !senderPhoneLabel.isEmpty {
+            return "Inquadra la schermata Home di \(senderPhoneLabel) e sfoglia con il dito le pagine delle sue App: vengono lette e aggiunte qui in tempo reale!"
+        }
+        return "Inquadra la schermata Home (o la Libreria App) del vecchio telefono e sfoglia le pagine con il dito: DirectSwitch legge tutte le app in tempo reale!"
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                AppleTheme.backgroundGradient
+                    .ignoresSafeArea()
+
+                VStack(spacing: 14) {
+                    Text(subtitleText)
+                        .font(.system(size: 13))
+                        .foregroundColor(AppleTheme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    ZStack {
+                        if scanner.isCameraPermissionDenied {
+                            VStack(spacing: 12) {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 34))
+                                    .foregroundColor(AppleTheme.orange)
+                                Text("Permesso Fotocamera necessario")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(.white)
+                                Text("Attiva la voce «Fotocamera» per inquadrare le icone sullo schermo del vecchio telefono.")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.white.opacity(0.82))
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 18)
+                                Button(action: {
+                                    iOSPermissionsHelper.openDirectSwitchSettings()
+                                }) {
+                                    Text("Abilita Fotocamera")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 18)
+                                        .padding(.vertical, 10)
+                                        .background(AppleTheme.blue)
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color.black)
+                        } else {
+                            LiveAppCameraPreviewView(session: scanner.captureSession)
+
+                            // Cornice guida schermo telefono
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2.5, dash: [16, 10]))
+                                .padding(.horizontal, 28)
+                                .padding(.vertical, 20)
+
+                            VStack {
+                                HStack(spacing: 7) {
+                                    Circle()
+                                        .fill(AppleTheme.green)
+                                        .frame(width: 8, height: 8)
+                                    Text("Lettura live attiva • \(scanner.discoveredApps.count) app")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(.white)
+                                    if scanner.pendingLookupsCount > 0 {
+                                        ProgressView()
+                                            .scaleEffect(0.72)
+                                            .tint(.white)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.black.opacity(0.66))
+                                .clipShape(Capsule())
+                                .padding(.top, 10)
+
+                                Spacer()
+
+                                if let lastAdded = scanner.latestDetectedAppName {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 13, weight: .bold))
+                                            .foregroundColor(AppleTheme.green)
+                                        Text("+ \(lastAdded)")
+                                            .font(.system(size: 13, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .lineLimit(1)
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(Color.black.opacity(0.75))
+                                    .clipShape(Capsule())
+                                    .padding(.bottom, 12)
+                                } else {
+                                    Text("Sfoglia le pagine Home sul vecchio telefono")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.black.opacity(0.60))
+                                        .clipShape(Capsule())
+                                        .padding(.bottom, 12)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 320)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(AppleTheme.blue.opacity(0.45), lineWidth: 1.3)
+                    )
+
+                    // Striscia live delle app rilevate (rimovibili con un tocco su x)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("App registrate (\(scanner.discoveredApps.count))")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Spacer()
+                            if scanner.newlyScannedCount > 0 {
+                                Text("+\(scanner.newlyScannedCount) dallo schermo")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(AppleTheme.green)
+                            }
+                        }
+
+                        if scanner.discoveredApps.isEmpty {
+                            Text("Punta la fotocamera sulle icone delle app del vecchio telefono: appariranno qui in automatico.")
+                                .font(.system(size: 12))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .padding(.vertical, 4)
+                        } else {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(scanner.discoveredApps.reversed()) { app in
+                                        HStack(spacing: 6) {
+                                            AppIconThumbnailView(iconUrl: app.iconUrl, size: 26)
+                                            Text(app.appName)
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundColor(AppleTheme.textPrimary)
+                                                .lineLimit(1)
+                                            Button(action: {
+                                                scanner.removeApp(app)
+                                            }) {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .font(.system(size: 14))
+                                                    .foregroundColor(AppleTheme.textTertiary)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                        .padding(.leading, 6)
+                                        .padding(.trailing, 8)
+                                        .padding(.vertical, 5)
+                                        .background(Color.white)
+                                        .clipShape(Capsule())
+                                        .overlay(
+                                            Capsule()
+                                                .stroke(AppleTheme.cardBorder, lineWidth: 0.8)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .appleCard(padding: 12)
+
+                    Spacer(minLength: 0)
+
+                    ApplePrimaryButton(
+                        title: scanner.discoveredApps.isEmpty
+                            ? "Chiudi scanner"
+                            : "Conferma \(scanner.discoveredApps.count) App rilevate",
+                        icon: "checkmark.circle.fill",
+                        color: AppleTheme.green
+                    ) {
+                        didConfirmExplicitly = true
+                        let finalApps = scanner.discoveredApps
+                        scanner.stopScanning()
+                        onConfirmApps(finalApps)
+                        dismiss()
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .navigationTitle("Scanner App Live")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Chiudi") {
+                        didConfirmExplicitly = true
+                        let finalApps = scanner.discoveredApps
+                        scanner.stopScanning()
+                        if scanner.newlyScannedCount > 0 {
+                            onConfirmApps(finalApps)
+                        }
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.light)
+        .onAppear {
+            scanner.onLiveAppsChanged = { updated in
+                onLiveAppsUpdated?(updated)
+            }
+            scanner.bootstrap(seedApps: seedApps)
+            scanner.startScanning()
+        }
+        .onDisappear {
+            scanner.stopScanning()
+            if !didConfirmExplicitly && scanner.newlyScannedCount > 0 {
+                onConfirmApps(scanner.discoveredApps)
+            }
+        }
+    }
+}
+
+// MARK: - Sheet Guidata Passo 1: Registrazione Semplice di Tutte le App (Zero Redirect alle Impostazioni)
 
 struct AutoAppScrollCaptureGuideSheet: View {
     @Environment(\.dismiss) private var dismiss
-    var onArmAndOpenSettings: () -> Void
+    var canUsePairedNewIPhoneCamera: Bool = false
+    var pairedNewIPhoneName: String = ""
+    var onOpenScannerOnNewIPhone: (() -> Void)? = nil
+    var onArmHomeScreenshotsCapture: () -> Void
+
+    private var targetPhoneLabel: String {
+        pairedNewIPhoneName.isEmpty ? "il nuovo iPhone" : pairedNewIPhoneName
+    }
 
     var body: some View {
         NavigationView {
@@ -40,65 +316,95 @@ struct AutoAppScrollCaptureGuideSheet: View {
                     .ignoresSafeArea()
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 10) {
-                                AppleSettingsIcon(systemName: "rectangle.stack.badge.play.fill", color: AppleTheme.blue)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Passo 1: Screenshot Automatici")
-                                        .font(.system(size: 18, weight: .bold))
-                                        .foregroundColor(AppleTheme.textPrimary)
-                                    Text("Cattura il 100% delle tue App in 5 secondi senza scattare foto a mano")
-                                        .font(.system(size: 13))
-                                        .foregroundColor(AppleTheme.textSecondary)
+                    VStack(alignment: .leading, spacing: 16) {
+                        if canUsePairedNewIPhoneCamera, let triggerRemote = onOpenScannerOnNewIPhone {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(spacing: 10) {
+                                    AppleSettingsIcon(systemName: "camera.viewfinder", color: AppleTheme.blue)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Metodo consigliato (5 secondi)")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .foregroundColor(AppleTheme.blue)
+                                        Text("Inquadra la Home col nuovo iPhone")
+                                            .font(.system(size: 17, weight: .bold))
+                                            .foregroundColor(AppleTheme.textPrimary)
+                                    }
+                                }
+
+                                Text("Senza attivare alcuna registrazione schermo: tocca il pulsante qui sotto per aprire automaticamente la fotocamera su **\(targetPhoneLabel)**, poi vai sulla schermata Home di questo telefono e sfoglia le pagine delle tue app!")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(AppleTheme.textSecondary)
+
+                                ApplePrimaryButton(
+                                    title: "Apri Fotocamera su \(targetPhoneLabel)",
+                                    icon: "camera.viewfinder",
+                                    color: AppleTheme.blue
+                                ) {
+                                    triggerRemote()
+                                    dismiss()
                                 }
                             }
+                            .appleCard(padding: 15, selected: true)
                         }
-                        .appleCard(padding: 14, selected: true)
 
                         VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 10) {
+                                AppleSettingsIcon(systemName: "rectangle.stack.fill", color: AppleTheme.teal)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(canUsePairedNewIPhoneCamera ? "Alternativa su questo iPhone" : "Cattura rapida senza impostazioni")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(AppleTheme.teal)
+                                    Text("Screenshot rapidi alle pagine Home")
+                                        .font(.system(size: 17, weight: .bold))
+                                        .foregroundColor(AppleTheme.textPrimary)
+                                }
+                            }
+
                             guideStepRow(
                                 number: "1",
-                                title: "Avvia Registrazione Schermo ⏺ dal Centro di Controllo",
-                                detail: "Scorri col dito dall'angolo in alto a destra dello schermo e tocca il pallino «Registrazione schermo»."
+                                title: "Vai sulla schermata Home di questo iPhone",
+                                detail: "Tocca il pulsante qui sotto e scorri dal basso verso l'alto per uscire sulla tua schermata Home con le icone delle app."
                             )
                             Divider()
                             guideStepRow(
                                 number: "2",
-                                title: "Scorri l'elenco completo delle tue App",
-                                detail: "Tocca il pulsante blu qui sotto, vai in «◀ Impostazioni → App» (oppure nella «Libreria app» A–Z in fondo alla Home) e scorri fino in fondo per 5 secondi."
+                                title: "Fai uno screenshot a ogni pagina delle tue App",
+                                detail: "Premi «Tasto Laterale + Volume Su» sulle 2–4 pagine della tua Home (oppure nella «Libreria app» in fondo a destra)."
                             )
                             Divider()
                             guideStepRow(
                                 number: "3",
-                                title: "Torna su DirectSwitch: estrazione automatica!",
-                                detail: "Tocca l'indicatore rosso in alto per fermare e riapri DirectSwitch: l'app genererà da sola tutti gli screenshot dello scorrimento e selezionerà tutte le tue App in blu!"
+                                title: "Riapri DirectSwitch: lettura automatica!",
+                                detail: "Appena torni qui, DirectSwitch legge da sola tutte le app dagli screenshot appena fatti e ti permette di cancellarli dal Rullino con 1 tocco."
                             )
+
+                            if canUsePairedNewIPhoneCamera {
+                                AppleSecondaryButton(
+                                    title: "Pronto: vado sulla Home a fare gli screenshot",
+                                    icon: "iphone.and.arrow.forward",
+                                    tint: AppleTheme.teal
+                                ) {
+                                    onArmHomeScreenshotsCapture()
+                                    dismiss()
+                                }
+                            } else {
+                                ApplePrimaryButton(
+                                    title: "Pronto: vado sulla Home a fare gli screenshot",
+                                    icon: "iphone.and.arrow.forward",
+                                    color: AppleTheme.blue
+                                ) {
+                                    onArmHomeScreenshotsCapture()
+                                    dismiss()
+                                }
+                            }
                         }
                         .appleCard(padding: 16)
-
-                        ApplePrimaryButton(
-                            title: "Attiva Cattura Automatica e Apri Elenco App",
-                            icon: "arrow.up.forward.app.fill",
-                            color: AppleTheme.blue
-                        ) {
-                            onArmAndOpenSettings()
-                            dismiss()
-                        }
-
-                        AppleSecondaryButton(
-                            title: "Rimani qui (scorro io la Home / Libreria App)",
-                            icon: "hand.draw.fill",
-                            tint: AppleTheme.teal
-                        ) {
-                            dismiss()
-                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 14)
                 }
             }
-            .navigationTitle("Screenshot Automatici App")
+            .navigationTitle("Registra tutte le App")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -117,7 +423,7 @@ struct AutoAppScrollCaptureGuideSheet: View {
                 .font(.system(size: 14, weight: .bold, design: .rounded))
                 .foregroundColor(.white)
                 .frame(width: 26, height: 26)
-                .background(AppleTheme.blue)
+                .background(AppleTheme.teal)
                 .clipShape(Circle())
 
             VStack(alignment: .leading, spacing: 3) {
@@ -183,6 +489,9 @@ struct SenderAppsSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var appsCatalog: [InstalledAppRecord]
     @Binding var deselectedAppIds: Set<String>
+    var canScanWithPairedIPhone: Bool = false
+    var pairedIPhoneName: String = ""
+    var onTriggerPairedIPhoneScanner: (() -> Void)? = nil
     var onStartGuidedAutoCapture: (() -> Void)? = nil
 
     @State private var searchQuery: String = ""
@@ -191,7 +500,7 @@ struct SenderAppsSelectionSheet: View {
     @State private var screenshotPickerItems: [PhotosPickerItem] = []
     @State private var isScanningScreenshots: Bool = false
     @State private var ocrStatusNote: String? = nil
-    @State private var temporaryRecordingAssetId: String? = nil
+    @State private var temporaryCapturedAssetIds: [String] = []
     @State private var showLocalAutoGuideSheet: Bool = false
 
     private var selectedCount: Int {
@@ -216,49 +525,82 @@ struct SenderAppsSelectionSheet: View {
 
                 ScrollView {
                     VStack(spacing: 16) {
-                        // PASSO 1: Screenshot Automatici a Scorrimento di tutte le App del telefono
+                        // PASSO 1: Registrazione semplice di tutte le App installate (Fotocamera Live sul nuovo iPhone oppure Screenshot Home)
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 10) {
-                                AppleSettingsIcon(systemName: "rectangle.stack.badge.play.fill", color: AppleTheme.blue)
+                                AppleSettingsIcon(
+                                    systemName: canScanWithPairedIPhone ? "camera.viewfinder" : "rectangle.stack.fill",
+                                    color: AppleTheme.blue
+                                )
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Passo 1: Screenshot automatici di tutte le App")
+                                    Text("Passo 1: Registra tutte le App installate")
                                         .font(.system(size: 15, weight: .bold))
                                         .foregroundColor(AppleTheme.textPrimary)
-                                    Text("Scorri per 5 sec «Impostazioni → App» o la Home: estrazione automatica!")
+                                    Text(canScanWithPairedIPhone
+                                         ? "Inquadra la Home col nuovo iPhone (5 sec) o usa screenshot Home"
+                                         : "Fai uno screenshot alle pagine della tua Home: lettura automatica!")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
                                 Spacer()
                                 InfoCircleButton(
-                                    title: "Screenshot automatici da scorrimento",
-                                    message: "Non devi scattare 15 screenshot a mano:\n\n1. Tocca «Avvia Screenshot Automatici a Scorrimento».\n2. Attiva 5 secondi la Registrazione Schermo ⏺ mentre scorri «Impostazioni → App» (o la «Libreria app» A–Z).\n3. Appena torni su DirectSwitch, il motore video estrae da solo fino a 30 screenshot nitidi, riconosce fino a 200 app con le icone ufficiali e le seleziona tutte!"
+                                    title: "Come registrare il 100% delle App",
+                                    message: canScanWithPairedIPhone
+                                        ? "• Metodo consigliato (zero impostazioni e zero registrazione schermo): tocca «Inquadra tutte le App col Nuovo iPhone». La fotocamera si aprirà da sola sul nuovo telefono e ti basterà sfogliare le pagine della tua schermata Home davanti all'obiettivo!\n\n• In alternativa: fai 2–3 screenshot alle pagine della tua Home (Tasto Laterale + Volume Su) e tocca «Estrai da Foto»."
+                                        : "Non serve attivare alcuna registrazione schermo:\n\n1. Vai sulla schermata Home di questo iPhone.\n2. Premi «Tasto Laterale + Volume Su» sulle 2–4 pagine delle tue App.\n3. Torna qui o tocca «Estrai da Foto»: DirectSwitch legge e seleziona tutte le tue app con le icone ufficiali!"
                                 )
                             }
 
-                            Button(action: {
-                                if let external = onStartGuidedAutoCapture {
+                            if canScanWithPairedIPhone, let triggerRemote = onTriggerPairedIPhoneScanner {
+                                Button(action: {
                                     dismiss()
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                        external()
+                                        triggerRemote()
                                     }
-                                } else {
-                                    showLocalAutoGuideSheet = true
+                                }) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "camera.viewfinder")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text(pairedIPhoneName.isEmpty
+                                             ? "Inquadra tutte le App col Nuovo iPhone"
+                                             : "Inquadra le App con \(pairedIPhoneName)")
+                                            .font(.system(size: 14, weight: .bold))
+                                            .lineLimit(1)
+                                    }
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(AppleTheme.blue)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 }
-                            }) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "record.circle.fill")
-                                        .font(.system(size: 15, weight: .bold))
-                                    Text("Avvia Screenshot Automatici a Scorrimento")
-                                        .font(.system(size: 14, weight: .bold))
+                                .buttonStyle(.plain)
+                                .disabled(isScanningScreenshots)
+                            } else {
+                                Button(action: {
+                                    if let external = onStartGuidedAutoCapture {
+                                        dismiss()
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                            external()
+                                        }
+                                    } else {
+                                        showLocalAutoGuideSheet = true
+                                    }
+                                }) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "iphone.and.arrow.forward")
+                                            .font(.system(size: 15, weight: .bold))
+                                        Text("Cattura da screenshot delle pagine Home")
+                                            .font(.system(size: 14, weight: .bold))
+                                    }
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(AppleTheme.blue)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 }
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 44)
-                                .background(AppleTheme.blue)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .buttonStyle(.plain)
+                                .disabled(isScanningScreenshots)
                             }
-                            .buttonStyle(.plain)
-                            .disabled(isScanningScreenshots)
 
                             HStack(spacing: 8) {
                                 Button(action: scanRecentScreenshotsAutomatically) {
@@ -271,7 +613,7 @@ struct SenderAppsSelectionSheet: View {
                                             Image(systemName: "bolt.viewfinder")
                                                 .font(.system(size: 13, weight: .bold))
                                         }
-                                        Text(isScanningScreenshots ? "Estrazione..." : "Estrai da ultima cattura")
+                                        Text(isScanningScreenshots ? "Lettura..." : "Estrai da Foto recenti")
                                             .font(.system(size: 12, weight: .bold))
                                             .lineLimit(1)
                                     }
@@ -287,12 +629,12 @@ struct SenderAppsSelectionSheet: View {
                                 PhotosPicker(
                                     selection: $screenshotPickerItems,
                                     maxSelectionCount: 14,
-                                    matching: .any(of: [.videos, .images])
+                                    matching: .any(of: [.images, .videos])
                                 ) {
                                     HStack(spacing: 5) {
                                         Image(systemName: "photo.on.rectangle.angled")
                                             .font(.system(size: 12, weight: .semibold))
-                                        Text("Scegli video/foto")
+                                        Text("Scegli screenshot")
                                             .font(.system(size: 12, weight: .bold))
                                             .lineLimit(1)
                                     }
@@ -311,18 +653,19 @@ struct SenderAppsSelectionSheet: View {
                                     .foregroundColor(AppleTheme.green)
                             }
 
-                            if let tempVidId = temporaryRecordingAssetId {
+                            if !temporaryCapturedAssetIds.isEmpty {
                                 Button(action: {
+                                    let ids = temporaryCapturedAssetIds
                                     Task {
-                                        if await iOSInstalledAppsScanner.deleteTemporaryRecordingAsset(localIdentifier: tempVidId) {
-                                            temporaryRecordingAssetId = nil
+                                        if await iOSInstalledAppsScanner.deleteTemporaryCapturedAssets(localIdentifiers: ids) {
+                                            temporaryCapturedAssetIds.removeAll()
                                         }
                                     }
                                 }) {
                                     HStack(spacing: 5) {
                                         Image(systemName: "trash")
                                             .font(.system(size: 11, weight: .bold))
-                                        Text("Elimina registrazione temporanea dal Rullino")
+                                        Text("Elimina cattura temporanea dal Rullino")
                                             .font(.system(size: 12, weight: .semibold))
                                     }
                                     .foregroundColor(AppleTheme.textSecondary)
@@ -525,9 +868,14 @@ struct SenderAppsSelectionSheet: View {
         }
         .preferredColorScheme(.light)
         .sheet(isPresented: $showLocalAutoGuideSheet) {
-            AutoAppScrollCaptureGuideSheet {
-                iOSPermissionsHelper.openDirectSwitchSettings()
-            }
+            AutoAppScrollCaptureGuideSheet(
+                canUsePairedNewIPhoneCamera: canScanWithPairedIPhone,
+                pairedNewIPhoneName: pairedIPhoneName,
+                onOpenScannerOnNewIPhone: onTriggerPairedIPhoneScanner,
+                onArmHomeScreenshotsCapture: {
+                    onStartGuidedAutoCapture?()
+                }
+            )
         }
         .onChange(of: screenshotPickerItems) { picked in
             guard !picked.isEmpty else { return }
@@ -563,10 +911,10 @@ struct SenderAppsSelectionSheet: View {
         ocrStatusNote = nil
         Task {
             let result = await iOSInstalledAppsScanner.extractAutomaticScreenshotsAndRecognizeApps(since: nil)
-            temporaryRecordingAssetId = result.analyzedVideoAssetLocalIdentifier
+            temporaryCapturedAssetIds = result.allTemporaryAssetIdentifiers
             guard result.generatedScreenshotsCount > 0 else {
                 isScanningScreenshots = false
-                ocrStatusNote = "Nessuna registrazione schermo o screenshot recente trovato (oppure permesso Foto disattivato). Avvia il Passo 1 qui sopra!"
+                ocrStatusNote = "Nessuno screenshot recente delle pagine Home trovato (oppure permesso Foto disattivato)."
                 return
             }
             mergeDiscoveredAppsIntoCatalog(result.discoveredApps, generatedFramesCount: result.generatedScreenshotsCount)
@@ -641,10 +989,12 @@ struct ReceiverAppsAutoInstallCard: View {
 
     let incomingApps: [InstalledAppRecord]
     @ObservedObject var installer: iOSSequentialAppInstaller
+    var onAppsScannedOnReceiver: (([InstalledAppRecord]) -> Void)? = nil
     @AppStorage("directswitch_zero_faceid_setup_done_v1") private var zeroFaceIdSetupDone: Bool = false
     @State private var accountMode: AppleAccountMode = .differentAppleId
     @State private var showZeroFaceIdSteps: Bool = true
     @State private var showFullList: Bool = false
+    @State private var showLiveAppCameraScanner: Bool = false
 
     private var visibleApps: [InstalledAppRecord] {
         showFullList ? installer.apps : Array(installer.apps.prefix(10))
@@ -707,9 +1057,17 @@ struct ReceiverAppsAutoInstallCard: View {
 
             if installer.apps.isEmpty {
                 ApplePrimaryButton(
+                    title: "Inquadra le App sul vecchio telefono (5 sec)",
+                    icon: "camera.viewfinder",
+                    color: AppleTheme.blue
+                ) {
+                    showLiveAppCameraScanner = true
+                }
+
+                AppleSecondaryButton(
                     title: "Carica elenco App principali in coda",
                     icon: "square.stack.3d.down.right.fill",
-                    color: AppleTheme.blue
+                    tint: AppleTheme.teal
                 ) {
                     let defaults = iOSInstalledAppsScanner.knownProbes.prefix(16).map {
                         InstalledAppRecord(
@@ -724,10 +1082,38 @@ struct ReceiverAppsAutoInstallCard: View {
                 }
             } else {
                 activeInstallerSection
+
+                Button(action: {
+                    showLiveAppCameraScanner = true
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "camera.viewfinder")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("Manca qualche app? Inquadra la Home del vecchio telefono")
+                            .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(AppleTheme.teal)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 36)
+                    .background(AppleTheme.teal.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
                 appsChecklistSection
             }
         }
         .appleCard(padding: 14)
+        .sheet(isPresented: $showLiveAppCameraScanner) {
+            LiveCameraAppScannerSheet(
+                seedApps: installer.apps,
+                onConfirmApps: { scanned in
+                    installer.appendAdditionalApps(scanned)
+                    onAppsScannedOnReceiver?(installer.apps)
+                }
+            )
+        }
         .onAppear {
             showZeroFaceIdSteps = !zeroFaceIdSetupDone
             installer.configure(with: incomingApps)

@@ -14,11 +14,20 @@ import StoreKit
 import UIKit
 import Vision
 
-/// Risultato della cattura automatica di tutti gli screenshot a scorrimento (da registrazione schermo o istantanee).
+/// Risultato della cattura automatica di tutti gli screenshot (da istantanee pagine Home o video di scorrimento).
 struct AutoScreenshotCaptureResult: Sendable {
     let discoveredApps: [InstalledAppRecord]
     let generatedScreenshotsCount: Int
     let analyzedVideoAssetLocalIdentifier: String?
+    var analyzedScreenshotLocalIdentifiers: [String] = []
+
+    var allTemporaryAssetIdentifiers: [String] {
+        var ids = analyzedScreenshotLocalIdentifiers
+        if let vid = analyzedVideoAssetLocalIdentifier, !vid.isEmpty, !ids.contains(vid) {
+            ids.insert(vid, at: 0)
+        }
+        return ids
+    }
 }
 
 /// Descrittore delle app più diffuse su iOS interrogabili istantaneamente tramite `LSApplicationQueriesSchemes`.
@@ -110,7 +119,7 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "posteitaliane.posteapp.appposteid", appName: "PosteID", urlScheme: "posteid", appStoreId: 1078512138)
     ]
 
-    /// Suggerimenti rapidi italiani (SPID/CIE, Banche, Operatori, Trasporti) aggiungibili con 1 tocco sul mittente.
+    /// Suggerimenti rapidi italiani ed europei (SPID/CIE, Banche, Pagamenti, Trasporti, Domotica e Utility) aggiungibili con 1 tocco.
     static let italianQuickSuggestions: [InstalledAppRecord] = [
         InstalledAppRecord(packageName: "it.pagopa.app.io", appName: "IO", appStoreId: 1505842859, urlScheme: "ioit"),
         InstalledAppRecord(packageName: "it.ipzs.cieid", appName: "CieID", appStoreId: 1517873615),
@@ -121,15 +130,122 @@ enum iOSInstalledAppsScanner {
         InstalledAppRecord(packageName: "posteitaliane.posteapp.appbpol", appName: "BancoPosta"),
         InstalledAppRecord(packageName: "posteitaliane.posteapp.apppostepay", appName: "Postepay"),
         InstalledAppRecord(packageName: "com.fineco.it", appName: "Fineco"),
+        InstalledAppRecord(packageName: "it.bancomat.pay", appName: "BANCOMAT"),
+        InstalledAppRecord(packageName: "it.icbpi.mobile", appName: "Nexi Pay"),
+        InstalledAppRecord(packageName: "net.klarna.app", appName: "Klarna"),
+        InstalledAppRecord(packageName: "it.hype.app", appName: "HYPE"),
         InstalledAppRecord(packageName: "com.trenitalia.app", appName: "Trenitalia"),
         InstalledAppRecord(packageName: "it.ntvspa.italo", appName: "Italo Treno"),
+        InstalledAppRecord(packageName: "com.ryanair.cheapflights", appName: "Ryanair"),
         InstalledAppRecord(packageName: "com.easypark.iphone", appName: "EasyPark"),
         InstalledAppRecord(packageName: "it.mooneygo.app", appName: "MooneyGo"),
+        InstalledAppRecord(packageName: "it.telepass.tpy", appName: "Telepass"),
         InstalledAppRecord(packageName: "com.deliveroo.orderapp", appName: "Deliveroo"),
         InstalledAppRecord(packageName: "com.glovo.app", appName: "Glovo"),
+        InstalledAppRecord(packageName: "com.einnovation.temu", appName: "Temu"),
+        InstalledAppRecord(packageName: "com.brave.ios.browser", appName: "Brave"),
+        InstalledAppRecord(packageName: "com.microsoft.msedge", appName: "Microsoft Edge"),
+        InstalledAppRecord(packageName: "ch.protonmail.vpn", appName: "Proton VPN"),
+        InstalledAppRecord(packageName: "com.google.calendar", appName: "Google Calendar"),
+        InstalledAppRecord(packageName: "com.ookla.speedtest", appName: "Speedtest"),
+        InstalledAppRecord(packageName: "com.teamviewer.rc", appName: "TeamViewer"),
+        InstalledAppRecord(packageName: "it.a2a.mya2a", appName: "MyA2A"),
+        InstalledAppRecord(packageName: "cloud.shelly.smartcontrol", appName: "Shelly Smart Control"),
+        InstalledAppRecord(packageName: "com.ezviz.ezviz", appName: "EZVIZ"),
+        InstalledAppRecord(packageName: "com.dreame.smartlife", appName: "Dreamehome"),
+        InstalledAppRecord(packageName: "com.preply.tutor", appName: "Preply"),
         InstalledAppRecord(packageName: "com.canva.canvaeditor", appName: "Canva"),
         InstalledAppRecord(packageName: "com.lemon.lvoverseas", appName: "CapCut")
     ]
+
+    /// Mappa le etichette corte o troncate mostrate sotto le icone della schermata Home iOS al titolo completo su App Store Italia.
+    private static let homeScreenShortAliases: [String: String] = [
+        "whatsapp": "WhatsApp Messenger",
+        "wa business": "WhatsApp Business",
+        "telegram": "Telegram Messenger",
+        "maps": "Google Maps",
+        "google maps": "Google Maps",
+        "chrome": "Google Chrome",
+        "drive": "Google Drive",
+        "prime video": "Amazon Prime Video",
+        "amazon": "Amazon Shopping",
+        "outlook": "Microsoft Outlook",
+        "teams": "Microsoft Teams",
+        "authenticator": "Google Authenticator",
+        "ms authenticator": "Microsoft Authenticator",
+        "zoom": "Zoom Workplace",
+        "booking": "Booking.com",
+        "edge": "Microsoft Edge",
+        "nexipay": "Nexi Pay",
+        "nexi pay": "Nexi Pay",
+        "bancomat": "BANCOMAT",
+        "bancomat pay": "BANCOMAT",
+        "intesa": "Intesa Sanpaolo Mobile",
+        "intesa sanpaolo": "Intesa Sanpaolo Mobile",
+        "intesa sanpa": "Intesa Sanpaolo Mobile",
+        "unicredit": "UniCredit Mobile Banking",
+        "unicredit mo": "UniCredit Mobile Banking",
+        "bancoposta": "BancoPosta",
+        "postepay": "Postepay",
+        "posteid": "PosteID",
+        "cieid": "CieID",
+        "aruba pec": "Aruba PEC",
+        "proton vpn": "Proton VPN",
+        "protonvpn": "Proton VPN",
+        "speedtest": "Speedtest by Ookla",
+        "shelly": "Shelly Smart Control",
+        "dreamehome": "Dreamehome",
+        "mya2a": "MyA2A",
+        "italo": "Italo Treno"
+    ]
+
+    /// Ripulisce un'etichetta letta dalla schermata Home (rimuovendo anche l'ellissi `…` delle icone con nomi lunghi).
+    static func cleanHomeScreenAppLabel(_ raw: String) -> (cleaned: String, wasTruncated: Bool) {
+        var working = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "•›<>-–—_·:"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var truncated = false
+        if working.hasSuffix("…") {
+            truncated = true
+            working = String(working.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if working.hasSuffix("..") {
+            truncated = true
+            while working.hasSuffix(".") {
+                working.removeLast()
+            }
+            working = working.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return (working, truncated)
+    }
+
+    /// Restituisce la query canonica ottimale per cercare l'app su App Store Italia partendo dall'etichetta della Home.
+    static func canonicalAppQuery(for rawLabel: String) -> String {
+        let (cleaned, _) = cleanHomeScreenAppLabel(rawLabel)
+        let lower = cleaned.lowercased()
+        if let mapped = homeScreenShortAliases[lower] {
+            return mapped
+        }
+        return cleaned
+    }
+
+    /// Indica se l'etichetta corrisponde già a un'app nota del dizionario rapido italiano/globale (confermabile al 1° fotogramma live).
+    static func isInstantlyTrustedAppLabel(_ rawLabel: String) -> Bool {
+        let (cleaned, _) = cleanHomeScreenAppLabel(rawLabel)
+        let lower = cleaned.lowercased()
+        guard lower.count >= 2 else { return false }
+        if homeScreenShortAliases[lower] != nil {
+            return true
+        }
+        if knownProbes.contains(where: { $0.appName.lowercased() == lower }) {
+            return true
+        }
+        if italianQuickSuggestions.contains(where: { $0.appName.lowercased() == lower }) {
+            return true
+        }
+        return false
+    }
 
     private static let whitelistedSchemes: Set<String> = Set(knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"])
 
@@ -256,8 +372,8 @@ enum iOSInstalledAppsScanner {
         saveCustomApps(existing)
     }
 
-    /// Filtra le stringhe estratte tramite OCR dagli screenshot automatici della schermata Home, «Libreria app» o «Impostazioni → App»,
-    /// scartando orari, dimensioni in MB/GB, intestazioni di sistema e app preinstallate Apple, fino a 200 app utente.
+    /// Filtra le stringhe estratte tramite OCR dalla schermata Home (anche via fotocamera live), «Libreria app» o «Impostazioni → App»,
+    /// scartando orari, widget, categorie di sistema, dimensioni in MB/GB e app preinstallate Apple, fino a 200 app utente.
     static func filterPlausibleAppNames(_ rawStrings: [String]) -> [String] {
         let ignoredTerms: Set<String> = [
             "impostazioni", "settings", "app", "applicazioni", "cerca", "search", "indietro",
@@ -271,27 +387,29 @@ enum iOSInstalledAppsScanner {
             "notifiche", "suoni e feedback", "full immersion", "tempo di utilizzo", "batteria",
             "privacy e sicurezza", "spazio su iphone", "documenti e dati", "scarica app",
             "elimina app", "registrazione schermo", "interrompi", "annulla", "fine",
-            "5g", "4g", "lte", "wifi", "wi-fi", "iliad", "vodafone", "tim", "windtre", "fastweb", "ho."
+            "5g", "4g", "lte", "wifi", "wi-fi", "iliad", "vodafone", "tim", "windtre", "fastweb", "ho.",
+            "social", "utilità", "produttività e finanza", "produttività", "finanza", "creatività",
+            "informazione e lettura", "intrattenimento", "salute e forma fisica", "shopping e cibo",
+            "viaggi", "giochi", "altro", "aggiunte di recente", "suggerimenti di siri", "modifica",
+            "rimuovi app", "condividi app", "oggi", "ieri", "domani", "nessun evento",
+            "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"
         ]
 
         let ignoredSubstrings: [String] = [
             "ultimo utilizzo", "mai utilizzat", "kb/s", "mb/s", "registrazione dello schermo",
-            "spazio disponibile", "in uso", "elementi nascosti"
+            "spazio disponibile", "in uso", "elementi nascosti", "nessun evento"
         ]
 
         var out: [String] = []
         var seen = Set<String>()
 
         for raw in rawStrings {
-            let cleaned = raw
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "•›<>-–—_·:"))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let (cleaned, _) = cleanHomeScreenAppLabel(raw)
             guard cleaned.count >= 2, cleaned.count <= 30 else { continue }
 
             let lower = cleaned.lowercased()
             if ignoredTerms.contains(lower) { continue }
-            if lower.hasSuffix("%") { continue }
+            if lower.hasSuffix("%") || lower.hasSuffix("°") || lower.hasSuffix("°c") { continue }
             if ignoredSubstrings.contains(where: { lower.contains($0) }) { continue }
 
             // Scarta dimensioni spazio (es. "348,2 MB", "1.4 GB", "820 KB")
@@ -333,8 +451,8 @@ enum iOSInstalledAppsScanner {
         return lines
     }
 
-    /// Risolve i candidati testuali estratti dagli screenshot automatici in record completi App Store (con icona e `trackId`).
-    private static func resolveCandidateAppLines(_ extractedLines: [String]) async -> [InstalledAppRecord] {
+    /// Risolve i candidati testuali estratti dagli screenshot o dalla fotocamera live in record completi App Store (con icona e `trackId`).
+    static func resolveCandidateAppLines(_ extractedLines: [String]) async -> [InstalledAppRecord] {
         let candidates = filterPlausibleAppNames(extractedLines)
         guard !candidates.isEmpty else { return [] }
 
@@ -350,7 +468,8 @@ enum iOSInstalledAppsScanner {
             let batchMatches = await withTaskGroup(of: (String, InstalledAppRecord?).self) { group -> [(String, InstalledAppRecord?)] in
                 for candidate in slice {
                     group.addTask {
-                        let match = await iOSAppStoreCatalogResolver.searchBestMatch(appName: candidate, strictTitleSimilarity: true)
+                        let query = canonicalAppQuery(for: candidate)
+                        let match = await iOSAppStoreCatalogResolver.searchBestMatch(appName: query, strictTitleSimilarity: true)
                         return (candidate, match)
                     }
                 }
@@ -514,10 +633,11 @@ enum iOSInstalledAppsScanner {
             }
         }
 
-        // 2. Unisce anche eventuali istantanee statiche presenti nella stessa finestra temporale
-        let recentScreenshots = await fetchRecentScreenshotsFromLibrary(maxCount: 16, since: cutoffDate)
-        if !recentScreenshots.isEmpty {
-            let cgImgs = recentScreenshots.compactMap(\.cgImage)
+        // 2. Unisce anche gli screenshot delle pagine Home presenti nella stessa finestra temporale
+        let recentScreenshotPairs = await fetchRecentScreenshotsWithIdentifiersFromLibrary(maxCount: 16, since: cutoffDate)
+        let screenshotIdsForCleanup = armedDate != nil ? recentScreenshotPairs.map(\.localIdentifier) : []
+        if !recentScreenshotPairs.isEmpty {
+            let cgImgs = recentScreenshotPairs.compactMap(\.image.cgImage)
             let shotLines: [String] = await Task.detached(priority: .userInitiated) {
                 var out: [String] = []
                 for cg in cgImgs {
@@ -535,7 +655,8 @@ enum iOSInstalledAppsScanner {
             return AutoScreenshotCaptureResult(
                 discoveredApps: [],
                 generatedScreenshotsCount: totalGeneratedFrames,
-                analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId
+                analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId,
+                analyzedScreenshotLocalIdentifiers: screenshotIdsForCleanup
             )
         }
 
@@ -543,13 +664,16 @@ enum iOSInstalledAppsScanner {
         return AutoScreenshotCaptureResult(
             discoveredApps: resolvedApps,
             generatedScreenshotsCount: totalGeneratedFrames,
-            analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId
+            analyzedVideoAssetLocalIdentifier: newestAnalyzedVideoId,
+            analyzedScreenshotLocalIdentifiers: screenshotIdsForCleanup
         )
     }
 
-    /// Consente di eliminare con 1 tocco dal Rullino la registrazione schermo temporanea usata per generare gli screenshot automatici.
-    static func deleteTemporaryRecordingAsset(localIdentifier: String) async -> Bool {
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
+    /// Consente di eliminare con 1 tocco dal Rullino gli screenshot temporanei delle pagine Home o la breve registrazione usati per rilevare le app.
+    static func deleteTemporaryCapturedAssets(localIdentifiers: [String]) async -> Bool {
+        let validIds = localIdentifiers.filter { !$0.isEmpty }
+        guard !validIds.isEmpty else { return false }
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: validIds, options: nil)
         guard fetched.count > 0 else { return false }
         return await withCheckedContinuation { continuation in
             PHPhotoLibrary.shared().performChanges({
@@ -560,8 +684,20 @@ enum iOSInstalledAppsScanner {
         }
     }
 
+    static func deleteTemporaryRecordingAsset(localIdentifier: String) async -> Bool {
+        await deleteTemporaryCapturedAssets(localIdentifiers: [localIdentifier])
+    }
+
     /// Legge gli screenshot dall'album «Istantanee» a partire da una data (default ultime 48 ore).
     static func fetchRecentScreenshotsFromLibrary(maxCount: Int = 12, since customCutoff: Date? = nil) async -> [UIImage] {
+        let pairs = await fetchRecentScreenshotsWithIdentifiersFromLibrary(maxCount: maxCount, since: customCutoff)
+        return pairs.map(\.image)
+    }
+
+    static func fetchRecentScreenshotsWithIdentifiersFromLibrary(
+        maxCount: Int = 12,
+        since customCutoff: Date? = nil
+    ) async -> [(localIdentifier: String, image: UIImage)] {
         var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if status == .notDetermined {
             status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
@@ -600,7 +736,7 @@ enum iOSInstalledAppsScanner {
         reqOptions.deliveryMode = .highQualityFormat
         reqOptions.isSynchronous = false
 
-        var images: [UIImage] = []
+        var results: [(localIdentifier: String, image: UIImage)] = []
         for asset in assets {
             let loaded: UIImage? = await withCheckedContinuation { continuation in
                 var settled = false
@@ -618,10 +754,10 @@ enum iOSInstalledAppsScanner {
                 }
             }
             if let loaded {
-                images.append(loaded)
+                results.append((asset.localIdentifier, loaded))
             }
         }
-        return images
+        return results
     }
 }
 
@@ -934,6 +1070,29 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
             if let active = self.currentActiveApp, let updatedActive = byId[active.id] {
                 self.currentActiveApp = updatedActive
             }
+            self.refreshInstalledStatuses()
+            self.isEnrichingMetadata = false
+        }
+    }
+
+    func appendAdditionalApps(_ extraApps: [InstalledAppRecord]) {
+        guard !extraApps.isEmpty else { return }
+        if apps.isEmpty {
+            configure(with: extraApps)
+            return
+        }
+        let merged = DirectSwitchTransportViewModel.mergeUniqueApps(apps, extraApps)
+        guard merged.count > apps.count else { return }
+        apps = merged
+        refreshInstalledStatuses()
+        for item in merged where !alreadyInstalledIds.contains(item.id) && !completedIds.contains(item.id) {
+            selectedIds.insert(item.id)
+        }
+        guard !dryRunPresentationForTesting else { return }
+        isEnrichingMetadata = true
+        Task {
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(merged)
+            self.apps = enriched
             self.refreshInstalledStatuses()
             self.isEnrichingMetadata = false
         }
@@ -1402,5 +1561,276 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
             current = presented
         }
         return current
+    }
+}
+
+// MARK: - Stabilizzatore Multi-Fotogramma e Scanner Fotocamera Live in Tempo Reale (Zero Registrazione Schermo)
+
+/// Stabilizza le stringhe lette in tempo reale dalla fotocamera puntando lo schermo del vecchio telefono:
+/// - Le app note (dizionario rapido italiano/globale) vengono confermate al 1° fotogramma nitido.
+/// - Tutte le altre app dello Store richiedono 2 fotogrammi distinti (~0.4 sec) per azzerare falsi positivi da sfocatura durante lo swipe.
+struct LiveCameraCandidateStabilizer: Sendable {
+    private var sightingsByKey: [String: Int] = [:]
+    private var emittedKeys: Set<String> = []
+
+    mutating func reset() {
+        sightingsByKey.removeAll()
+        emittedKeys.removeAll()
+    }
+
+    mutating func ingestFrameLines(_ rawFrameLines: [String]) -> [String] {
+        let candidatesInFrame = iOSInstalledAppsScanner.filterPlausibleAppNames(rawFrameLines)
+        guard !candidatesInFrame.isEmpty else { return [] }
+
+        var newlyStabilized: [String] = []
+        for candidate in candidatesInFrame {
+            let key = iOSInstalledAppsScanner.canonicalAppQuery(for: candidate).lowercased()
+            guard !emittedKeys.contains(key) else { continue }
+
+            let nextCount = (sightingsByKey[key] ?? 0) + 1
+            sightingsByKey[key] = nextCount
+
+            let requiredFrames = iOSInstalledAppsScanner.isInstantlyTrustedAppLabel(candidate) ? 1 : 2
+            if nextCount >= requiredFrames {
+                emittedKeys.insert(key)
+                newlyStabilized.append(candidate)
+            }
+        }
+        return newlyStabilized
+    }
+}
+
+private final class CameraFrameVisionWorker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+    let sampleQueue = DispatchQueue(label: "com.directswitch.livecamera.vision", qos: .userInitiated)
+    private var lastAnalyzedTimestamp: CFAbsoluteTime = 0
+    private var stabilizer = LiveCameraCandidateStabilizer()
+    private let onNewStabilizedCandidates: @Sendable ([String]) -> Void
+
+    init(onNewStabilizedCandidates: @escaping @Sendable ([String]) -> Void) {
+        self.onNewStabilizedCandidates = onNewStabilizedCandidates
+        super.init()
+    }
+
+    func resetState() {
+        sampleQueue.async { [weak self] in
+            self?.lastAnalyzedTimestamp = 0
+            self?.stabilizer.reset()
+        }
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastAnalyzedTimestamp >= 0.36 else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastAnalyzedTimestamp = now
+
+        var recognizedStrings: [String] = []
+        autoreleasepool {
+            let req = VNRecognizeTextRequest()
+            req.recognitionLevel = .accurate
+            req.usesLanguageCorrection = false
+            req.recognitionLanguages = ["it-IT", "en-US"]
+            req.regionOfInterest = CGRect(x: 0.04, y: 0.06, width: 0.92, height: 0.88)
+
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+            try? handler.perform([req])
+
+            if let observations = req.results {
+                for obs in observations {
+                    if let top = obs.topCandidates(1).first, top.confidence >= 0.60 {
+                        recognizedStrings.append(top.string)
+                    }
+                }
+            }
+        }
+
+        guard !recognizedStrings.isEmpty else { return }
+        let readyBatch = stabilizer.ingestFrameLines(recognizedStrings)
+        if !readyBatch.isEmpty {
+            onNewStabilizedCandidates(readyBatch)
+        }
+    }
+}
+
+/// Gestisce la sessione `AVCaptureSession` 1080p ad autofocus ravvicinato per leggere dal vivo tutte le app
+/// sfogliate sulla schermata Home / Libreria App del vecchio telefono senza alcuna registrazione schermo.
+@MainActor
+final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
+    @Published var discoveredApps: [InstalledAppRecord] = []
+    @Published var newlyScannedCount: Int = 0
+    @Published var latestDetectedAppName: String? = nil
+    @Published var isCameraRunning: Bool = false
+    @Published var isCameraPermissionDenied: Bool = false
+    @Published var pendingLookupsCount: Int = 0
+
+    var onLiveAppsChanged: (([InstalledAppRecord]) -> Void)? = nil
+
+    let captureSession = AVCaptureSession()
+    private var isConfigured = false
+    private var worker: CameraFrameVisionWorker? = nil
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+
+    func bootstrap(seedApps: [InstalledAppRecord]) {
+        var unique: [InstalledAppRecord] = []
+        for item in seedApps {
+            let exists = unique.contains {
+                $0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
+                    || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId)
+            }
+            if !exists {
+                unique.append(item)
+            }
+        }
+        discoveredApps = unique
+        newlyScannedCount = 0
+        latestDetectedAppName = nil
+        haptic.prepare()
+
+        Task {
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(unique)
+            if !enriched.isEmpty {
+                for rich in enriched {
+                    if let idx = self.discoveredApps.firstIndex(where: {
+                        $0.packageName.caseInsensitiveCompare(rich.packageName) == .orderedSame
+                            || ($0.appStoreId != nil && $0.appStoreId == rich.appStoreId)
+                    }) {
+                        self.discoveredApps[idx] = rich
+                    }
+                }
+            }
+        }
+    }
+
+    func startScanning() {
+        Task {
+            let status = AVCaptureDevice.authorizationStatus(for: .video)
+            let granted: Bool
+            switch status {
+            case .authorized:
+                granted = true
+            case .notDetermined:
+                granted = await AVCaptureDevice.requestAccess(for: .video)
+            default:
+                granted = false
+            }
+
+            guard granted else {
+                self.isCameraPermissionDenied = true
+                return
+            }
+            self.isCameraPermissionDenied = false
+            self.configureSessionIfNeededAndStart()
+        }
+    }
+
+    func stopScanning() {
+        let sessionRef = captureSession
+        isCameraRunning = false
+        DispatchQueue.global(qos: .utility).async {
+            if sessionRef.isRunning {
+                sessionRef.stopRunning()
+            }
+        }
+    }
+
+    func removeApp(_ app: InstalledAppRecord) {
+        discoveredApps.removeAll { $0.id == app.id }
+        onLiveAppsChanged?(discoveredApps)
+    }
+
+    private func configureSessionIfNeededAndStart() {
+        if !isConfigured {
+            let visionWorker = CameraFrameVisionWorker { [weak self] candidates in
+                Task { @MainActor [weak self] in
+                    self?.resolveIncomingCandidates(candidates)
+                }
+            }
+            self.worker = visionWorker
+
+            captureSession.beginConfiguration()
+            if captureSession.canSetSessionPreset(.hd1920x1080) {
+                captureSession.sessionPreset = .hd1920x1080
+            } else {
+                captureSession.sessionPreset = .high
+            }
+
+            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+                ?? AVCaptureDevice.default(for: .video)
+            if let device {
+                if (try? device.lockForConfiguration()) != nil {
+                    if device.isFocusModeSupported(.continuousAutoFocus) {
+                        device.focusMode = .continuousAutoFocus
+                    }
+                    if device.isAutoFocusRangeRestrictionSupported {
+                        device.autoFocusRangeRestriction = .near
+                    }
+                    if device.isExposureModeSupported(.continuousAutoExposure) {
+                        device.exposureMode = .continuousAutoExposure
+                    }
+                    if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                        device.whiteBalanceMode = .continuousAutoWhiteBalance
+                    }
+                    device.unlockForConfiguration()
+                }
+                if let input = try? AVCaptureDeviceInput(device: device),
+                   captureSession.canAddInput(input) {
+                    captureSession.addInput(input)
+                }
+            }
+
+            let videoOutput = AVCaptureVideoDataOutput()
+            videoOutput.alwaysDiscardsLateVideoFrames = true
+            videoOutput.setSampleBufferDelegate(visionWorker, queue: visionWorker.sampleQueue)
+            if captureSession.canAddOutput(videoOutput) {
+                captureSession.addOutput(videoOutput)
+            }
+            captureSession.commitConfiguration()
+            isConfigured = true
+        } else {
+            worker?.resetState()
+        }
+
+        let sessionRef = captureSession
+        isCameraRunning = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            if !sessionRef.isRunning {
+                sessionRef.startRunning()
+            }
+        }
+    }
+
+    private func resolveIncomingCandidates(_ candidates: [String]) {
+        guard !candidates.isEmpty else { return }
+        pendingLookupsCount += candidates.count
+
+        Task {
+            let resolved = await iOSInstalledAppsScanner.resolveCandidateAppLines(candidates)
+            self.pendingLookupsCount = max(0, self.pendingLookupsCount - candidates.count)
+            guard !resolved.isEmpty else { return }
+
+            var addedAny = false
+            for app in resolved {
+                let exists = self.discoveredApps.contains {
+                    $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+                }
+                if !exists {
+                    self.discoveredApps.append(app)
+                    self.newlyScannedCount += 1
+                    self.latestDetectedAppName = app.appName
+                    addedAny = true
+                }
+            }
+
+            if addedAny {
+                self.haptic.impactOccurred()
+                iOSInstalledAppsScanner.appendCustomApps(resolved)
+                self.onLiveAppsChanged?(self.discoveredApps)
+            }
+        }
     }
 }
