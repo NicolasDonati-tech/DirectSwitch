@@ -734,11 +734,11 @@ final class DirectSwitchTests: XCTestCase {
 
         XCTAssertEqual(installer.queueableApps.map(\.packageName), ["com.test.first", "com.test.second"])
         XCTAssertEqual(installer.missingCatalogApps.map(\.packageName), ["scan.missing.one", "scan.zero.id"])
-        XCTAssertEqual(installer.totalQueueCount, 2)
         XCTAssertFalse(installer.selectedIds.contains("scan.missing.one"))
         XCTAssertFalse(installer.selectedIds.contains("scan.zero.id"))
 
         installer.startAutomaticSequence()
+        XCTAssertEqual(installer.totalQueueCount, 2)
         XCTAssertTrue(installer.isRunningSequence)
         XCTAssertTrue(installer.showsFloatingBottomBar)
         XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.first")
