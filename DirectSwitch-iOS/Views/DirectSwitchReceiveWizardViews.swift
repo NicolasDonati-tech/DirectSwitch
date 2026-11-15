@@ -194,12 +194,12 @@ struct ReceivePairingStepView: View {
                             Spacer()
                             InfoCircleButton(
                                 title: "Salvataggio nelle posizioni originali",
-                                message: "Per evitare che i documenti finiscano tutti dentro la cartella dell'app DirectSwitch, autorizza le cartelle su «Su iPhone» (Download, Documenti…) o su «iCloud Drive» (puoi usare ⋯ → Seleziona → Seleziona tutto → Apri). Facoltativo: puoi anche indicare una posizione base dove creare eventuali cartelle nuove."
+                                message: "Per salvare file e cartelle direttamente nelle posizioni originali senza metterli tutti nella cartella DirectSwitch:\n\n1. Tocca «Seleziona posizione» qui sotto.\n2. Entra nella posizione desiderata (es. «Su iPhone» o «iCloud Drive»).\n3. Tocca semplicemente «Apri» in alto a destra."
                             )
                         }
 
                         if authorizedDestinations.isEmpty && fallbackDestinationRoot == nil {
-                            Text("Nessuna posizione autorizzata: i file non associati a una cartella autorizzata verranno salvati in File → Su iPhone → DirectSwitch.")
+                            Text("Seleziona la posizione dove salvare i file (es. «Su iPhone» o «iCloud Drive» → «Apri»). Senza selezione i file finiranno in File → Su iPhone → DirectSwitch.")
                                 .font(.system(size: 12))
                                 .foregroundColor(AppleTheme.orange)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -218,7 +218,7 @@ struct ReceivePairingStepView: View {
                                     }
                                 }
                                 if authorizedDestinations.count > 4 {
-                                    Text("…e altre \(authorizedDestinations.count - 4) posizioni autorizzate")
+                                    Text("…e altre \(authorizedDestinations.count - 4) posizioni selezionate")
                                         .font(.system(size: 11))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
@@ -227,7 +227,7 @@ struct ReceivePairingStepView: View {
                                         Image(systemName: "folder.badge.plus")
                                             .font(.system(size: 11))
                                             .foregroundColor(AppleTheme.blue)
-                                        Text("Cartelle nuove → \(fb)")
+                                        Text("Posizione base → \(fb)")
                                             .font(.system(size: 12, weight: .semibold))
                                             .foregroundColor(AppleTheme.blue)
                                             .lineLimit(1)
@@ -239,7 +239,7 @@ struct ReceivePairingStepView: View {
 
                         if let onAuth = onAuthorizeDestinations {
                             AppleSecondaryButton(
-                                title: authorizedDestinations.isEmpty ? "Autorizza posizioni (Su iPhone / iCloud)" : "Aggiungi altre posizioni su iPhone / iCloud",
+                                title: authorizedDestinations.isEmpty ? "Seleziona posizione (Su iPhone / iCloud)" : "Aggiungi altra posizione (Su iPhone / iCloud)",
                                 icon: "folder.badge.plus",
                                 tint: AppleTheme.blue,
                                 action: onAuth

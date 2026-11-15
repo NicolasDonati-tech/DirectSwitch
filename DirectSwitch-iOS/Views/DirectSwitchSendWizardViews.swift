@@ -21,49 +21,76 @@ enum iOSDocumentPickerMode: String, Identifiable {
     var id: String { rawValue }
 }
 
-struct iOSDocumentOrFolderPickerRepresentable: UIViewControllerRepresentable {
-    let mode: iOSDocumentPickerMode
-    let onPickedURLs: ([URL]) -> Void
-    @Environment(\.dismiss) private var dismiss
+@MainActor
+final class iOSNativeDocumentPickerPresenter: NSObject, UIDocumentPickerDelegate {
+    static let shared = iOSNativeDocumentPickerPresenter()
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
+    private var pendingCallback: (([URL]) -> Void)?
+    private var pendingCancelCallback: (() -> Void)?
 
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let contentTypes: [UTType]
-        switch mode {
-        case .files:
-            contentTypes = [.item]
-        case .receiverDestinations, .receiverFallbackRoot:
-            contentTypes = [.folder]
-        case .positions, .folders:
-            contentTypes = [.folder, .item]
+    func present(
+        mode: iOSDocumentPickerMode,
+        onPickedURLs: @escaping ([URL]) -> Void,
+        onCancelled: (() -> Void)? = nil
+    ) {
+        guard let topVC = Self.topMostViewController() else {
+            onCancelled?()
+            return
         }
+        if topVC is UIDocumentPickerViewController {
+            return
+        }
+        if topVC is UIAlertController || topVC.isBeingDismissed || topVC.presentedViewController?.isBeingDismissed == true {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 280_000_000)
+                self.present(mode: mode, onPickedURLs: onPickedURLs, onCancelled: onCancelled)
+            }
+            return
+        }
+        self.pendingCallback = onPickedURLs
+        self.pendingCancelCallback = onCancelled
+
+        let contentTypes: [UTType] = (mode == .files) ? [.item] : [.folder]
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: false)
-        picker.allowsMultipleSelection = (mode != .receiverFallbackRoot)
+        // Con [.folder] e allowsMultipleSelection = false iOS mostra subito «Apri» sulla posizione scelta.
+        picker.allowsMultipleSelection = (mode == .files)
         picker.shouldShowFileExtensions = true
-        picker.delegate = context.coordinator
-        return picker
+        picker.delegate = self
+        picker.modalPresentationStyle = .formSheet
+        topVC.present(picker, animated: true)
     }
 
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        private let parent: iOSDocumentOrFolderPickerRepresentable
-
-        init(parent: iOSDocumentOrFolderPickerRepresentable) {
-            self.parent = parent
+    nonisolated func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        let picked = urls
+        Task { @MainActor in
+            let cb = self.pendingCallback
+            self.pendingCallback = nil
+            self.pendingCancelCallback = nil
+            cb?(picked)
         }
+    }
 
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            parent.onPickedURLs(urls)
-            parent.dismiss()
+    nonisolated func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        Task { @MainActor in
+            let cancel = self.pendingCancelCallback
+            self.pendingCallback = nil
+            self.pendingCancelCallback = nil
+            cancel?()
         }
+    }
 
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            parent.dismiss()
+    private static func topMostViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        guard let root = activeScene?.windows.first(where: { $0.isKeyWindow })?.rootViewController
+            ?? activeScene?.windows.first?.rootViewController else {
+            return nil
         }
+        var top = root
+        while let presented = top.presentedViewController, !presented.isBeingDismissed {
+            top = presented
+        }
+        return top
     }
 }
 
@@ -488,6 +515,7 @@ struct SendCategoriesStepView: View {
     let isLocalProUnlocked: Bool
     let pickedDocuments: [(ManifestItem, URL)]
     let documentPrecheck: iOSDocumentsPrecheckReport?
+    var isLoadingPositions: Bool = false
     let selectedAppsCount: Int
     let totalDetectedAppsCount: Int
     let selectedAppsPreview: [InstalledAppRecord]
@@ -518,6 +546,8 @@ struct SendCategoriesStepView: View {
     var onManageApps: () -> Void
     var onAddFolders: () -> Void
     var onAddFilesOrWhatsApp: () -> Void
+    var onTogglePositionSelection: ((String, Bool) -> Void)? = nil
+    var onRemovePosition: ((String) -> Void)? = nil
     var onRefreshDocumentCheck: () -> Void
     var onClearStagedFiles: () -> Void
     var onOpenProSheet: () -> Void
@@ -1046,39 +1076,49 @@ struct SendCategoriesStepView: View {
                 if includeDocuments {
                     let activePrecheck = documentPrecheck
                     let locationSummaries = activePrecheck?.locationSummaries ?? scanSummary?.documentLocationSummaries ?? []
+                    let selectedLocationsCount = locationSummaries.filter(\.isSelected).count
                     let folderSummaries = activePrecheck?.folderSummaries ?? scanSummary?.documentFolderSummaries ?? []
                     let totalFilesFound = activePrecheck?.totalFiles ?? docsCount
                     let totalBytesFound = activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0
                     let unreadableCount = activePrecheck?.unreadableFilesCount ?? 0
                     let hasAuthorizedAnyPositions = (activePrecheck?.authorizedBookmarkFoldersCount ?? 0) > 0 || !pickedDocuments.isEmpty
+                    let hasSuIPhoneLoaded = locationSummaries.contains { $0.locationName == "Su iPhone" }
+                    let hasICloudLoaded = locationSummaries.contains { $0.locationName == "iCloud Drive" }
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 10) {
                             AppleSettingsIcon(systemName: "externaldrive.fill", color: AppleTheme.teal)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Posizioni intere sul telefono")
+                                Text("Seleziona le posizioni da trasferire")
                                     .font(.system(size: 14, weight: .bold))
                                     .foregroundColor(AppleTheme.textPrimary)
-                                Text(totalFilesFound > 0
-                                    ? "\(max(1, locationSummaries.count)) posizioni • \(totalFilesFound) file in \(folderSummaries.count) cartelle • \(DirectSwitchUIHelpers.formatBytes(totalBytesFound))"
-                                    : "Su iPhone, iCloud Drive e Drive/USB esterni"
+                                Text(isLoadingPositions
+                                    ? "Caricamento posizione in corso…"
+                                    : (selectedLocationsCount > 0
+                                        ? "\(selectedLocationsCount) posizioni selezionate • \(totalFilesFound) file in \(folderSummaries.count) cartelle • \(DirectSwitchUIHelpers.formatBytes(totalBytesFound))"
+                                        : "Spunta una o più posizioni da copiare")
                                 )
                                     .font(.system(size: 12))
-                                    .foregroundColor(AppleTheme.textSecondary)
+                                    .foregroundColor(isLoadingPositions ? AppleTheme.blue : AppleTheme.textSecondary)
                             }
                             Spacer()
-                            Button(action: onRefreshDocumentCheck) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.clockwise")
-                                    Text("Ricontrolla")
+                            if isLoadingPositions {
+                                ProgressView()
+                                    .scaleEffect(0.85)
+                            } else {
+                                Button(action: onRefreshDocumentCheck) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.clockwise")
+                                        Text("Ricontrolla")
+                                    }
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(AppleTheme.blue)
                                 }
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(AppleTheme.blue)
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                             InfoCircleButton(
-                                title: "Copiare intere posizioni (non file singoli)",
-                                message: "Per evitare di scegliere cartelle o file uno per uno:\n\n1. Tocca «Autorizza intera posizione» qui sotto.\n2. Apri la posizione da copiare (es. Su iPhone, iCloud Drive, Google Drive o chiavetta USB).\n3. Tocca ⋯ / Seleziona → «Seleziona tutto» → «Apri».\n\nDirectSwitch controllerà e copierà l'intera posizione mantenendo identiche tutte le cartelle e sottocartelle."
+                                title: "Selezionare le posizioni da trasferire",
+                                message: "Non serve fare «Seleziona tutto».\n\n• Usa la spunta qui sotto per scegliere quali posizioni trasferire.\n• Per aggiungere «Su iPhone», «iCloud Drive» o un'altra posizione (Google Drive / USB), toccala qui sotto, entra nella posizione e premi direttamente «Apri» in alto a destra."
                             )
                         }
 
@@ -1097,30 +1137,127 @@ struct SendCategoriesStepView: View {
                         }
 
                         if !locationSummaries.isEmpty {
-                            VStack(alignment: .leading, spacing: 5) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 ForEach(locationSummaries) { loc in
-                                    HStack {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(AppleTheme.green)
-                                        Text(loc.locationName)
-                                            .font(.system(size: 12, weight: .bold))
-                                            .foregroundColor(AppleTheme.textPrimary)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        Text("\(loc.folderCount) cartelle • \(loc.fileCount) file • \(DirectSwitchUIHelpers.formatBytes(loc.totalBytes))")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(AppleTheme.textSecondary)
+                                    HStack(spacing: 10) {
+                                        Button {
+                                            onTogglePositionSelection?(loc.locationId, !loc.isSelected)
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                Image(systemName: loc.isSelected ? "checkmark.circle.fill" : "circle")
+                                                    .font(.system(size: 18, weight: .semibold))
+                                                    .foregroundColor(loc.isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(loc.locationName)
+                                                        .font(.system(size: 13, weight: .bold))
+                                                        .foregroundColor(loc.isSelected ? AppleTheme.textPrimary : AppleTheme.textSecondary)
+                                                        .lineLimit(1)
+                                                    Text("\(loc.folderCount) cartelle • \(loc.fileCount) file • \(DirectSwitchUIHelpers.formatBytes(loc.totalBytes))")
+                                                        .font(.system(size: 11.5))
+                                                        .foregroundColor(AppleTheme.textSecondary)
+                                                }
+                                                Spacer(minLength: 4)
+                                            }
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        if loc.isRemovableBookmark {
+                                            Button {
+                                                onRemovePosition?(loc.locationId)
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .font(.system(size: 16))
+                                                    .foregroundColor(AppleTheme.textTertiary)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
                                     }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(loc.isSelected ? AppleTheme.blue.opacity(0.08) : AppleTheme.cardSurface.opacity(0.6))
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(loc.isSelected ? AppleTheme.blue.opacity(0.32) : AppleTheme.cardBorder, lineWidth: 0.9)
+                                    )
                                 }
                             }
                         }
 
-                        if folderSummaries.isEmpty {
-                            Text("Apri una posizione intera (es. «Su iPhone» o «iCloud Drive»), tocca Seleziona → «Seleziona tutto» → «Apri» per autorizzarla in un colpo solo con tutte le sue cartelle e file.")
-                                .font(.system(size: 12))
-                                .foregroundColor(AppleTheme.textSecondary)
-                        } else {
+                        if !hasSuIPhoneLoaded || !hasICloudLoaded {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Tocca una posizione da aggiungere (entra e premi «Apri»):")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundColor(AppleTheme.textSecondary)
+
+                                if !hasSuIPhoneLoaded {
+                                    Button(action: onAddFolders) {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "iphone")
+                                                .font(.system(size: 16, weight: .semibold))
+                                                .foregroundColor(AppleTheme.blue)
+                                                .frame(width: 24)
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text("Su iPhone")
+                                                    .font(.system(size: 13, weight: .bold))
+                                                    .foregroundColor(AppleTheme.textPrimary)
+                                                Text("Entra in «Su iPhone» e premi «Apri» in alto a destra")
+                                                    .font(.system(size: 11.5))
+                                                    .foregroundColor(AppleTheme.textSecondary)
+                                            }
+                                            Spacer()
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(.system(size: 18))
+                                                .foregroundColor(AppleTheme.blue)
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .background(AppleTheme.cardSurface)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .stroke(AppleTheme.cardBorder, lineWidth: 0.9)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                if !hasICloudLoaded {
+                                    Button(action: onAddFolders) {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "icloud.fill")
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundColor(AppleTheme.blue)
+                                                .frame(width: 24)
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text("iCloud Drive")
+                                                    .font(.system(size: 13, weight: .bold))
+                                                    .foregroundColor(AppleTheme.textPrimary)
+                                                Text("Entra in «iCloud Drive» e premi «Apri» in alto a destra")
+                                                    .font(.system(size: 11.5))
+                                                    .foregroundColor(AppleTheme.textSecondary)
+                                            }
+                                            Spacer()
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(.system(size: 18))
+                                                .foregroundColor(AppleTheme.blue)
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .background(AppleTheme.cardSurface)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .stroke(AppleTheme.cardBorder, lineWidth: 0.9)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        if !folderSummaries.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(Array(folderSummaries.prefix(6))) { folder in
                                     HStack {
@@ -1143,7 +1280,7 @@ struct SendCategoriesStepView: View {
                         }
 
                         AppleSecondaryButton(
-                            title: "Autorizza intera posizione (Su iPhone / iCloud / Drive)",
+                            title: "Aggiungi altra posizione (Drive / USB / Cartella)",
                             icon: "externaldrive.badge.plus",
                             tint: AppleTheme.blue,
                             action: onAddFolders
@@ -1161,7 +1298,7 @@ struct SendCategoriesStepView: View {
                         if hasAuthorizedAnyPositions {
                             HStack {
                                 Spacer()
-                                Button("Rimuovi posizioni autorizzate", action: onClearStagedFiles)
+                                Button("Rimuovi posizioni aggiunte", action: onClearStagedFiles)
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(AppleTheme.red)
                                     .buttonStyle(.plain)

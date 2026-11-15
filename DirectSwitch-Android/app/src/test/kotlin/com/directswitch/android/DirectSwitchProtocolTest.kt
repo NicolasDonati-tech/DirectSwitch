@@ -464,4 +464,22 @@ class DirectSwitchProtocolTest {
             PublicDownloadsSaver.sanitizedRelativeSegments("iCloud_Drive\\Azienda/Preventivi")
         )
     }
+
+    @Test
+    fun documentLocationSummaryDefaultsToSelectedAndSupportsToggling() {
+        val primary = com.directswitch.android.migrators.DocumentLocationSummary(
+            locationId = "vol:primary",
+            locationName = "Memoria interna",
+            folderCount = 4,
+            fileCount = 12,
+            totalBytes = 102400L,
+            isAccessible = true
+        )
+        assertTrue(primary.isSelected)
+        assertFalse(primary.isRemovableSaf)
+
+        val deselected = primary.copy(isSelected = false)
+        assertFalse(deselected.isSelected)
+        assertEquals("vol:primary", deselected.locationId)
+    }
 }

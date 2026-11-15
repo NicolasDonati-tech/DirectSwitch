@@ -69,8 +69,8 @@ struct DirectSwitchMainView: View {
         senderAppsCatalog.filter { !deselectedSenderAppIds.contains($0.id) }
     }
 
-    // File e archivi WhatsApp allegati + pre-controllo cartelle su iPhone
-    @State private var activeDocumentPickerMode: iOSDocumentPickerMode? = nil
+    // File e archivi WhatsApp allegati + pre-controllo posizioni su iPhone
+    @State private var isLoadingDocumentPositions: Bool = false
     @State private var pickedDocuments: [(ManifestItem, URL)] = []
     @State private var documentPrecheckReport: iOSDocumentsPrecheckReport? = nil
     @State private var pendingTransferPrecheckAlert: iOSDocumentsPrecheckReport? = nil
@@ -177,10 +177,10 @@ struct DirectSwitchMainView: View {
                                     authorizedDestinations: receiverAuthorizedDestinations,
                                     fallbackDestinationRoot: receiverFallbackRootLabel,
                                     onAuthorizeDestinations: {
-                                        activeDocumentPickerMode = .receiverDestinations
+                                        presentDocumentPicker(mode: .receiverDestinations)
                                     },
                                     onChooseFallbackRoot: {
-                                        activeDocumentPickerMode = .receiverFallbackRoot
+                                        presentDocumentPicker(mode: .receiverFallbackRoot)
                                     },
                                     onClearDestinations: {
                                         iOSDocumentsSandboxBridge.clearReceiverDestinations()
@@ -232,6 +232,7 @@ struct DirectSwitchMainView: View {
                                     isLocalProUnlocked: isProUnlocked,
                                     pickedDocuments: pickedDocuments,
                                     documentPrecheck: documentPrecheckReport,
+                                    isLoadingPositions: isLoadingDocumentPositions,
                                     selectedAppsCount: selectedSenderApps.count,
                                     totalDetectedAppsCount: senderAppsCatalog.count,
                                     selectedAppsPreview: selectedSenderApps,
@@ -262,8 +263,16 @@ struct DirectSwitchMainView: View {
                                     onDeleteTempAutoRecording: deleteTemporaryAutoRecording,
                                     onResetAppsToZero: resetSenderAppsToVerifiedOnly,
                                     onManageApps: { showSenderAppsSheet = true },
-                                    onAddFolders: { activeDocumentPickerMode = .positions },
-                                    onAddFilesOrWhatsApp: { activeDocumentPickerMode = .files },
+                                    onAddFolders: { presentDocumentPicker(mode: .positions) },
+                                    onAddFilesOrWhatsApp: { presentDocumentPicker(mode: .files) },
+                                    onTogglePositionSelection: { locId, selected in
+                                        iOSDocumentsSandboxBridge.setPositionSelected(locationId: locId, isSelected: selected)
+                                        refreshAuthorizedSummary()
+                                    },
+                                    onRemovePosition: { locId in
+                                        iOSDocumentsSandboxBridge.removeAuthorizedPosition(locationId: locId)
+                                        refreshAuthorizedSummary()
+                                    },
                                     onRefreshDocumentCheck: { refreshAuthorizedSummary() },
                                     onClearStagedFiles: {
                                         pickedDocuments.removeAll()
@@ -371,32 +380,6 @@ struct DirectSwitchMainView: View {
         .onOpenURL { incomingURL in
             handleIncomingURL(incomingURL)
         }
-        .sheet(item: $activeDocumentPickerMode) { mode in
-            iOSDocumentOrFolderPickerRepresentable(mode: mode) { urls in
-                switch mode {
-                case .receiverDestinations:
-                    _ = iOSDocumentsSandboxBridge.authorizeReceiverDestinationBookmarks(urls)
-                    let summary = iOSDocumentsSandboxBridge.receiverDestinationsSummary()
-                    receiverAuthorizedDestinations = summary.destinations
-                    receiverFallbackRootLabel = summary.fallbackRoot
-                case .receiverFallbackRoot:
-                    _ = iOSDocumentsSandboxBridge.setReceiverFallbackRootBookmark(urls)
-                    let summary = iOSDocumentsSandboxBridge.receiverDestinationsSummary()
-                    receiverAuthorizedDestinations = summary.destinations
-                    receiverFallbackRootLabel = summary.fallbackRoot
-                case .positions, .folders:
-                    let result = iOSDocumentsSandboxBridge.authorizePositionBookmarks(urls)
-                    if !result.stagedFallback.isEmpty {
-                        pickedDocuments.append(contentsOf: result.stagedFallback)
-                    }
-                    refreshAuthorizedSummary()
-                case .files:
-                    let imported = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
-                    pickedDocuments.append(contentsOf: imported)
-                    refreshAuthorizedSummary()
-                }
-            }
-        }
         .alert(
             "Controllo posizioni sul telefono",
             isPresented: Binding(
@@ -405,9 +388,9 @@ struct DirectSwitchMainView: View {
             ),
             presenting: pendingTransferPrecheckAlert
         ) { report in
-            Button("Autorizza intera posizione") {
+            Button("Seleziona posizione") {
                 pendingTransferPrecheckAlert = nil
-                activeDocumentPickerMode = .positions
+                presentDocumentPicker(mode: .positions)
             }
             if report.totalFiles > 0 {
                 Button("Continua comunque") {
@@ -559,17 +542,89 @@ struct DirectSwitchMainView: View {
         }
     }
 
+    private func presentDocumentPicker(mode: iOSDocumentPickerMode) {
+        iOSNativeDocumentPickerPresenter.shared.present(
+            mode: mode,
+            onPickedURLs: { urls in
+                guard !urls.isEmpty else { return }
+                switch mode {
+                case .receiverDestinations:
+                    Task {
+                        let summary = await Task.detached(priority: .userInitiated) {
+                            _ = iOSDocumentsSandboxBridge.authorizeReceiverDestinationBookmarks(urls)
+                            return iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+                        }.value
+                        receiverAuthorizedDestinations = summary.destinations
+                        receiverFallbackRootLabel = summary.fallbackRoot
+                    }
+                case .receiverFallbackRoot:
+                    Task {
+                        let summary = await Task.detached(priority: .userInitiated) {
+                            _ = iOSDocumentsSandboxBridge.setReceiverFallbackRootBookmark(urls)
+                            return iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+                        }.value
+                        receiverAuthorizedDestinations = summary.destinations
+                        receiverFallbackRootLabel = summary.fallbackRoot
+                    }
+                case .positions, .folders:
+                    isLoadingDocumentPositions = true
+                    let currentStaged = pickedDocuments.map(\.0)
+                    Task {
+                        let (summary, precheck) = await Task.detached(priority: .userInitiated) {
+                            _ = iOSDocumentsSandboxBridge.authorizePositionBookmarks(urls)
+                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: currentStaged)
+                            let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                                stagedItems: currentStaged,
+                                includeWhatsAppVault: false
+                            )
+                            return (sum, pre)
+                        }.value
+                        scanSummary = summary
+                        documentPrecheckReport = precheck
+                        isLoadingDocumentPositions = false
+                        if let lastAdded = precheck.locationSummaries.last {
+                            sharedVaultToast = "Posizione «\(lastAdded.locationName)» caricata (\(lastAdded.fileCount) file)"
+                        }
+                    }
+                case .files:
+                    isLoadingDocumentPositions = true
+                    let existingStaged = pickedDocuments.map(\.0)
+                    Task {
+                        let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
+                            let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
+                            let allStaged = existingStaged + imp.map(\.0)
+                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: allStaged)
+                            let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                                stagedItems: allStaged,
+                                includeWhatsAppVault: false
+                            )
+                            return (imp, sum, pre)
+                        }.value
+                        pickedDocuments.append(contentsOf: imported)
+                        scanSummary = summary
+                        documentPrecheckReport = precheck
+                        isLoadingDocumentPositions = false
+                    }
+                }
+            }
+        )
+    }
+
     private func precheckAlertMessage(for report: iOSDocumentsPrecheckReport) -> String {
+        let selectedCount = report.locationSummaries.filter(\.isSelected).count
+        if !report.locationSummaries.isEmpty && selectedCount == 0 {
+            return "Nessuna posizione è selezionata con la spunta. Seleziona almeno una posizione da trasferire nell'elenco oppure aggiungine un'altra."
+        }
         if report.totalFiles == 0 && report.unreadableFilesCount == 0 {
-            return "Nessun file trovato nelle posizioni di DirectSwitch o autorizzate. Tocca «Autorizza intera posizione», apri una posizione (es. Su iPhone o iCloud Drive) e fai Seleziona → Seleziona tutto → Apri per copiarla per intero."
+            return "Nessun file trovato nelle posizioni selezionate. Tocca «Seleziona posizione», entra nella posizione da trasferire (es. Su iPhone o iCloud Drive) e premi «Apri» in alto a destra."
         }
         if report.totalFiles == 0 && report.unreadableFilesCount > 0 {
             return "Trovati \(report.unreadableFilesCount) file non ancora scaricati o non leggibili (es. su iCloud Drive). Scaricali nell'app File prima di copiare la posizione."
         }
         if report.unreadableFilesCount > 0 {
-            return "Pronti \(report.totalFiles) file in \(max(1, report.locationSummaries.count)) posizioni (\(report.folderSummaries.count) cartelle), ma \(report.unreadableFilesCount) file risultano illeggibili o solo su iCloud e verrebbero saltati."
+            return "Pronti \(report.totalFiles) file in \(max(1, selectedCount)) posizioni selezionate (\(report.folderSummaries.count) cartelle), ma \(report.unreadableFilesCount) file risultano illeggibili o solo su iCloud e verrebbero saltati."
         }
-        return "Controllo completato: \(max(1, report.locationSummaries.count)) posizioni (\(report.totalFiles) file in \(report.folderSummaries.count) cartelle) pronte."
+        return "Controllo completato: \(max(1, selectedCount)) posizioni selezionate (\(report.totalFiles) file in \(report.folderSummaries.count) cartelle) pronte."
     }
 
     private func launchSenderTransfer() {

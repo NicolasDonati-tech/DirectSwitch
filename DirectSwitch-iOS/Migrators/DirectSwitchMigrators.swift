@@ -23,11 +23,32 @@ struct iOSDocumentFolderSummary: Sendable, Equatable, Identifiable {
 }
 
 struct iOSDocumentLocationSummary: Sendable, Equatable, Identifiable {
-    var id: String { locationName }
+    var id: String { locationId }
+    let locationId: String
     let locationName: String
     let folderCount: Int
     let fileCount: Int
     let totalBytes: Int64
+    var isSelected: Bool = true
+    var isRemovableBookmark: Bool = false
+
+    init(
+        locationId: String? = nil,
+        locationName: String,
+        folderCount: Int,
+        fileCount: Int,
+        totalBytes: Int64,
+        isSelected: Bool = true,
+        isRemovableBookmark: Bool = false
+    ) {
+        self.locationId = locationId ?? locationName
+        self.locationName = locationName
+        self.folderCount = folderCount
+        self.fileCount = fileCount
+        self.totalBytes = totalBytes
+        self.isSelected = isSelected
+        self.isRemovableBookmark = isRemovableBookmark
+    }
 }
 
 struct iOSDocumentsPrecheckReport: Sendable, Equatable {
@@ -1420,6 +1441,7 @@ enum iOSDocumentsSandboxBridge {
             let defaults = UserDefaults.standard
             var scoped: [URL] = []
             var resolvedDestinations: [ReceiverAuthorizedDestination] = []
+            var seenStdPaths: Set<String> = []
 
             let rawList = (defaults.array(forKey: receiverDestinationBookmarksKey) as? [Data]) ?? []
             var validList: [Data] = []
@@ -1431,13 +1453,15 @@ enum iOSDocumentsSandboxBridge {
                     relativeTo: nil,
                     bookmarkDataIsStale: &stale
                 ) {
+                    let stdPath = url.standardizedFileURL.path
+                    guard seenStdPaths.insert(stdPath).inserted else { continue }
                     if url.startAccessingSecurityScopedResource() {
                         scoped.append(url)
                     }
                     if let dest = buildAuthorizedDestination(for: url) {
                         resolvedDestinations.append(dest)
                     }
-                    if stale, let refreshed = try? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    if stale, let refreshed = createBookmarkDataCompat(for: url) {
                         validList.append(refreshed)
                     } else {
                         validList.append(data)
@@ -1446,6 +1470,22 @@ enum iOSDocumentsSandboxBridge {
             }
             if validList.count != rawList.count {
                 defaults.set(validList, forKey: receiverDestinationBookmarksKey)
+            }
+
+            liveSessionLock.lock()
+            let liveReceiverEntries = Array(liveSessionReceiverURLs.values)
+            let liveFallbackEntry = liveSessionFallbackRootURL
+            liveSessionLock.unlock()
+
+            for entry in liveReceiverEntries {
+                let stdPath = entry.url.standardizedFileURL.path
+                guard seenStdPaths.insert(stdPath).inserted else { continue }
+                if !entry.keepScopeOpen, entry.url.startAccessingSecurityScopedResource() {
+                    scoped.append(entry.url)
+                }
+                if let dest = buildAuthorizedDestination(for: entry.url) {
+                    resolvedDestinations.append(dest)
+                }
             }
 
             var resolvedFallback: ReceiverAuthorizedDestination? = nil
@@ -1461,10 +1501,15 @@ enum iOSDocumentsSandboxBridge {
                         scoped.append(fUrl)
                     }
                     resolvedFallback = buildAuthorizedDestination(for: fUrl)
-                    if stale, let refreshed = try? fUrl.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    if stale, let refreshed = createBookmarkDataCompat(for: fUrl) {
                         defaults.set(refreshed, forKey: receiverFallbackBookmarkKey)
                     }
                 }
+            } else if let fbEntry = liveFallbackEntry {
+                if !fbEntry.keepScopeOpen, fbEntry.url.startAccessingSecurityScopedResource() {
+                    scoped.append(fbEntry.url)
+                }
+                resolvedFallback = buildAuthorizedDestination(for: fbEntry.url)
             }
 
             return ReceiverDestinationSession(
@@ -1477,6 +1522,44 @@ enum iOSDocumentsSandboxBridge {
 
     private static let receiverDestinationBookmarksKey = "directswitch_receiver_dest_bookmarks_v1"
     private static let receiverFallbackBookmarkKey = "directswitch_receiver_fallback_bookmark_v1"
+    private static let liveSessionLock = NSLock()
+    private static var liveSessionReceiverURLs: [String: (url: URL, keepScopeOpen: Bool)] = [:]
+    private static var liveSessionFallbackRootURL: (url: URL, keepScopeOpen: Bool)? = nil
+    private static var liveSessionPositionURLs: [String: (url: URL, keepScopeOpen: Bool)] = [:]
+
+    private static func createBookmarkDataCompat(for url: URL) -> Data? {
+        if let minimal = try? url.bookmarkData(
+            options: .minimalBookmark,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        ) {
+            return minimal
+        }
+        return try? url.bookmarkData(
+            options: [],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    static func isTemporaryStagedFile(_ url: URL) -> Bool {
+        let stagingPath = stagingVaultDirectory().resolvingSymlinksInPath().path
+        let filePath = url.resolvingSymlinksInPath().path
+        return filePath.hasPrefix(stagingPath + "/")
+    }
+
+    static func coordinatedRead<T>(at url: URL, _ accessor: (URL) throws -> T) throws -> T {
+        var coordError: NSError?
+        var bodyResult: Result<T, Error>?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: url, options: [.withoutChanges], error: &coordError) { readURL in
+            bodyResult = Result { try accessor(readURL) }
+        }
+        if let res = bodyResult {
+            return try res.get()
+        }
+        return try accessor(url)
+    }
 
     private static let folderAliasGroups: [[String]] = [
         ["download", "downloads", "scaricati"],
@@ -1500,6 +1583,9 @@ enum iOSDocumentsSandboxBridge {
     }
 
     static func buildAuthorizedDestination(for url: URL) -> ReceiverAuthorizedDestination? {
+        if let vals = try? url.resourceValues(forKeys: [.isDirectoryKey]), vals.isDirectory == false {
+            return nil
+        }
         var isDir: ObjCBool = false
         let resolvedPath = url.resolvingSymlinksInPath().path
         if FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir), !isDir.boolValue {
@@ -1507,7 +1593,8 @@ enum iOSDocumentsSandboxBridge {
         }
         let classified = classifyPositionBaseFolder(for: url, isDirectory: true)
         let baseComps = sanitizedRelativeComponents(classified.baseFolder)
-        let isContainer = classified.baseFolder == "iCloud_Drive"
+        let isContainer = classified.baseFolder.isEmpty
+            || classified.baseFolder == "iCloud_Drive"
             || classified.baseFolder == "Su_iPhone"
             || classified.baseFolder == "Memoria_Locale"
 
@@ -1550,51 +1637,63 @@ enum iOSDocumentsSandboxBridge {
         var existingData = (defaults.array(forKey: receiverDestinationBookmarksKey) as? [Data]) ?? []
         var seenPaths = Set(existingData.compactMap { data -> String? in
             var stale = false
-            return (try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale))?.resolvingSymlinksInPath().path
+            return (try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale))?.standardizedFileURL.path
         })
-        for url in urls {
+        for url in urls where url.isFileURL {
             let scoped = url.startAccessingSecurityScopedResource()
-            defer {
+            if let vals = try? url.resourceValues(forKeys: [.isDirectoryKey]), vals.isDirectory == false {
                 if scoped { url.stopAccessingSecurityScopedResource() }
-            }
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
                 continue
             }
-            let path = url.resolvingSymlinksInPath().path
-            guard !seenPaths.contains(path),
-                  let bookmark = try? url.bookmarkData(
-                    options: .minimalBookmark,
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                  ) else {
-                continue
+            let stdPath = url.standardizedFileURL.path
+            if let bookmark = createBookmarkDataCompat(for: url) {
+                if seenPaths.insert(stdPath).inserted {
+                    existingData.append(bookmark)
+                }
+                liveSessionLock.lock()
+                liveSessionReceiverURLs[stdPath] = (url, false)
+                liveSessionLock.unlock()
+                if scoped { url.stopAccessingSecurityScopedResource() }
+            } else {
+                liveSessionLock.lock()
+                liveSessionReceiverURLs[stdPath] = (url, scoped)
+                liveSessionLock.unlock()
             }
-            seenPaths.insert(path)
-            existingData.append(bookmark)
         }
         defaults.set(existingData, forKey: receiverDestinationBookmarksKey)
-        return existingData.count
+        liveSessionLock.lock()
+        let total = Set(seenPaths).union(liveSessionReceiverURLs.keys).count
+        liveSessionLock.unlock()
+        return total
     }
 
     @discardableResult
     static func setReceiverFallbackRootBookmark(_ urls: [URL]) -> Bool {
-        guard let url = urls.first else { return false }
+        guard let url = urls.first, url.isFileURL else { return false }
         let scoped = url.startAccessingSecurityScopedResource()
-        defer {
+        if let vals = try? url.resourceValues(forKeys: [.isDirectoryKey]), vals.isDirectory == false {
             if scoped { url.stopAccessingSecurityScopedResource() }
-        }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue,
-              let bookmark = try? url.bookmarkData(
-                options: .minimalBookmark,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-              ) else {
             return false
         }
-        UserDefaults.standard.set(bookmark, forKey: receiverFallbackBookmarkKey)
-        return true
+        if let bookmark = createBookmarkDataCompat(for: url) {
+            UserDefaults.standard.set(bookmark, forKey: receiverFallbackBookmarkKey)
+            liveSessionLock.lock()
+            if let old = liveSessionFallbackRootURL, old.keepScopeOpen {
+                old.url.stopAccessingSecurityScopedResource()
+            }
+            liveSessionFallbackRootURL = (url, false)
+            liveSessionLock.unlock()
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            return true
+        } else {
+            liveSessionLock.lock()
+            if let old = liveSessionFallbackRootURL, old.keepScopeOpen {
+                old.url.stopAccessingSecurityScopedResource()
+            }
+            liveSessionFallbackRootURL = (url, scoped)
+            liveSessionLock.unlock()
+            return true
+        }
     }
 
     static func receiverDestinationsSummary() -> (destinations: [String], fallbackRoot: String?) {
@@ -1610,6 +1709,16 @@ enum iOSDocumentsSandboxBridge {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: receiverDestinationBookmarksKey)
         defaults.removeObject(forKey: receiverFallbackBookmarkKey)
+        liveSessionLock.lock()
+        for entry in liveSessionReceiverURLs.values where entry.keepScopeOpen {
+            entry.url.stopAccessingSecurityScopedResource()
+        }
+        liveSessionReceiverURLs.removeAll()
+        if let fb = liveSessionFallbackRootURL, fb.keepScopeOpen {
+            fb.url.stopAccessingSecurityScopedResource()
+        }
+        liveSessionFallbackRootURL = nil
+        liveSessionLock.unlock()
     }
 
     static func resolveWritableTargetDirectory(
@@ -1987,6 +2096,51 @@ enum iOSDocumentsSandboxBridge {
         }
     }
 
+    private static let deselectedPositionIdsKey = "directswitch_deselected_doc_locations_v1"
+
+    static func positionLocationId(for url: URL) -> String {
+        "pos:\(url.standardizedFileURL.path)"
+    }
+
+    static func isPositionSelected(locationId: String) -> Bool {
+        let deselected = Set(UserDefaults.standard.stringArray(forKey: deselectedPositionIdsKey) ?? [])
+        return !deselected.contains(locationId)
+    }
+
+    static func setPositionSelected(locationId: String, isSelected: Bool) {
+        var deselected = Set(UserDefaults.standard.stringArray(forKey: deselectedPositionIdsKey) ?? [])
+        if isSelected {
+            deselected.remove(locationId)
+        } else {
+            deselected.insert(locationId)
+        }
+        UserDefaults.standard.set(Array(deselected), forKey: deselectedPositionIdsKey)
+    }
+
+    static func displayPositionLabel(for url: URL, isDirectory: Bool) -> String {
+        let (baseFolder, locLabel) = classifyPositionBaseFolder(for: url, isDirectory: isDirectory)
+        if locLabel == "Su iPhone" {
+            if baseFolder.isEmpty || baseFolder == "Su_iPhone" {
+                return "Su iPhone"
+            }
+            return "Su iPhone • \(baseFolder)"
+        }
+        if locLabel.hasPrefix("iCloud Drive") {
+            if baseFolder == "iCloud_Drive" {
+                return locLabel
+            }
+            if baseFolder.hasPrefix("iCloud_Drive/") {
+                let sub = String(baseFolder.dropFirst("iCloud_Drive/".count))
+                return sub.isEmpty ? locLabel : "\(locLabel) • \(sub)"
+            }
+            return locLabel
+        }
+        if baseFolder.isEmpty || baseFolder.caseInsensitiveCompare(locLabel) == .orderedSame {
+            return locLabel
+        }
+        return "\(locLabel) • \(baseFolder)"
+    }
+
     static func authorizePositionBookmarks(_ urls: [URL]) -> (addedBookmarks: Int, stagedFallback: [(ManifestItem, URL)]) {
         let existingDatas = (UserDefaults.standard.array(forKey: folderBookmarksDefaultsKey) as? [Data]) ?? []
         var existingPaths: Set<String> = []
@@ -2002,30 +2156,38 @@ enum iOSDocumentsSandboxBridge {
         }
 
         var addedCount = 0
-        var unbookmarkedFallback: [URL] = []
-
         for url in urls where url.isFileURL {
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer {
-                if accessed { url.stopAccessingSecurityScopedResource() }
-            }
             let stdPath = url.standardizedFileURL.path
-            guard !existingPaths.contains(stdPath) else { continue }
-            if let bookmark = try? url.bookmarkData(
-                options: .minimalBookmark,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            ) {
-                cleanExistingDatas.append(bookmark)
-                existingPaths.insert(stdPath)
-                addedCount += 1
+            let locId = positionLocationId(for: url)
+            setPositionSelected(locationId: locId, isSelected: true)
+
+            let accessed = url.startAccessingSecurityScopedResource()
+            if let bookmark = createBookmarkDataCompat(for: url) {
+                if existingPaths.insert(stdPath).inserted {
+                    cleanExistingDatas.append(bookmark)
+                    addedCount += 1
+                }
+                liveSessionLock.lock()
+                if let old = liveSessionPositionURLs[stdPath], old.keepScopeOpen {
+                    old.url.stopAccessingSecurityScopedResource()
+                }
+                liveSessionPositionURLs[stdPath] = (url, false)
+                liveSessionLock.unlock()
+                if accessed {
+                    url.stopAccessingSecurityScopedResource()
+                }
             } else {
-                unbookmarkedFallback.append(url)
+                liveSessionLock.lock()
+                if let old = liveSessionPositionURLs[stdPath], old.keepScopeOpen {
+                    old.url.stopAccessingSecurityScopedResource()
+                }
+                liveSessionPositionURLs[stdPath] = (url, accessed)
+                liveSessionLock.unlock()
+                addedCount += 1
             }
         }
         UserDefaults.standard.set(cleanExistingDatas, forKey: folderBookmarksDefaultsKey)
-        let fallbackItems = unbookmarkedFallback.isEmpty ? [] : importPickedDocumentURLs(unbookmarkedFallback)
-        return (addedCount, fallbackItems)
+        return (addedCount, [])
     }
 
     @discardableResult
@@ -2034,22 +2196,54 @@ enum iOSDocumentsSandboxBridge {
     }
 
     static func persistedFolderBookmarksCount() -> Int {
-        resolveBookmarkedLocationURLs().count
+        resolveBookmarkedLocationEntries().count
+    }
+
+    static func removeAuthorizedPosition(locationId: String) {
+        let targetStdPath = locationId.hasPrefix("pos:")
+            ? String(locationId.dropFirst(4))
+            : locationId
+        let datas = (UserDefaults.standard.array(forKey: folderBookmarksDefaultsKey) as? [Data]) ?? []
+        var kept: [Data] = []
+        for data in datas {
+            var isStale = false
+            if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale),
+               url.standardizedFileURL.path == targetStdPath {
+                continue
+            }
+            kept.append(data)
+        }
+        UserDefaults.standard.set(kept, forKey: folderBookmarksDefaultsKey)
+
+        liveSessionLock.lock()
+        if let removed = liveSessionPositionURLs.removeValue(forKey: targetStdPath), removed.keepScopeOpen {
+            removed.url.stopAccessingSecurityScopedResource()
+        }
+        liveSessionLock.unlock()
+
+        var deselected = Set(UserDefaults.standard.stringArray(forKey: deselectedPositionIdsKey) ?? [])
+        deselected.remove(locationId)
+        UserDefaults.standard.set(Array(deselected), forKey: deselectedPositionIdsKey)
     }
 
     static func clearFolderBookmarks() {
         UserDefaults.standard.removeObject(forKey: folderBookmarksDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: deselectedPositionIdsKey)
+        liveSessionLock.lock()
+        for entry in liveSessionPositionURLs.values where entry.keepScopeOpen {
+            entry.url.stopAccessingSecurityScopedResource()
+        }
+        liveSessionPositionURLs.removeAll()
+        liveSessionLock.unlock()
     }
 
     static func resolveBookmarkedFolderURLs() -> [URL] {
         resolveBookmarkedLocationURLs()
     }
 
-    static func resolveBookmarkedLocationURLs() -> [URL] {
-        guard let datas = UserDefaults.standard.array(forKey: folderBookmarksDefaultsKey) as? [Data], !datas.isEmpty else {
-            return []
-        }
-        var resolvedURLs: [URL] = []
+    private static func resolveBookmarkedLocationEntries() -> [(locationId: String, url: URL, keepScopeAlreadyOpen: Bool)] {
+        let datas = (UserDefaults.standard.array(forKey: folderBookmarksDefaultsKey) as? [Data]) ?? []
+        var entries: [(locationId: String, url: URL, keepScopeAlreadyOpen: Bool)] = []
         var refreshedDatas: [Data] = []
         var seenPaths: Set<String> = []
 
@@ -2065,25 +2259,37 @@ enum iOSDocumentsSandboxBridge {
             }
             let stdPath = url.standardizedFileURL.path
             guard seenPaths.insert(stdPath).inserted else { continue }
-            let accessed = url.startAccessingSecurityScopedResource()
-            var isDir = ObjCBool(false)
-            let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            if exists {
-                resolvedURLs.append(url)
-                if isStale, let renewed = try? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) {
+            if isStale {
+                let accessed = url.startAccessingSecurityScopedResource()
+                if let renewed = createBookmarkDataCompat(for: url) {
                     refreshedDatas.append(renewed)
                 } else {
                     refreshedDatas.append(data)
                 }
+                if accessed {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            } else {
+                refreshedDatas.append(data)
             }
-            if accessed {
-                url.stopAccessingSecurityScopedResource()
-            }
+            entries.append((positionLocationId(for: url), url, false))
         }
-        if refreshedDatas.count != datas.count {
+        if !datas.isEmpty && refreshedDatas.count != datas.count {
             UserDefaults.standard.set(refreshedDatas, forKey: folderBookmarksDefaultsKey)
         }
-        return resolvedURLs
+
+        liveSessionLock.lock()
+        let liveEntries = liveSessionPositionURLs
+        liveSessionLock.unlock()
+        for (stdPath, live) in liveEntries {
+            guard seenPaths.insert(stdPath).inserted else { continue }
+            entries.append((positionLocationId(for: live.url), live.url, live.keepScopeOpen))
+        }
+        return entries
+    }
+
+    static func resolveBookmarkedLocationURLs() -> [URL] {
+        resolveBookmarkedLocationEntries().map(\.url)
     }
 
     static func prepareReadableFileForUpload(at url: URL) -> Bool {
@@ -2095,11 +2301,13 @@ enum iOSDocumentsSandboxBridge {
             .isUbiquitousItemKey,
             .ubiquitousItemDownloadingStatusKey,
             .fileSizeKey,
+            .totalFileSizeKey,
             .contentModificationDateKey
         ])
         if vals?.isUbiquitousItem == true,
            vals?.ubiquitousItemDownloadingStatus != URLUbiquitousItemDownloadingStatus.current {
             try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            return (false, 0, Date())
         }
 
         var resultSize: Int64 = 0
@@ -2112,10 +2320,9 @@ enum iOSDocumentsSandboxBridge {
                 return
             }
             let size = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0
-            guard size > 0 else { return }
             if let handle = try? FileHandle(forReadingFrom: readURL) {
                 handle.closeFile()
-                resultSize = size
+                resultSize = max(0, size)
                 resultDate = (attrs[.modificationDate] as? Date) ?? Date()
                 isReadable = true
             }
@@ -2123,12 +2330,11 @@ enum iOSDocumentsSandboxBridge {
         if isReadable {
             return (true, resultSize, resultDate)
         }
-        // Fallback diretto per URL locali senza coordinazione (es. temp dir nei test)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
             let size = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0
-            if size > 0, let handle = try? FileHandle(forReadingFrom: url) {
+            if let handle = try? FileHandle(forReadingFrom: url) {
                 handle.closeFile()
-                return (true, size, (attrs[.modificationDate] as? Date) ?? Date())
+                return (true, max(0, size), (attrs[.modificationDate] as? Date) ?? Date())
             }
         }
         return (false, 0, Date())
@@ -2195,64 +2401,142 @@ enum iOSDocumentsSandboxBridge {
     private static func appendDirectoryItems(
         rootURL: URL,
         baseFolderName: String,
+        locationId: String,
         locationLabel: String,
         skipInbox: Bool,
+        skipOwnAppDocs: Bool,
         includeWhatsAppVault: Bool,
         counter: inout Int,
         seenDedup: inout Set<String>,
         unreadableCount: inout Int,
-        collector: (ManifestItem, URL, String) -> Void
+        discoveredFolders: inout Set<String>,
+        collector: (ManifestItem, URL, String, String) -> Void
     ) {
-        let resolvedRoot = rootURL.resolvingSymlinksInPath().path
-        guard let enumerator = FileManager.default.enumerator(
-            at: rootURL,
-            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return
+        let ownDocsResolved = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.resolvingSymlinksInPath().path
+        let resourceKeys: [URLResourceKey] = [
+            .nameKey,
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isPackageKey,
+            .fileSizeKey,
+            .totalFileSizeKey,
+            .contentModificationDateKey,
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey
+        ]
+
+        func enumerateRoot(_ effectiveRoot: URL) -> Bool {
+            let resolvedRoot = effectiveRoot.resolvingSymlinksInPath().path
+            guard let enumerator = FileManager.default.enumerator(
+                at: effectiveRoot,
+                includingPropertiesForKeys: resourceKeys,
+                options: [.skipsHiddenFiles]
+            ) else {
+                return false
+            }
+            for case let childURL as URL in enumerator {
+                let childResolved = childURL.resolvingSymlinksInPath().path
+                if skipOwnAppDocs, let ownDocs = ownDocsResolved,
+                   (childResolved == ownDocs || childResolved.hasPrefix(ownDocs + "/")) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                let vals = try? childURL.resourceValues(forKeys: Set(resourceKeys))
+                let isDir = (vals?.isDirectory == true) && (vals?.isPackage != true)
+                if isDir {
+                    let subPath = childURL.resolvingSymlinksInPath().path
+                    if subPath.hasPrefix(resolvedRoot) {
+                        let subRel = String(subPath.dropFirst(resolvedRoot.count))
+                            .trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+                        if !subRel.isEmpty {
+                            let fullFolder = baseFolderName.isEmpty ? subRel : "\(baseFolderName)/\(subRel)"
+                            if !(skipInbox && (fullFolder == "Inbox" || fullFolder.hasPrefix("Inbox/") ||
+                                fullFolder == "SMS_Archivio" || fullFolder.hasPrefix("SMS_Archivio/"))) {
+                                discoveredFolders.insert(normalizedFolderString(fullFolder).lowercased())
+                            }
+                        }
+                    }
+                    continue
+                }
+                let relFolder = computeRelativeFolder(
+                    childURL: childURL,
+                    resolvedRootPath: resolvedRoot,
+                    baseFolderName: baseFolderName
+                )
+                if skipInbox && (relFolder == "Inbox" || relFolder.hasPrefix("Inbox/") ||
+                    relFolder == "SMS_Archivio" || relFolder.hasPrefix("SMS_Archivio/")) {
+                    continue
+                }
+                if vals?.isUbiquitousItem == true,
+                   vals?.ubiquitousItemDownloadingStatus != URLUbiquitousItemDownloadingStatus.current {
+                    try? FileManager.default.startDownloadingUbiquitousItem(at: childURL)
+                    unreadableCount += 1
+                    continue
+                }
+
+                let fileSize: Int64
+                if let s = vals?.fileSize ?? vals?.totalFileSize {
+                    fileSize = Int64(max(0, s))
+                } else if let attrs = try? FileManager.default.attributesOfItem(atPath: childURL.path),
+                          let num = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value {
+                    fileSize = max(0, num)
+                } else {
+                    unreadableCount += 1
+                    continue
+                }
+
+                let modDate = vals?.contentModificationDate
+                    ?? ((try? FileManager.default.attributesOfItem(atPath: childURL.path)[.modificationDate]) as? Date)
+                    ?? Date()
+
+                let safeName = (vals?.name ?? childURL.lastPathComponent)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let item = buildManifestItem(
+                    fileName: safeName.isEmpty ? "documento_\(counter).bin" : safeName,
+                    relativeFolder: relFolder,
+                    size: fileSize,
+                    modDate: modDate,
+                    counter: counter
+                )
+                if item.category == .WHATSAPP_VAULT && !includeWhatsAppVault {
+                    continue
+                }
+                discoveredFolders.insert(item.relativeAlbumOrFolder.lowercased())
+                let normKey = "\(item.relativeAlbumOrFolder.lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
+                guard seenDedup.insert(normKey).inserted else { continue }
+                counter += 1
+                collector(item, childURL, locationId, locationLabel)
+            }
+            return true
         }
-        for case let childURL as URL in enumerator {
-            let vals = try? childURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
-            if vals?.isDirectory == true { continue }
-            let relFolder = computeRelativeFolder(
-                childURL: childURL,
-                resolvedRootPath: resolvedRoot,
-                baseFolderName: baseFolderName
-            )
-            if skipInbox && (relFolder == "Inbox" || relFolder.hasPrefix("Inbox/") ||
-                relFolder == "SMS_Archivio" || relFolder.hasPrefix("SMS_Archivio/")) {
-                continue
-            }
-            let info = inspectReadableFile(at: childURL)
-            guard info.readable, info.size > 0 else {
-                unreadableCount += 1
-                continue
-            }
-            let safeName = childURL.lastPathComponent
-            let item = buildManifestItem(
-                fileName: safeName.isEmpty ? "documento_\(counter).bin" : safeName,
-                relativeFolder: relFolder,
-                size: info.size,
-                modDate: info.modDate,
-                counter: counter
-            )
-            if item.category == .WHATSAPP_VAULT && !includeWhatsAppVault {
-                continue
-            }
-            let normKey = "\(item.relativeAlbumOrFolder.lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
-            guard seenDedup.insert(normKey).inserted else { continue }
-            counter += 1
-            collector(item, childURL, locationLabel)
+
+        var didEnumerate = false
+        var coordError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: rootURL, options: [.withoutChanges], error: &coordError) { coordinatedRoot in
+            didEnumerate = enumerateRoot(coordinatedRoot)
         }
+        if !didEnumerate {
+            _ = enumerateRoot(rootURL)
+        }
+    }
+
+    private struct ScannedLocationMeta {
+        let locationId: String
+        let locationName: String
+        let isRemovableBookmark: Bool
+        var discoveredFolders: Set<String>
     }
 
     private static func scanAllLocations(
         stagedItems: [(ManifestItem, URL)],
         includeDocuments: Bool,
         includeWhatsAppVault: Bool,
-        keepSecurityScopesOpen: Bool
+        keepSecurityScopesOpen: Bool,
+        onlySelectedPositions: Bool
     ) -> (
-        entries: [(item: ManifestItem, url: URL, locationName: String)],
+        entries: [(item: ManifestItem, url: URL, locationId: String, locationName: String)],
+        locationMetas: [ScannedLocationMeta],
         unreadableCount: Int,
         authorizedPositionsCount: Int,
         localAppFilesCount: Int,
@@ -2262,35 +2546,63 @@ enum iOSDocumentsSandboxBridge {
         var seenKeys: Set<String> = []
         var unreadableCount = 0
         var localAppFiles = 0
-        var results: [(item: ManifestItem, url: URL, locationName: String)] = []
+        var results: [(item: ManifestItem, url: URL, locationId: String, locationName: String)] = []
+        var metas: [ScannedLocationMeta] = []
         var activeScopes: [URL] = []
 
-        func appendIfCategoryMatches(_ item: ManifestItem, _ url: URL, _ locLabel: String, isLocalApp: Bool = false) {
+        func appendIfCategoryMatches(
+            _ item: ManifestItem,
+            _ url: URL,
+            _ locId: String,
+            _ locLabel: String,
+            isLocalApp: Bool = false
+        ) {
             let allow = (item.category == .WHATSAPP_VAULT && includeWhatsAppVault) ||
                         (item.category != .WHATSAPP_VAULT && includeDocuments)
             guard allow else { return }
             if isLocalApp { localAppFiles += 1 }
-            results.append((item, url, locLabel))
+            results.append((item, url, locId, locLabel))
         }
 
-        if let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        let localAppId = "builtin:directswitch"
+        if !onlySelectedPositions || isPositionSelected(locationId: localAppId),
+           let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            var localFolders: Set<String> = []
             appendDirectoryItems(
                 rootURL: docsRoot,
                 baseFolderName: "",
+                locationId: localAppId,
                 locationLabel: "DirectSwitch (Su iPhone)",
                 skipInbox: true,
+                skipOwnAppDocs: false,
                 includeWhatsAppVault: includeWhatsAppVault,
                 counter: &counter,
                 seenDedup: &seenKeys,
-                unreadableCount: &unreadableCount
-            ) { item, url, loc in
-                appendIfCategoryMatches(item, url, loc, isLocalApp: true)
+                unreadableCount: &unreadableCount,
+                discoveredFolders: &localFolders
+            ) { item, url, locId, locLabel in
+                appendIfCategoryMatches(item, url, locId, locLabel, isLocalApp: true)
+            }
+            if localAppFiles > 0 {
+                metas.append(
+                    ScannedLocationMeta(
+                        locationId: localAppId,
+                        locationName: "DirectSwitch (Su iPhone)",
+                        isRemovableBookmark: false,
+                        discoveredFolders: localFolders
+                    )
+                )
             }
         }
 
-        let bookmarkedLocations = resolveBookmarkedLocationURLs()
-        for locURL in bookmarkedLocations {
-            let accessed = locURL.startAccessingSecurityScopedResource()
+        let bookmarkedLocations = resolveBookmarkedLocationEntries()
+        for locEntry in bookmarkedLocations {
+            let locId = locEntry.locationId
+            if onlySelectedPositions && !isPositionSelected(locationId: locId) {
+                continue
+            }
+            let locURL = locEntry.url
+            let accessed = locEntry.keepScopeAlreadyOpen ? false : locURL.startAccessingSecurityScopedResource()
             if accessed && keepSecurityScopesOpen {
                 activeScopes.append(locURL)
             }
@@ -2299,57 +2611,86 @@ enum iOSDocumentsSandboxBridge {
                     locURL.stopAccessingSecurityScopedResource()
                 }
             }
-            let isDir = (try? locURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            let (baseFolder, locLabel) = classifyPositionBaseFolder(for: locURL, isDirectory: isDir)
+            let isDir = ((try? locURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? true)
+            let (baseFolder, _) = classifyPositionBaseFolder(for: locURL, isDirectory: isDir)
+            let displayLabel = displayPositionLabel(for: locURL, isDirectory: isDir)
+            var locFolders: Set<String> = []
+
             if isDir {
                 appendDirectoryItems(
                     rootURL: locURL,
                     baseFolderName: baseFolder,
-                    locationLabel: locLabel,
+                    locationId: locId,
+                    locationLabel: displayLabel,
                     skipInbox: false,
+                    skipOwnAppDocs: true,
                     includeWhatsAppVault: includeWhatsAppVault,
                     counter: &counter,
                     seenDedup: &seenKeys,
-                    unreadableCount: &unreadableCount
-                ) { item, url, loc in
-                    appendIfCategoryMatches(item, url, loc)
+                    unreadableCount: &unreadableCount,
+                    discoveredFolders: &locFolders
+                ) { item, url, entryLocId, entryLocLabel in
+                    appendIfCategoryMatches(item, url, entryLocId, entryLocLabel)
                 }
             } else {
                 let info = inspectReadableFile(at: locURL)
-                guard info.readable, info.size > 0 else {
+                if info.readable {
+                    let safeName = locURL.lastPathComponent
+                    let item = buildManifestItem(
+                        fileName: safeName.isEmpty ? "documento_\(counter).bin" : safeName,
+                        relativeFolder: baseFolder,
+                        size: info.size,
+                        modDate: info.modDate,
+                        counter: counter
+                    )
+                    locFolders.insert(item.relativeAlbumOrFolder.lowercased())
+                    let normKey = "\(item.relativeAlbumOrFolder.lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
+                    if seenKeys.insert(normKey).inserted {
+                        counter += 1
+                        appendIfCategoryMatches(item, locURL, locId, displayLabel)
+                    }
+                } else {
                     unreadableCount += 1
-                    continue
                 }
-                let safeName = locURL.lastPathComponent
-                let item = buildManifestItem(
-                    fileName: safeName.isEmpty ? "documento_\(counter).bin" : safeName,
-                    relativeFolder: baseFolder,
-                    size: info.size,
-                    modDate: info.modDate,
-                    counter: counter
+            }
+
+            metas.append(
+                ScannedLocationMeta(
+                    locationId: locId,
+                    locationName: displayLabel,
+                    isRemovableBookmark: true,
+                    discoveredFolders: locFolders
                 )
-                let normKey = "\(item.relativeAlbumOrFolder.lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
+            )
+        }
+
+        let stagedLocId = "builtin:staged"
+        if !stagedItems.isEmpty && (!onlySelectedPositions || isPositionSelected(locationId: stagedLocId)) {
+            var stagedFolders: Set<String> = []
+            for (item, url) in stagedItems {
+                let normKey = "\(normalizedFolderString(item.relativeAlbumOrFolder).lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
                 if seenKeys.insert(normKey).inserted {
-                    counter += 1
-                    appendIfCategoryMatches(item, locURL, locLabel)
+                    stagedFolders.insert(normalizedFolderString(item.relativeAlbumOrFolder).lowercased())
+                    appendIfCategoryMatches(item, url, stagedLocId, "File allegati")
                 }
             }
-        }
-
-        for (item, url) in stagedItems {
-            let normKey = "\(normalizedFolderString(item.relativeAlbumOrFolder).lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
-            if seenKeys.insert(normKey).inserted {
-                appendIfCategoryMatches(item, url, "Posizioni allegate")
+            if !stagedFolders.isEmpty {
+                metas.append(
+                    ScannedLocationMeta(
+                        locationId: stagedLocId,
+                        locationName: "File allegati",
+                        isRemovableBookmark: false,
+                        discoveredFolders: stagedFolders
+                    )
+                )
             }
         }
 
-        return (results, unreadableCount, bookmarkedLocations.count, localAppFiles, activeScopes)
+        return (results, metas, unreadableCount, bookmarkedLocations.count, localAppFiles, activeScopes)
     }
 
     /// Scansione di pre-controllo sul dispositivo iOS per intere posizioni:
-    /// 1) cartella locale `DirectSwitch (Su iPhone)`
-    /// 2) intere posizioni esterne autorizzate (`Su iPhone`, `iCloud Drive`, Drive/USB)
-    /// 3) eventuali elementi di fallback.
+    /// mostra SEMPRE ogni posizione autorizzata con il suo stato di selezione, e calcola totali e cartelle sulle sole posizioni selezionate.
     static func inspectPreTransferDocuments(
         stagedItems: [ManifestItem] = [],
         includeWhatsAppVault: Bool = false
@@ -2360,25 +2701,29 @@ enum iOSDocumentsSandboxBridge {
             stagedItems: stagedPairs,
             includeDocuments: true,
             includeWhatsAppVault: includeWhatsAppVault,
-            keepSecurityScopesOpen: false
+            keepSecurityScopesOpen: false,
+            onlySelectedPositions: false
         )
 
         var groupedFolders: [String: (count: Int, bytes: Int64)] = [:]
-        var groupedLocations: [String: (folders: Set<String>, count: Int, bytes: Int64)] = [:]
-        var totalBytes: Int64 = 0
+        var statsByLocId: [String: (folders: Set<String>, count: Int, bytes: Int64)] = [:]
+        var selectedTotalFiles = 0
+        var selectedTotalBytes: Int64 = 0
 
         for entry in scan.entries {
             let folder = normalizedFolderString(entry.item.relativeAlbumOrFolder)
-            let prevF = groupedFolders[folder] ?? (0, 0)
-            groupedFolders[folder] = (prevF.count + 1, prevF.bytes + entry.item.sizeBytes)
+            var locStat = statsByLocId[entry.locationId] ?? (Set<String>(), 0, 0)
+            locStat.folders.insert(folder.lowercased())
+            locStat.count += 1
+            locStat.bytes += entry.item.sizeBytes
+            statsByLocId[entry.locationId] = locStat
 
-            var prevL = groupedLocations[entry.locationName] ?? (Set<String>(), 0, 0)
-            prevL.folders.insert(folder.lowercased())
-            prevL.count += 1
-            prevL.bytes += entry.item.sizeBytes
-            groupedLocations[entry.locationName] = prevL
-
-            totalBytes += entry.item.sizeBytes
+            if isPositionSelected(locationId: entry.locationId) {
+                let prevF = groupedFolders[folder] ?? (0, 0)
+                groupedFolders[folder] = (prevF.count + 1, prevF.bytes + entry.item.sizeBytes)
+                selectedTotalFiles += 1
+                selectedTotalBytes += entry.item.sizeBytes
+            }
         }
 
         let summaries = groupedFolders.map { key, val in
@@ -2388,21 +2733,28 @@ enum iOSDocumentsSandboxBridge {
             return lhs.folderPath.localizedCaseInsensitiveCompare(rhs.folderPath) == .orderedAscending
         }
 
-        let locSummaries = groupedLocations.map { key, val in
-            iOSDocumentLocationSummary(
-                locationName: key,
-                folderCount: val.folders.count,
-                fileCount: val.count,
-                totalBytes: val.bytes
+        var seenLocIds: Set<String> = []
+        var locSummaries: [iOSDocumentLocationSummary] = []
+        for meta in scan.locationMetas {
+            guard seenLocIds.insert(meta.locationId).inserted else { continue }
+            let stat = statsByLocId[meta.locationId] ?? (Set<String>(), 0, 0)
+            let mergedFolders = meta.discoveredFolders.union(stat.folders)
+            locSummaries.append(
+                iOSDocumentLocationSummary(
+                    locationId: meta.locationId,
+                    locationName: meta.locationName,
+                    folderCount: mergedFolders.count,
+                    fileCount: stat.count,
+                    totalBytes: stat.bytes,
+                    isSelected: isPositionSelected(locationId: meta.locationId),
+                    isRemovableBookmark: meta.isRemovableBookmark
+                )
             )
-        }.sorted { lhs, rhs in
-            if lhs.fileCount != rhs.fileCount { return lhs.fileCount > rhs.fileCount }
-            return lhs.locationName.localizedCaseInsensitiveCompare(rhs.locationName) == .orderedAscending
         }
 
         return iOSDocumentsPrecheckReport(
-            totalFiles: scan.entries.count,
-            totalBytes: totalBytes,
+            totalFiles: selectedTotalFiles,
+            totalBytes: selectedTotalBytes,
             authorizedBookmarkFoldersCount: scan.authorizedPositionsCount,
             localAppFolderFilesCount: scan.localAppFilesCount,
             unreadableFilesCount: scan.unreadableCount,
@@ -2411,7 +2763,7 @@ enum iOSDocumentsSandboxBridge {
         )
     }
 
-    /// Raccoglie tutti i documenti verificati dalle intere posizioni mantenendo attivi gli accessi security-scoped fino al termine dell'invio.
+    /// Raccoglie tutti i documenti verificati dalle posizioni selezionate mantenendo attivi gli accessi security-scoped fino al termine dell'invio.
     static func collectAllVerifiedDocumentsForTransfer(
         explicitPicked: [(ManifestItem, URL)],
         includeDocuments: Bool,
@@ -2421,7 +2773,8 @@ enum iOSDocumentsSandboxBridge {
             stagedItems: explicitPicked,
             includeDocuments: includeDocuments,
             includeWhatsAppVault: includeWhatsAppVault,
-            keepSecurityScopesOpen: true
+            keepSecurityScopesOpen: true,
+            onlySelectedPositions: true
         )
         return (scan.entries.map { ($0.item, $0.url) }, scan.activeScopes)
     }

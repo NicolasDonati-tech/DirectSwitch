@@ -57,11 +57,14 @@ data class DocumentFolderSummary(
 
 /** Riepilogo di una intera posizione di archiviazione sul telefono (es. Memoria interna, Scheda SD, Posizione SAF). */
 data class DocumentLocationSummary(
+    val locationId: String = "",
     val locationName: String,
     val folderCount: Int,
     val fileCount: Int,
     val totalBytes: Long,
-    val isAccessible: Boolean
+    val isAccessible: Boolean,
+    val isSelected: Boolean = true,
+    val isRemovableSaf: Boolean = false
 )
 
 /** Esito del controllo pre-trasferimento sulle posizioni e cartelle presenti sul telefono. */
@@ -1079,6 +1082,7 @@ object SmsSystemScanner {
 object DocumentsAndWhatsAppScanner {
     private const val PREFS_NAME = "directswitch_docs_prefs"
     private const val KEY_TREE_URIS = "persisted_doc_tree_uris"
+    private const val KEY_DESELECTED_LOCATIONS = "deselected_doc_location_ids"
 
     private val mediaGalleryExtensions = setOf(
         "jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "dng", "raw",
@@ -1135,7 +1139,12 @@ object DocumentsAndWhatsAppScanner {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val current = prefs.getStringSet(KEY_TREE_URIS, emptySet()).orEmpty().toMutableSet()
             current.add(treeUri.toString())
-            prefs.edit().putStringSet(KEY_TREE_URIS, current).apply()
+            val deselected = prefs.getStringSet(KEY_DESELECTED_LOCATIONS, emptySet()).orEmpty().toMutableSet()
+            deselected.remove("saf:$treeUri")
+            prefs.edit()
+                .putStringSet(KEY_TREE_URIS, current)
+                .putStringSet(KEY_DESELECTED_LOCATIONS, deselected)
+                .apply()
             true
         }.getOrDefault(false)
     }
@@ -1146,10 +1155,50 @@ object DocumentsAndWhatsAppScanner {
         return rawSet.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() }
     }
 
+    fun isLocationSelected(context: Context, locationId: String): Boolean {
+        if (locationId.isBlank()) return true
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val deselected = prefs.getStringSet(KEY_DESELECTED_LOCATIONS, emptySet()).orEmpty()
+        return locationId !in deselected
+    }
+
+    fun setLocationSelected(context: Context, locationId: String, selected: Boolean) {
+        if (locationId.isBlank()) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val deselected = prefs.getStringSet(KEY_DESELECTED_LOCATIONS, emptySet()).orEmpty().toMutableSet()
+        if (selected) {
+            deselected.remove(locationId)
+        } else {
+            deselected.add(locationId)
+        }
+        prefs.edit().putStringSet(KEY_DESELECTED_LOCATIONS, deselected).apply()
+    }
+
+    fun removePersistedFolderTree(context: Context, locationId: String) {
+        if (!locationId.startsWith("saf:")) return
+        val rawUri = locationId.removePrefix("saf:")
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getStringSet(KEY_TREE_URIS, emptySet()).orEmpty().toMutableSet()
+        current.remove(rawUri)
+        val deselected = prefs.getStringSet(KEY_DESELECTED_LOCATIONS, emptySet()).orEmpty().toMutableSet()
+        deselected.remove(locationId)
+        prefs.edit()
+            .putStringSet(KEY_TREE_URIS, current)
+            .putStringSet(KEY_DESELECTED_LOCATIONS, deselected)
+            .apply()
+        runCatching {
+            context.contentResolver.releasePersistableUriPermission(
+                Uri.parse(rawUri),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+    }
+
     fun clearPickedDocumentsAndFolders(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_TREE_URIS)
+            .remove(KEY_DESELECTED_LOCATIONS)
             .apply()
         runCatching { sharedVaultDir(context).deleteRecursively() }
         sharedVaultDir(context)
@@ -1249,6 +1298,7 @@ object DocumentsAndWhatsAppScanner {
 
     private data class ScannedLocationEntry(
         val entry: LocalMediaEntry,
+        val locationId: String,
         val locationName: String
     )
 
@@ -1353,6 +1403,9 @@ object DocumentsAndWhatsAppScanner {
         }
     }
 
+    private fun volumeLocationId(vol: AccessibleStorageVolume): String =
+        if (vol.isPrimary) "vol:primary" else "vol:${vol.relativePrefix.lowercase()}"
+
     fun inspectPreTransferDocuments(
         context: Context,
         includeDocuments: Boolean = true,
@@ -1363,8 +1416,10 @@ object DocumentsAndWhatsAppScanner {
             includeDocuments = includeDocuments,
             includeWhatsAppVault = includeWhatsAppVault
         )
-        val docEntries = detailed.filter { it.entry.manifestItem.category == TransferCategory.DOCUMENTS }
-        val groupedFolders = docEntries.groupBy {
+        val allDocEntries = detailed.filter { it.entry.manifestItem.category == TransferCategory.DOCUMENTS }
+        val selectedDocEntries = allDocEntries.filter { isLocationSelected(context, it.locationId) }
+
+        val groupedFolders = selectedDocEntries.groupBy {
             it.entry.manifestItem.relativeAlbumOrFolder.ifBlank { Environment.DIRECTORY_DOCUMENTS }
         }
         val summaries = groupedFolders.map { (folder, list) ->
@@ -1378,50 +1433,78 @@ object DocumentsAndWhatsAppScanner {
         val hasFullAccess = hasAllFilesAccess(context)
         val volumes = discoverStorageVolumes(context)
         val persistedTrees = getPersistedFolderTreeUris(context)
-        val byLocation = docEntries.groupBy { it.locationName }
+        val byLocationId = allDocEntries.groupBy { it.locationId }
 
         val locations = mutableListOf<DocumentLocationSummary>()
-        val coveredNames = HashSet<String>()
+        val coveredIds = HashSet<String>()
+
         for (vol in volumes) {
-            val matching = if (vol.isPrimary && !hasFullAccess) {
-                byLocation["Memoria interna (accesso parziale)"].orEmpty() + byLocation[vol.locationLabel].orEmpty()
-            } else {
-                byLocation[vol.locationLabel].orEmpty()
-            }
+            val locId = volumeLocationId(vol)
+            val matching = byLocationId[locId].orEmpty()
             val displayLabel = if (vol.isPrimary && !hasFullAccess) {
                 "Memoria interna (accesso parziale)"
             } else {
                 vol.locationLabel
             }
-            coveredNames.add(displayLabel)
-            coveredNames.add(vol.locationLabel)
-            coveredNames.add("Memoria interna (accesso parziale)")
+            coveredIds.add(locId)
             locations.add(
                 DocumentLocationSummary(
+                    locationId = locId,
                     locationName = displayLabel,
                     folderCount = matching.map { it.entry.manifestItem.relativeAlbumOrFolder.lowercase() }.distinct().size,
                     fileCount = matching.size,
                     totalBytes = matching.sumOf { it.entry.manifestItem.sizeBytes },
-                    isAccessible = hasFullAccess
+                    isAccessible = hasFullAccess,
+                    isSelected = isLocationSelected(context, locId),
+                    isRemovableSaf = false
                 )
             )
         }
-        for ((locName, list) in byLocation) {
-            if (locName in coveredNames) continue
+
+        for (treeUri in persistedTrees) {
+            val locId = "saf:$treeUri"
+            if (!coveredIds.add(locId)) continue
+            val rootDoc = runCatching { DocumentFile.fromTreeUri(context, treeUri) }.getOrNull()
+            val locLabel = if (rootDoc != null) {
+                extractSafRootPrefix(treeUri, rootDoc).second
+            } else {
+                "Posizione esterna"
+            }
+            val matching = byLocationId[locId].orEmpty()
             locations.add(
                 DocumentLocationSummary(
-                    locationName = locName,
+                    locationId = locId,
+                    locationName = locLabel,
+                    folderCount = matching.map { it.entry.manifestItem.relativeAlbumOrFolder.lowercase() }.distinct().size,
+                    fileCount = matching.size,
+                    totalBytes = matching.sumOf { it.entry.manifestItem.sizeBytes },
+                    isAccessible = rootDoc?.canRead() ?: true,
+                    isSelected = isLocationSelected(context, locId),
+                    isRemovableSaf = true
+                )
+            )
+        }
+
+        for ((locId, list) in byLocationId) {
+            if (!coveredIds.add(locId)) continue
+            val firstName = list.firstOrNull()?.locationName ?: "Archivio DirectSwitch"
+            locations.add(
+                DocumentLocationSummary(
+                    locationId = locId,
+                    locationName = firstName,
                     folderCount = list.map { it.entry.manifestItem.relativeAlbumOrFolder.lowercase() }.distinct().size,
                     fileCount = list.size,
                     totalBytes = list.sumOf { it.entry.manifestItem.sizeBytes },
-                    isAccessible = true
+                    isAccessible = true,
+                    isSelected = isLocationSelected(context, locId),
+                    isRemovableSaf = locId.startsWith("saf:")
                 )
             )
         }
 
         return DocumentPrecheckReport(
-            totalFiles = docEntries.size,
-            totalBytes = docEntries.sumOf { it.entry.manifestItem.sizeBytes },
+            totalFiles = selectedDocEntries.size,
+            totalBytes = selectedDocEntries.sumOf { it.entry.manifestItem.sizeBytes },
             hasAllFilesAccess = hasFullAccess,
             persistedFoldersCount = persistedTrees.size,
             folderSummaries = summaries,
@@ -1433,7 +1516,8 @@ object DocumentsAndWhatsAppScanner {
         return scanDocumentAndWhatsAppEntries(
             context = context,
             includeDocuments = true,
-            includeWhatsAppVault = true
+            includeWhatsAppVault = true,
+            respectSelectionFilter = false
         ).map { entry ->
             val relNorm = PublicDownloadsSaver.sanitizedRelativeSegments(entry.manifestItem.relativeAlbumOrFolder)
                 .joinToString("/")
@@ -1445,8 +1529,19 @@ object DocumentsAndWhatsAppScanner {
     fun scanDocumentAndWhatsAppEntries(
         context: Context,
         includeDocuments: Boolean,
-        includeWhatsAppVault: Boolean
-    ): List<LocalMediaEntry> = scanDetailedEntries(context, includeDocuments, includeWhatsAppVault).map { it.entry }
+        includeWhatsAppVault: Boolean,
+        respectSelectionFilter: Boolean = true
+    ): List<LocalMediaEntry> {
+        val detailed = scanDetailedEntries(context, includeDocuments, includeWhatsAppVault)
+        return if (respectSelectionFilter) {
+            detailed.filter {
+                it.entry.manifestItem.category == TransferCategory.WHATSAPP_VAULT ||
+                    isLocationSelected(context, it.locationId)
+            }.map { it.entry }
+        } else {
+            detailed.map { it.entry }
+        }
+    }
 
     private fun scanDetailedEntries(
         context: Context,
@@ -1502,6 +1597,7 @@ object DocumentsAndWhatsAppScanner {
                         ),
                         contentUri = Uri.fromFile(file)
                     ),
+                    locationId = "vault:shared",
                     locationName = "Archivio DirectSwitch"
                 )
             )
@@ -1512,6 +1608,7 @@ object DocumentsAndWhatsAppScanner {
             val rootDoc = runCatching { DocumentFile.fromTreeUri(context, treeUri) }.getOrNull() ?: continue
             if (!rootDoc.exists() || !rootDoc.canRead()) continue
             val (rootPrefix, locLabel) = extractSafRootPrefix(treeUri, rootDoc)
+            val safLocId = "saf:$treeUri"
 
             fun walkTree(dir: DocumentFile, currentRelFolder: String) {
                 for (child in dir.listFiles()) {
@@ -1544,6 +1641,7 @@ object DocumentsAndWhatsAppScanner {
                                     ),
                                     contentUri = child.uri
                                 ),
+                                locationId = safLocId,
                                 locationName = locLabel
                             )
                         )
@@ -1558,6 +1656,7 @@ object DocumentsAndWhatsAppScanner {
             val excludedRootDirs = setOf("android", "lost.dir", ".thumbnails", ".trash")
             val galleryRoots = setOf("dcim", "pictures", "movies")
             for (vol in discoverStorageVolumes(context)) {
+                val volLocId = volumeLocationId(vol)
                 val storagePathPrefix = vol.rootDir.absolutePath.trimEnd('/') + "/"
                 val visitedCanonicalDirs = HashSet<String>()
 
@@ -1613,6 +1712,7 @@ object DocumentsAndWhatsAppScanner {
                                         ),
                                         contentUri = Uri.fromFile(entry)
                                     ),
+                                    locationId = volLocId,
                                     locationName = vol.locationLabel
                                 )
                             )
@@ -1705,6 +1805,7 @@ object DocumentsAndWhatsAppScanner {
                                     ),
                                     contentUri = ContentUris.withAppendedId(filesUri, id)
                                 ),
+                                locationId = "vol:primary",
                                 locationName = "Memoria interna (accesso parziale)"
                             )
                         )

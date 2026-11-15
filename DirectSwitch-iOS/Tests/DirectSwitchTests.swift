@@ -995,4 +995,71 @@ final class DirectSwitchTests: XCTestCase {
         ))
         session.close()
     }
+
+    func testSelectablePositionsLoadEvenWhenEmptyFilterTransferAndProtectRealFiles() throws {
+        let fm = FileManager.default
+        let tempBase = fm.temporaryDirectory.appendingPathComponent("DS_SelectPos_\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer {
+            iOSDocumentsSandboxBridge.clearAllPickedDocumentsAndBookmarks()
+            try? fm.removeItem(at: tempBase)
+        }
+
+        let posLavoro = tempBase.appendingPathComponent("Posizione_Lavoro", isDirectory: true)
+        let posVuota = tempBase.appendingPathComponent("Posizione_Vuota", isDirectory: true)
+        try fm.createDirectory(at: posLavoro.appendingPathComponent("Contratti"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: posVuota, withIntermediateDirectories: true)
+
+        let realUserFile = posLavoro.appendingPathComponent("Contratti/contratto_2026.pdf")
+        try Data("CONTRATTO_VERO".utf8).write(to: realUserFile)
+
+        // I file reali dell'utente NON devono mai essere considerati temporanei da cancellare a fine invio
+        XCTAssertFalse(iOSDocumentsSandboxBridge.isTemporaryStagedFile(realUserFile))
+
+        let authResult = iOSDocumentsSandboxBridge.authorizePositionBookmarks([posLavoro, posVuota])
+        XCTAssertEqual(authResult.addedBookmarks, 2)
+        XCTAssertTrue(authResult.stagedFallback.isEmpty)
+
+        // Entrambe le posizioni (anche quella con 0 file) devono comparire subito in locationSummaries ed essere selezionate
+        let initialReport = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: [], includeWhatsAppVault: false)
+        let lavoroLoc = try XCTUnwrap(initialReport.locationSummaries.first(where: { $0.locationName.contains("Posizione_Lavoro") }))
+        let vuotaLoc = try XCTUnwrap(initialReport.locationSummaries.first(where: { $0.locationName.contains("Posizione_Vuota") }))
+        XCTAssertTrue(lavoroLoc.isSelected)
+        XCTAssertTrue(lavoroLoc.isRemovableBookmark)
+        XCTAssertEqual(lavoroLoc.fileCount, 1)
+        XCTAssertTrue(vuotaLoc.isSelected)
+        XCTAssertEqual(vuotaLoc.fileCount, 0)
+
+        let initialCollected = iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
+            explicitPicked: [],
+            includeDocuments: true,
+            includeWhatsAppVault: false
+        )
+        for s in initialCollected.activeSecurityScopes { s.stopAccessingSecurityScopedResource() }
+        XCTAssertTrue(initialCollected.items.contains(where: { $0.0.fileName == "contratto_2026.pdf" }))
+
+        // Deselezionando Posizione_Lavoro, resta visibile nell'elenco con isSelected = false ma viene esclusa dall'invio
+        iOSDocumentsSandboxBridge.setPositionSelected(locationId: lavoroLoc.locationId, isSelected: false)
+        let deselectedReport = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: [], includeWhatsAppVault: false)
+        let lavoroAfterDeselect = try XCTUnwrap(deselectedReport.locationSummaries.first(where: { $0.locationId == lavoroLoc.locationId }))
+        XCTAssertFalse(lavoroAfterDeselect.isSelected)
+
+        let filteredCollected = iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
+            explicitPicked: [],
+            includeDocuments: true,
+            includeWhatsAppVault: false
+        )
+        for s in filteredCollected.activeSecurityScopes { s.stopAccessingSecurityScopedResource() }
+        XCTAssertFalse(filteredCollected.items.contains(where: { $0.0.fileName == "contratto_2026.pdf" }))
+
+        // Rimozione singola della posizione vuota
+        iOSDocumentsSandboxBridge.removeAuthorizedPosition(locationId: vuotaLoc.locationId)
+        let afterRemoveReport = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: [], includeWhatsAppVault: false)
+        XCTAssertNil(afterRemoveReport.locationSummaries.first(where: { $0.locationId == vuotaLoc.locationId }))
+
+        // Verifica che la radice «Su iPhone» (File Provider Storage) sia trattata come contenitore sul ricevente
+        let onIPhoneRoot = URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/AppGroup/ABC/File Provider Storage")
+        let rootDest = try XCTUnwrap(iOSDocumentsSandboxBridge.buildAuthorizedDestination(for: onIPhoneRoot))
+        XCTAssertTrue(rootDest.isContainerRoot)
+        XCTAssertEqual(rootDest.displayRoot, "Su iPhone")
+    }
 }

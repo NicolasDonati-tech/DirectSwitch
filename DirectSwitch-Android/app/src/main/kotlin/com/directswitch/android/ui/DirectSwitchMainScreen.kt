@@ -654,6 +654,22 @@ fun DirectSwitchMainScreen(
                             onUpdateCategories = { categories = it },
                             onPickDocumentsOrWhatsApp = { documentPickerLauncher.launch(arrayOf("*/*")) },
                             onPickFolderTree = { folderTreePickerLauncher.launch(null) },
+                            onToggleLocationSelection = { locId, selected ->
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        DocumentsAndWhatsAppScanner.setLocationSelected(context, locId, selected)
+                                    }
+                                    scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+                                }
+                            },
+                            onRemoveSafLocation = { locId ->
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        DocumentsAndWhatsAppScanner.removePersistedFolderTree(context, locId)
+                                    }
+                                    scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+                                }
+                            },
                             onRefreshDocumentCheck = {
                                 scope.launch {
                                     scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
@@ -724,7 +740,9 @@ fun DirectSwitchMainScreen(
     val activePrecheckTarget = pairedTargetPayload
     if (activePrecheck != null && activePrecheckTarget != null) {
         val missingAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !activePrecheck.hasAllFilesAccess
-        val accessibleLocations = activePrecheck.locationSummaries.filter { it.isAccessible }
+        val selectedLocations = activePrecheck.locationSummaries.filter { it.isSelected }
+        val accessibleLocations = selectedLocations.filter { it.isAccessible }
+        val noneSelected = activePrecheck.locationSummaries.isNotEmpty() && selectedLocations.isEmpty()
         AlertDialog(
             onDismissRequest = { pendingDocPrecheckReport = null },
             containerColor = DirectSwitchTheme.cardSurface,
@@ -739,22 +757,25 @@ fun DirectSwitchMainScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = when {
+                            noneSelected ->
+                                "Nessuna posizione è selezionata con la spunta. Seleziona almeno una posizione da trasferire nell'elenco oppure aggiungine un'altra."
                             missingAllFiles ->
                                 "Per leggere e copiare le posizioni intere del telefono (Memoria interna, Download, Documenti, Scheda SD) ricreandole identiche sul nuovo telefono, attiva «Accesso a tutti i file»."
                             activePrecheck.totalFiles == 0 ->
-                                "Nessun documento o file rilevato nelle posizioni del telefono al momento. Puoi autorizzare un'altra posizione (es. SD, USB o Drive) oppure continuare comunque."
+                                "Nessun documento o file rilevato nelle posizioni selezionate al momento. Puoi aggiungere un'altra posizione (es. SD, USB o Drive) oppure continuare comunque."
                             else ->
-                                "Pronte ${maxOf(1, accessibleLocations.size)} posizioni (${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle)."
+                                "Pronte ${maxOf(1, accessibleLocations.size)} posizioni selezionate (${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle)."
                         },
                         fontSize = 13.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
                     if (activePrecheck.locationSummaries.isNotEmpty()) {
                         Text(
-                            text = "Posizioni rilevate: " +
+                            text = "Posizioni: " +
                                 activePrecheck.locationSummaries.joinToString(" • ") {
-                                    if (it.isAccessible) "${it.locationName} (${it.fileCount} file)"
-                                    else "${it.locationName} (accesso richiesto)"
+                                    val prefix = if (it.isSelected) "✓ " else "○ "
+                                    if (it.isAccessible) "$prefix${it.locationName} (${it.fileCount} file)"
+                                    else "$prefix${it.locationName} (accesso richiesto)"
                                 },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
@@ -1429,6 +1450,8 @@ private fun SenderCategoriesWizardView(
     onUpdateCategories: (CategorySelectionState) -> Unit,
     onPickDocumentsOrWhatsApp: () -> Unit,
     onPickFolderTree: () -> Unit,
+    onToggleLocationSelection: (String, Boolean) -> Unit,
+    onRemoveSafLocation: (String) -> Unit,
     onRefreshDocumentCheck: () -> Unit,
     onClearPickedDocuments: () -> Unit,
     onOpenProSheet: () -> Unit,
@@ -1642,6 +1665,7 @@ private fun SenderCategoriesWizardView(
         val wizardContext = LocalContext.current
         val folderSummaries = summary?.documentFolderSummaries.orEmpty()
         val locationSummaries = summary?.documentLocationSummaries.orEmpty()
+        val selectedLocationsCount = locationSummaries.count { it.isSelected }
         val hasAllFiles = summary?.hasAllFilesAccess
             ?: DocumentsAndWhatsAppScanner.hasAllFilesAccess(wizardContext)
         val hasPickedLocations = !vaultStatusNote.isNullOrBlank() ||
@@ -1661,14 +1685,18 @@ private fun SenderCategoriesWizardView(
                     AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.teal)
                     Column {
                         Text(
-                            text = "Posizioni intere sul telefono",
+                            text = "Seleziona le posizioni da trasferire",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
                             text = if (summary != null) {
-                                "${maxOf(1, locationSummaries.size)} posizioni • ${summary.documentsCount} file in ${folderSummaries.size} cartelle • ${formatMb(summary.documentsBytes)}"
+                                if (selectedLocationsCount > 0) {
+                                    "$selectedLocationsCount posizioni selezionate • ${summary.documentsCount} file in ${folderSummaries.size} cartelle • ${formatMb(summary.documentsBytes)}"
+                                } else {
+                                    "Spunta una o più posizioni da copiare"
+                                }
                             } else {
                                 "Scansione posizioni in corso..."
                             },
@@ -1719,7 +1747,7 @@ private fun SenderCategoriesWizardView(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = "Accesso completo non attivo: tocca per autorizzare «Accesso a tutti i file» e copiare intere posizioni (Memoria interna, Download, Documenti, Scheda SD).",
+                            text = "Accesso completo non attivo: tocca per autorizzare «Accesso a tutti i file» e leggere intere posizioni (Memoria interna, Download, Documenti, Scheda SD).",
                             fontSize = 12.sp,
                             lineHeight = 16.sp,
                             color = DirectSwitchTheme.textPrimary,
@@ -1735,25 +1763,78 @@ private fun SenderCategoriesWizardView(
             }
 
             if (locationSummaries.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     locationSummaries.forEach { loc ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = loc.locationId.isNotBlank()) {
+                                    onToggleLocationSelection(loc.locationId, !loc.isSelected)
+                                },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (loc.isSelected) {
+                                DirectSwitchTheme.blue.copy(alpha = 0.08f)
+                            } else {
+                                DirectSwitchTheme.cardSurface
+                            },
+                            border = BorderStroke(
+                                1.dp,
+                                if (loc.isSelected) DirectSwitchTheme.blue.copy(alpha = 0.35f) else DirectSwitchTheme.hairline
+                            )
                         ) {
-                            Text(
-                                text = (if (loc.isAccessible) "✓ " else "⚠ ") + loc.locationName,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (loc.isAccessible) DirectSwitchTheme.textPrimary else DirectSwitchTheme.orange,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                text = "${loc.folderCount} cartelle • ${loc.fileCount} file • ${formatMb(loc.totalBytes)}",
-                                fontSize = 12.sp,
-                                color = DirectSwitchTheme.textSecondary
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                if (loc.isSelected) {
+                                    Icon(
+                                        Icons.Filled.CheckCircle,
+                                        contentDescription = "Selezionata",
+                                        tint = DirectSwitchTheme.blue,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .border(
+                                                1.6.dp,
+                                                DirectSwitchTheme.textSecondary.copy(alpha = 0.55f),
+                                                CircleShape
+                                            )
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = (if (!loc.isAccessible) "⚠ " else "") + loc.locationName,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when {
+                                            !loc.isSelected -> DirectSwitchTheme.textSecondary
+                                            !loc.isAccessible -> DirectSwitchTheme.orange
+                                            else -> DirectSwitchTheme.textPrimary
+                                        }
+                                    )
+                                    Text(
+                                        text = "${loc.folderCount} cartelle • ${loc.fileCount} file • ${formatMb(loc.totalBytes)}",
+                                        fontSize = 11.5.sp,
+                                        color = DirectSwitchTheme.textSecondary
+                                    )
+                                }
+                                if (loc.isRemovableSaf && loc.locationId.isNotBlank()) {
+                                    Icon(
+                                        Icons.Filled.Close,
+                                        contentDescription = "Rimuovi posizione",
+                                        tint = DirectSwitchTheme.textSecondary,
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .clickable { onRemoveSafLocation(loc.locationId) }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1761,7 +1842,7 @@ private fun SenderCategoriesWizardView(
 
             if (folderSummaries.isEmpty()) {
                 Text(
-                    text = "Attiva «Accesso a tutti i file» qui sopra per includere l'intera memoria del telefono, oppure autorizza una posizione esterna (SD / USB / Drive).",
+                    text = "Spunta le posizioni da trasferire qui sopra, oppure aggiungi una posizione esterna (SD / USB / Drive).",
                     fontSize = 12.sp,
                     color = DirectSwitchTheme.textSecondary
                 )
@@ -1808,7 +1889,7 @@ private fun SenderCategoriesWizardView(
             }
 
             DirectSwitchSecondaryButton(
-                text = "Autorizza un'altra posizione (SD / USB / Drive)",
+                text = "Aggiungi altra posizione (SD / USB / Drive)",
                 onClick = onPickFolderTree
             )
             if (hasPickedLocations) {
@@ -1817,7 +1898,7 @@ private fun SenderCategoriesWizardView(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "Rimuovi posizioni esterne autorizzate",
+                        text = "Rimuovi posizioni esterne aggiunte",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.red

@@ -2109,7 +2109,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 importedSms = report.importedSmsCount
                 skippedDuplicates = report.skippedDuplicatesCount
             }
-            for docURL in succeededDocURLs {
+            for docURL in succeededDocURLs where iOSDocumentsSandboxBridge.isTemporaryStagedFile(docURL) {
                 try? FileManager.default.removeItem(at: docURL)
             }
             currentItemName = ""
@@ -2208,7 +2208,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         }
 
         let (plainBytes, sha256Hex) = try await Task.detached(priority: .userInitiated) {
-            try DirectSwitchCrypto.encryptFileCSGCM1(inputURL: plainFileURL, outputURL: tempEncURL, key: key)
+            try iOSDocumentsSandboxBridge.coordinatedRead(at: plainFileURL) { readURL in
+                try DirectSwitchCrypto.encryptFileCSGCM1(inputURL: readURL, outputURL: tempEncURL, key: key)
+            }
         }.value
 
         guard let putUrl = URL(string: "\(baseUrl)\(endpointPath)") else {
