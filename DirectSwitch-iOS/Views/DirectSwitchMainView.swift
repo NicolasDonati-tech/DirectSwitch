@@ -1763,48 +1763,7 @@ private struct DirectSwitchTransferProgressView: View {
                 }
 
                 if isReceiverMode && transport.isCompleted && ((scope.documents && transport.completedItems > 0) || !transport.receivedDocumentFolders.isEmpty || transport.importedSms > 0) {
-                    let sortedFolders = transport.receivedDocumentFolders.sorted { $0.key < $1.key }
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "folder.fill")
-                                .foregroundColor(AppleTheme.blue)
-                            Text("Cartelle e file salvati in **File → Su iPhone → DirectSwitch** mantenendo le cartelle originali:")
-                                .font(.system(size: 13))
-                                .foregroundColor(AppleTheme.textSecondary)
-                            Spacer()
-                        }
-
-                        if !sortedFolders.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(Array(sortedFolders.prefix(12)), id: \.key) { entry in
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "folder.badge.plus")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(AppleTheme.blue)
-                                        Text(entry.key)
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundColor(AppleTheme.textPrimary)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                        Spacer()
-                                        Text("\(entry.value) file")
-                                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                            .foregroundColor(AppleTheme.textSecondary)
-                                    }
-                                    .padding(.vertical, 5)
-                                    .padding(.horizontal, 10)
-                                    .background(AppleTheme.fill.opacity(0.6))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                }
-                                if sortedFolders.count > 12 {
-                                    Text("…e altre \(sortedFolders.count - 12) cartelle in File → Su iPhone → DirectSwitch")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(AppleTheme.textSecondary)
-                                }
-                            }
-                        }
-                    }
-                    .appleCard(padding: 14)
+                    receivedDocumentFoldersCard
                 }
 
                 if transport.gatedPreviewCount > 0 && !isProUnlocked {
@@ -1953,6 +1912,51 @@ private struct DirectSwitchTransferProgressView: View {
                 tint: AppleTheme.orange
             ) {
                 DirectSwitchTransportViewModel.openAppSettings()
+            }
+        }
+        .appleCard(padding: 14)
+    }
+
+    private var receivedDocumentFoldersCard: some View {
+        let sortedFolders = transport.receivedDocumentFolders.sorted { $0.key < $1.key }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "folder.fill")
+                    .foregroundColor(AppleTheme.blue)
+                Text("Cartelle e file salvati in **File → Su iPhone → DirectSwitch** mantenendo le cartelle originali:")
+                    .font(.system(size: 13))
+                    .foregroundColor(AppleTheme.textSecondary)
+                Spacer()
+            }
+
+            if !sortedFolders.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(sortedFolders.prefix(12)), id: \.key) { entry in
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(.system(size: 12))
+                                .foregroundColor(AppleTheme.blue)
+                            Text(entry.key)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Text("\(entry.value) file")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundColor(AppleTheme.textSecondary)
+                        }
+                        .padding(.vertical, 5)
+                        .padding(.horizontal, 10)
+                        .background(AppleTheme.inputSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    if sortedFolders.count > 12 {
+                        Text("…e altre \(sortedFolders.count - 12) cartelle in File → Su iPhone → DirectSwitch")
+                            .font(.system(size: 12))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                }
             }
         }
         .appleCard(padding: 14)
