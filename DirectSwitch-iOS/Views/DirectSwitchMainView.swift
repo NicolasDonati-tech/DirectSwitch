@@ -103,6 +103,9 @@ struct DirectSwitchMainView: View {
             if isDedicatedWhatsAppScreenActive {
                 return "Chat WhatsApp"
             }
+            if isReceiverMode && transport.isCompleted && transport.activeTransferScope.isAppsOnly {
+                return "App pronte"
+            }
             return transport.isCompleted ? "Completato" : "Copia dati"
         }
     }
@@ -1016,7 +1019,31 @@ private struct DirectSwitchTransferProgressView: View {
         return transport.isCompleted && transport.pendingNativeWhatsAppMigration
     }
 
+    private var isReceiverAppsPhase: Bool {
+        isReceiverMode && transport.isCompleted && scope.apps
+    }
+
+    private var isReceiverAppsOnlyPhase: Bool {
+        isReceiverAppsPhase && scope.isAppsOnly
+    }
+
+    private var queueableAppIdsSet: Set<String> {
+        Set(appInstaller.queueableApps.map(\.id))
+    }
+
+    private var handledQueueableAppsCount: Int {
+        let handled = appInstaller.alreadyInstalledIds
+            .union(appInstaller.activeDownloadingIds)
+            .union(appInstaller.completedIds)
+        return handled.intersection(queueableAppIdsSet).count
+    }
+
     private var progressFraction: Double {
+        if isReceiverAppsOnlyPhase {
+            let total = appInstaller.queueableApps.count
+            guard total > 0 else { return 0.0 }
+            return min(1.0, max(0.0, Double(handledQueueableAppsCount) / Double(total)))
+        }
         if transport.isCompleted { return 1.0 }
         if transport.totalBytesCount > 0 {
             guard transport.transferredBytesCount > 0 else { return 0.0 }
@@ -1130,8 +1157,8 @@ private struct DirectSwitchTransferProgressView: View {
                     id: "apps",
                     icon: "square.grid.2x2.fill",
                     color: AppleTheme.blue,
-                    title: isReceiverMode ? "App ricevute" : "App inviate al nuovo telefono",
-                    value: "\(countVal)"
+                    title: isReceiverMode ? "Elenco App ricevute" : "App inviate al nuovo telefono",
+                    value: isReceiverMode ? "\(countVal) pronte al download" : "\(countVal)"
                 )
             )
         }
@@ -1400,27 +1427,72 @@ private struct DirectSwitchTransferProgressView: View {
             VStack(spacing: 18) {
                 VStack(spacing: 10) {
                     if transport.isCompleted {
-                        ZStack {
-                            Circle()
-                                .fill(AppleTheme.green.opacity(0.16))
-                                .frame(width: 68, height: 68)
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 40, weight: .semibold))
-                                .foregroundColor(AppleTheme.green)
+                        if isReceiverAppsOnlyPhase {
+                            let allAppsHandled = !appInstaller.queueableApps.isEmpty && handledQueueableAppsCount >= appInstaller.queueableApps.count
+                            ZStack {
+                                Circle()
+                                    .fill((allAppsHandled ? AppleTheme.green : AppleTheme.blue).opacity(0.16))
+                                    .frame(width: 68, height: 68)
+                                Image(systemName: allAppsHandled ? "checkmark.circle.fill" : "arrow.down.app.fill")
+                                    .font(.system(size: 36, weight: .semibold))
+                                    .foregroundColor(allAppsHandled ? AppleTheme.green : AppleTheme.blue)
+                            }
+                            .padding(.top, 14)
+
+                            Text(allAppsHandled ? "Tutte le App avviate su iPhone" : "App ricevute — Pronte da scaricare")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                                .multilineTextAlignment(.center)
+
+                            Text("Hai ricevuto l'elenco di \(transport.receivedInstalledApps.count) app dal vecchio telefono. Segui i 2 passaggi qui sotto e tocca «Fatto» per sbloccare il download.")
+                                .font(.system(size: 13.5))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 12)
+                        } else if isReceiverAppsPhase {
+                            ZStack {
+                                Circle()
+                                    .fill(AppleTheme.green.opacity(0.16))
+                                    .frame(width: 68, height: 68)
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 40, weight: .semibold))
+                                    .foregroundColor(AppleTheme.green)
+                            }
+                            .padding(.top, 14)
+
+                            Text("Dati salvati • App pronte da scaricare")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                                .multilineTextAlignment(.center)
+
+                            Text("Le altre voci selezionate sono state copiate su questo iPhone. Completa la guida qui sotto per scaricare le \(transport.receivedInstalledApps.count) app ricevute.")
+                                .font(.system(size: 13.5))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 12)
+                        } else {
+                            ZStack {
+                                Circle()
+                                    .fill(AppleTheme.green.opacity(0.16))
+                                    .frame(width: 68, height: 68)
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 40, weight: .semibold))
+                                    .foregroundColor(AppleTheme.green)
+                            }
+                            .padding(.top, 14)
+
+                            Text("Trasferimento completato")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+
+                            Text(isReceiverMode
+                                 ? "Le voci selezionate sono pronte su questo iPhone"
+                                 : "Le voci selezionate sono state copiate su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)")
+                                .font(.system(size: 14))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 12)
                         }
-                        .padding(.top, 14)
-
-                        Text("Trasferimento completato")
-                            .font(.system(size: 24, weight: .bold))
-                            .foregroundColor(AppleTheme.textPrimary)
-
-                        Text(isReceiverMode
-                             ? "Le voci selezionate sono pronte su questo iPhone"
-                             : "Le voci selezionate sono state copiate su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)")
-                            .font(.system(size: 14))
-                            .foregroundColor(AppleTheme.textSecondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 12)
                     } else {
                         DirectSwitchAppleEmblem(size: 68)
                             .padding(.top, 14)
@@ -1467,14 +1539,42 @@ private struct DirectSwitchTransferProgressView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
+                    let isBarCompleteGreen = isReceiverAppsOnlyPhase
+                        ? (!appInstaller.queueableApps.isEmpty && handledQueueableAppsCount >= appInstaller.queueableApps.count)
+                        : transport.isCompleted
+
                     HStack(alignment: .firstTextBaseline) {
-                        Text("\(percentageInt)%")
-                            .font(.system(size: 32, weight: .bold, design: .rounded))
-                            .foregroundColor(transport.isCompleted ? AppleTheme.green : AppleTheme.textPrimary)
+                        if isReceiverAppsOnlyPhase && appInstaller.queueableApps.isEmpty {
+                            Text("Elenco ricevuto")
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
+                                .foregroundColor(AppleTheme.blue)
+                        } else {
+                            Text("\(percentageInt)%")
+                                .font(.system(size: 32, weight: .bold, design: .rounded))
+                                .foregroundColor(isBarCompleteGreen ? AppleTheme.green : (isReceiverAppsOnlyPhase ? AppleTheme.blue : AppleTheme.textPrimary))
+                        }
 
                         Spacer()
 
-                        if transport.speedMegabytesPerSec > 0.05 && !transport.isCompleted {
+                        if isReceiverAppsOnlyPhase {
+                            Text(appInstaller.isRunningSequence
+                                 ? "Download in coda"
+                                 : (isBarCompleteGreen ? "App avviate ✓" : "Pronte da scaricare"))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(isBarCompleteGreen ? AppleTheme.green : AppleTheme.blue)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background((isBarCompleteGreen ? AppleTheme.green : AppleTheme.blue).opacity(0.10))
+                                .clipShape(Capsule())
+                        } else if isReceiverAppsPhase {
+                            Text("Dati copiati • \(handledQueueableAppsCount)/\(appInstaller.queueableApps.count) app")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(AppleTheme.blue)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(AppleTheme.blue.opacity(0.10))
+                                .clipShape(Capsule())
+                        } else if transport.speedMegabytesPerSec > 0.05 && !transport.isCompleted {
                             Text(String(format: "%.1f MB/s", transport.speedMegabytesPerSec))
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(AppleTheme.blue)
@@ -1492,7 +1592,7 @@ private struct DirectSwitchTransferProgressView: View {
                                 .frame(height: 10)
 
                             Capsule()
-                                .fill(transport.isCompleted ? AppleTheme.green : AppleTheme.blue)
+                                .fill(isBarCompleteGreen ? AppleTheme.green : AppleTheme.blue)
                                 .frame(width: max(12, geo.size.width * progressFraction), height: 10)
                                 .animation(.easeInOut(duration: 0.25), value: progressFraction)
                         }
@@ -1500,17 +1600,26 @@ private struct DirectSwitchTransferProgressView: View {
                     .frame(height: 10)
 
                     HStack {
-                        Text(transport.currentItemName.isEmpty ? transport.statusLabel : transport.currentItemName)
-                            .font(.system(size: 13))
-                            .foregroundColor(AppleTheme.textSecondary)
-                            .lineLimit(1)
-
-                        Spacer()
-
-                        if transport.totalBytesCount > 0 {
-                            Text("\(DirectSwitchUIHelpers.formatBytes(transport.transferredBytesCount)) / \(DirectSwitchUIHelpers.formatBytes(transport.totalBytesCount))")
-                                .font(.system(size: 12, weight: .medium))
+                        if isReceiverAppsOnlyPhase {
+                            Text(appInstaller.queueableApps.isEmpty
+                                 ? "\(transport.receivedInstalledApps.count) app ricevute in elenco (senza scheda App Store diretta)"
+                                 : "\(handledQueueableAppsCount) / \(appInstaller.queueableApps.count) app avviate o installate (\(transport.receivedInstalledApps.count) ricevute)")
+                                .font(.system(size: 13))
                                 .foregroundColor(AppleTheme.textSecondary)
+                                .lineLimit(2)
+                        } else {
+                            Text(transport.currentItemName.isEmpty ? transport.statusLabel : transport.currentItemName)
+                                .font(.system(size: 13))
+                                .foregroundColor(AppleTheme.textSecondary)
+                                .lineLimit(1)
+
+                            Spacer()
+
+                            if transport.totalBytesCount > 0 {
+                                Text("\(DirectSwitchUIHelpers.formatBytes(transport.transferredBytesCount)) / \(DirectSwitchUIHelpers.formatBytes(transport.totalBytesCount))")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                            }
                         }
                     }
 

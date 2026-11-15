@@ -717,4 +717,84 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertFalse(spatialLines.contains("Iliad IT"))
         XCTAssertEqual(spatialLines, ["Intesa Sanpaolo", "Subito", "Vinted", "Aruba PEC", "ASOS"])
     }
+
+    @MainActor
+    func testSequentialInstallerExcludesMissingCatalogNeverAutoLoopsOnForegroundAndStopsCleanly() {
+        let installer = iOSSequentialAppInstaller()
+        installer.dryRunPresentationForTesting = true
+
+        let catalogApps = [
+            InstalledAppRecord(packageName: "com.test.first", appName: "FirstApp", appStoreId: 111001),
+            InstalledAppRecord(packageName: "scan.missing.one", appName: "UnmatchedApp", appStoreId: nil),
+            InstalledAppRecord(packageName: "com.test.second", appName: "SecondApp", appStoreId: 222002),
+            InstalledAppRecord(packageName: "scan.zero.id", appName: "ZeroIdApp", appStoreId: 0)
+        ]
+
+        installer.configure(with: catalogApps)
+
+        XCTAssertEqual(installer.queueableApps.map(\.packageName), ["com.test.first", "com.test.second"])
+        XCTAssertEqual(installer.missingCatalogApps.map(\.packageName), ["scan.missing.one", "scan.zero.id"])
+        XCTAssertEqual(installer.totalQueueCount, 2)
+        XCTAssertFalse(installer.selectedIds.contains("scan.missing.one"))
+        XCTAssertFalse(installer.selectedIds.contains("scan.zero.id"))
+
+        installer.startAutomaticSequence()
+        XCTAssertTrue(installer.isRunningSequence)
+        XCTAssertTrue(installer.showsFloatingBottomBar)
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.first")
+
+        installer.confirmCurrentAndAdvance()
+        XCTAssertTrue(installer.activeDownloadingIds.contains("com.test.first"))
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.second")
+
+        // Il ritorno in primo piano non deve mai avanzare o aprire un App Store esterno da solo
+        installer.handleSceneBecameActive()
+        XCTAssertTrue(installer.isRunningSequence)
+        XCTAssertEqual(installer.currentActiveApp?.packageName, "com.test.second")
+
+        // Il tasto Interrompi ferma istantaneamente la coda e chiude la barra inferiore
+        installer.stopSequence()
+        XCTAssertFalse(installer.isRunningSequence)
+        XCTAssertFalse(installer.showsFloatingBottomBar)
+        XCTAssertFalse(installer.isWaitingInlineNextConfirmation)
+        XCTAssertNil(installer.currentActiveApp)
+    }
+
+    func testItalianShortAppsAndTruncatedPrefixesWithoutEllipsis() {
+        let candidates = iOSInstalledAppsScanner.parsePlausibleAppCandidates([
+            "NOW",
+            "now",
+            "IO",
+            "io",
+            "⬇️ Aruba OTP"
+        ])
+        let titles = candidates.map(\.lookupQuery)
+
+        XCTAssertTrue(titles.contains("NOW"))
+        XCTAssertFalse(titles.contains("now"))
+        XCTAssertTrue(titles.contains("IO"))
+        XCTAssertTrue(titles.contains("Aruba OTP"))
+
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "Banca Mediol",
+                wasTruncated: false,
+                storeAppName: "Banca Mediolanum"
+            )
+        )
+        XCTAssertTrue(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "GialloZaffer",
+                wasTruncated: false,
+                storeAppName: "GialloZafferano: le ricette"
+            )
+        )
+        XCTAssertFalse(
+            iOSAppStoreCatalogResolver.isVerifiedAppStoreTitleMatch(
+                candidateQuery: "WhatsApp",
+                wasTruncated: false,
+                storeAppName: "Random Utility Pro"
+            )
+        )
+    }
 }

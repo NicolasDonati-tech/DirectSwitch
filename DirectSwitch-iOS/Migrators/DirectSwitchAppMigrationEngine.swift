@@ -207,6 +207,7 @@ enum iOSInstalledAppsScanner {
         "cieid": "CieID",
         "aruba pec": "Aruba PEC",
         "aruba id": "Aruba ID",
+        "aruba otp": "Aruba OTP",
         "bper": "BPER Banca",
         "bper banca": "BPER Banca",
         "mediolanum": "Banca Mediolanum",
@@ -228,9 +229,13 @@ enum iOSInstalledAppsScanner {
         "mediaset infinity": "Mediaset Infinity",
         "raiplay": "RaiPlay",
         "sky go": "Sky Go",
+        "now": "NOW",
         "mytim": "MyTIM",
         "my vodafone": "My Vodafone",
         "myfastweb": "MyFastweb",
+        "windtre": "WINDTRE",
+        "very": "Very Mobile",
+        "kena": "Kena Mobile",
         "yt music": "YouTube Music",
         "youtube musi": "YouTube Music",
         "yt studio": "YouTube Studio",
@@ -251,6 +256,8 @@ enum iOSInstalledAppsScanner {
         "plenitude": "Eni Plenitude",
         "italo": "Italo Treno",
         "trenord": "Trenord",
+        "flixbus": "FlixBus",
+        "blablacar": "BlaBlaCar",
         "unipolmove": "UnipolMove",
         "classeviva": "ClasseViva Studenti",
         "argo didup": "DidUP Famiglia",
@@ -269,6 +276,7 @@ enum iOSInstalledAppsScanner {
         "copilot": "Microsoft Copilot",
         "claude": "Claude by Anthropic",
         "perplexity": "Perplexity",
+        "deepseek": "DeepSeek",
         "meta ai": "Meta AI",
         "word": "Microsoft Word",
         "excel": "Microsoft Excel",
@@ -298,18 +306,25 @@ enum iOSInstalledAppsScanner {
         "youapp": "YouApp",
         "banco bpm": "YouApp",
         "poste itali": "Poste Italiane",
+        "poste italia": "Poste Italiane",
         "banca genera": "Banca Generali",
         "ing italia": "ING Italia",
         "sumup": "SumUp",
         "now tv": "NOW"
     ]
 
-    /// Ripulisce un'etichetta letta dalla schermata Home / Libreria App (rimuovendo l'ellissi `…` o `...` e simboli di stato come ☁️/•).
+    /// Ripulisce un'etichetta letta dalla schermata Home / Libreria App (rimuovendo l'ellissi `…` o `...` e simboli/badge iniziali come `• `).
     static func cleanHomeScreenAppLabel(_ raw: String) -> (cleaned: String, wasTruncated: Bool) {
         var working = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "•›<>-–—_·:|«»\"?~*=,;()"))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Rimuove eventuali simboli di notifica / download / TestFlight all'inizio dell'etichetta (es. "○ TestApp", "☁️ App", "● App")
+        while let first = working.unicodeScalars.first,
+              ["☁", "⬇", "↓", "●", "○", "◉", "🔸", "🔹", "•"].contains(String(first)) {
+            working = String(working.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
         var truncated = false
         if working.hasSuffix("…") {
@@ -578,7 +593,7 @@ enum iOSInstalledAppsScanner {
 
     /// Marchi univoci a 3 caratteri effettivamente diffusi in Italia come nomi completi sotto icona.
     private static let allowedThreeCharAppTokens: Set<String> = [
-        "vlc", "dhl", "ups", "gls", "brt", "h&m", "n26", "avg", "kfc", "atm", "gtt", "bmw", "ovs", "bnl", "ing"
+        "vlc", "dhl", "ups", "gls", "brt", "h&m", "n26", "avg", "kfc", "atm", "gtt", "bmw", "ovs", "bnl", "ing", "rai", "qvc", "axa"
     ]
 
     /// Analizza e filtra le stringhe OCR mantenendo l'informazione `wasTruncated` (`…` / `...`) per il matching rigoroso.
@@ -605,19 +620,21 @@ enum iOSInstalledAppsScanner {
             if words.count >= 2 && words.allSatisfy({ $0.count <= 1 }) { continue }
 
             let lower = cleaned.lowercased()
-            if ignoredNonAppTerms.contains(lower) { continue }
+            // Evita falsi positivi su parole minuscole come "now" / "io", ma conserva le app scritte "NOW" / "IO" in maiuscolo
+            if lower == "now" && cleaned != "NOW" { continue }
+            if ignoredNonAppTerms.contains(lower) && !(cleaned == "NOW" || cleaned == "IO") { continue }
             if lower.hasSuffix("%") || lower.hasSuffix("°") || lower.hasSuffix("°c") || lower.contains("€") || lower.contains("$") {
                 continue
             }
             if ignoredSubstrings.contains(where: { lower.contains($0) }) { continue }
 
             // Scarta etichette brevi a 2 o 3 caratteri non corrispondenti a un'app/alias noto (evita rumore grafico delle icone e pulsanti UI)
-            let isKnownShortAlias = homeScreenShortAliases[lower] != nil
+            let isKnownShortAlias = (homeScreenShortAliases[lower] != nil && !(lower == "now" && cleaned != "NOW"))
                 || knownProbes.contains(where: { $0.appName.lowercased() == lower })
             if cleaned.count == 2 && cleaned != "IO" && !isKnownShortAlias {
                 continue
             }
-            if cleaned.count == 3 && !isKnownShortAlias && !allowedThreeCharAppTokens.contains(lower) {
+            if cleaned.count == 3 && !isKnownShortAlias && !allowedThreeCharAppTokens.contains(lower) && cleaned != "NOW" {
                 continue
             }
 
@@ -754,7 +771,8 @@ enum iOSInstalledAppsScanner {
         _ rawBoxes: [RecognizedAppTextBox],
         stripTopStatusBar: Bool
     ) -> [String] {
-        let maxAllowedHeight: CGFloat = stripTopStatusBar ? 0.036 : 0.055
+        // Consente nomi app più alti su iPhone SE / Display Zoom / Testo Grande in Libreria App A–Z (restando sotto ai widget giganti)
+        let maxAllowedHeight: CGFloat = stripTopStatusBar ? 0.052 : 0.062
         let filteredBoxes = rawBoxes.filter { item in
             let b = item.boundingBox
             if stripTopStatusBar && b.minY > 0.942 {
@@ -838,7 +856,7 @@ enum iOSInstalledAppsScanner {
         guard let observations = req.results, !observations.isEmpty else { return [] }
         var boxes: [RecognizedAppTextBox] = []
         for obs in observations {
-            boxes.append(contentsOf: splitHorizontallyMergedObservation(obs, minConfidence: 0.56))
+            boxes.append(contentsOf: splitHorizontallyMergedObservation(obs, minConfidence: 0.38))
         }
         return mergeAndSplitSpatialTextBoxes(boxes, stripTopStatusBar: stripTopStatusBar)
     }
@@ -847,7 +865,7 @@ enum iOSInstalledAppsScanner {
     static func recognizeSpatialCameraFrameLines(
         in pixelBuffer: CVPixelBuffer,
         orientation: CGImagePropertyOrientation = .right,
-        minConfidence: Float = 0.60
+        minConfidence: Float = 0.45
     ) -> [String] {
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = .accurate
@@ -878,10 +896,12 @@ enum iOSInstalledAppsScanner {
         var resolved: [InstalledAppRecord] = []
         var seenKeys = Set<String>()
         var networkCandidates: [(query: String, wasTruncated: Bool)] = []
+        var seenQueryLower = Set<String>()
 
-        // 1. Risoluzione offline immediata (0ms, zero rate-limit) per tutte le app già presenti in `knownProbes`
+        // 1. Risoluzione offline immediata (0ms, zero rate-limit /search) per probe e catalogo rapido italiano (`bundleId` batch /lookup)
         for cand in candidates {
             let query = canonicalAppQuery(for: cand.cleaned)
+            let qLower = query.lowercased()
             if let probe = knownProbes.first(where: { $0.appName.caseInsensitiveCompare(query) == .orderedSame }) {
                 let dedup = "\(probe.bundleId.lowercased())_\(probe.appStoreId)"
                 if !seenKeys.contains(dedup) {
@@ -896,13 +916,20 @@ enum iOSInstalledAppsScanner {
                         )
                     )
                 }
-            } else {
+            } else if let knownBundle = italianQuickSuggestions.first(where: { $0.appName.caseInsensitiveCompare(query) == .orderedSame }) {
+                let dedup = "\(knownBundle.packageName.lowercased())_\(knownBundle.appStoreId ?? 0)"
+                if !seenKeys.contains(dedup) {
+                    seenKeys.insert(dedup)
+                    resolved.append(knownBundle)
+                }
+            } else if !seenQueryLower.contains(qLower) {
+                seenQueryLower.insert(qLower)
                 networkCandidates.append((query: query, wasTruncated: cand.wasTruncated))
             }
         }
 
-        // 2. Ricerca App Store controllata (`chunkSize = 3` + pausa leggera) per evitare qualsiasi blocco HTTP 429/403 di iTunes
-        let chunkSize = 3
+        // 2. Ricerca App Store controllata (`chunkSize = 2` + pausa 135ms) con backoff HTTP 429/403 così iTunes non taglia la coda su 100+ app
+        let chunkSize = 2
         var idx = 0
         while idx < networkCandidates.count {
             let slice = Array(networkCandidates[idx..<min(idx + chunkSize, networkCandidates.count)])
@@ -936,12 +963,12 @@ enum iOSInstalledAppsScanner {
             }
 
             if idx < networkCandidates.count {
-                try? await Task.sleep(nanoseconds: 95_000_000)
+                try? await Task.sleep(nanoseconds: 135_000_000)
             }
         }
 
-        // 3. Carica in un'unica chiamata batch `/lookup?id=...` le icone mancanti delle app risolte offline
-        if resolved.contains(where: { $0.iconUrl == nil }) {
+        // 3. Carica in batch `/lookup?bundleId=...` e `/lookup?id=...` sia `appStoreId` mancanti che icone ufficiali
+        if resolved.contains(where: { $0.iconUrl == nil || $0.appStoreId == nil }) {
             resolved = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(resolved)
         }
 
@@ -1096,8 +1123,8 @@ enum iOSInstalledAppsScanner {
             }
         }
 
-        // 2. Legge gli screenshot recenti dall'album «Istantanee» (fino a 20 pagine)
-        let recentScreenshotPairs = await fetchRecentScreenshotsWithIdentifiersFromLibrary(maxCount: 20, since: cutoffDate)
+        // 2. Legge gli screenshot recenti dall'album «Istantanee» (fino a 35 pagine per elenchi A–Z con 150+ app)
+        let recentScreenshotPairs = await fetchRecentScreenshotsWithIdentifiersFromLibrary(maxCount: 35, since: cutoffDate)
         let screenshotIdsForCleanup = armedDate != nil ? recentScreenshotPairs.map(\.localIdentifier) : []
         if !recentScreenshotPairs.isEmpty {
             let cgImgs = recentScreenshotPairs.compactMap(\.image.cgImage)
@@ -1391,15 +1418,15 @@ enum iOSAppStoreCatalogResolver {
     ]
 
     private static let allowedTrailingStoreQualifiers: Set<String> = [
-        "app", "mobile", "italia", "italy", "it", "banca", "bank", "banking", "pay", "messenger",
-        "shopping", "shop", "club", "music", "video", "tv", "plus", "go", "online", "smart", "control",
-        "home", "connect", "workplace", "studenti", "famiglia", "famiglie", "clienti", "card", "otp",
-        "live", "ai", "studio", "editor", "notify", "energia", "assicurazioni", "flights", "airlines",
-        "treno", "vpn", "browser", "mail"
+        "app", "mobile", "italia", "italy", "it", "com", "official", "ufficiale", "banca", "bank", "banking", "pay", "messenger",
+        "shopping", "shop", "club", "music", "video", "tv", "plus", "go", "online", "smart", "control", "free", "wallet",
+        "home", "connect", "workplace", "studenti", "famiglia", "famiglie", "clienti", "card", "otp", "id", "pass", "hub",
+        "live", "ai", "studio", "editor", "notify", "energia", "assicurazioni", "flights", "airlines", "scanner", "reader",
+        "treno", "vpn", "browser", "mail", "remote", "tracker"
     ]
 
     /// Verifica rigorosa anti-allucinazione tra il nome letto sullo schermo del telefono e il titolo ufficiale su App Store:
-    /// impedisce che parole casuali, nomi di cartelle o sottotitoli generino app inesistenti.
+    /// impedisce che parole casuali, nomi di cartelle o sottotitoli generino app inesistenti, gestendo anche troncamenti senza `…`.
     static func isVerifiedAppStoreTitleMatch(
         candidateQuery: String,
         wasTruncated: Bool,
@@ -1426,6 +1453,17 @@ enum iOSAppStoreCatalogResolver {
         // 2. Etichetta troncata da iOS sulla schermata Home con `…` (es. "Banca Mediol…" -> prefisso di "Banca Mediolanum")
         if wasTruncated && cand.count >= 5 && (prim.hasPrefix(cand) || full.hasPrefix(cand)) {
             return true
+        }
+
+        // 2b. Troncamento Home/Libreria dove Vision OCR ha omesso i tre puntini `…` finali
+        // (es. "Banca Mediol" -> "Banca Mediolanum", "GialloZaffer" -> "GialloZafferano"), mai per parole singole generiche
+        if !wasTruncated && prim.hasPrefix(cand) {
+            if candWords.count >= 2 && cand.count >= 10 && primWords.first == candWords.first {
+                return true
+            }
+            if candWords.count == 1 && cand.count >= 9 && primWords.count == 1 && abs(prim.count - cand.count) <= 6 {
+                return true
+            }
         }
 
         // 3. Corrispondenza per parole intere dall'inizio del titolo principale (es. "Fineco" -> "Fineco Bank", "ClasseViva" -> "ClasseViva Studenti")
@@ -1515,8 +1553,9 @@ enum iOSAppStoreCatalogResolver {
         }
 
         var responseData: Data? = nil
-        for attempt in 0..<2 {
-            var req = URLRequest(url: url, timeoutInterval: 6.5)
+        let backoffDelaysNs: [UInt64] = [800_000_000, 1_900_000_000]
+        for attempt in 0..<3 {
+            var req = URLRequest(url: url, timeoutInterval: 7.5)
             req.httpMethod = "GET"
             if let (data, resp) = try? await URLSession.shared.data(for: req),
                let code = (resp as? HTTPURLResponse)?.statusCode {
@@ -1524,14 +1563,14 @@ enum iOSAppStoreCatalogResolver {
                     responseData = data
                     break
                 }
-                // Se iTunes applica un rate-limit temporaneo (429/403/503), attende 650ms e riprova per non saltare alcuna app
-                if (code == 429 || code == 403 || code >= 500) && attempt == 0 {
-                    try? await Task.sleep(nanoseconds: 650_000_000)
+                // Backoff progressivo su rate-limit HTTP 429/403/5xx per non perdere app verso fine elenco
+                if (code == 429 || code == 403 || code >= 500) && attempt < backoffDelaysNs.count {
+                    try? await Task.sleep(nanoseconds: backoffDelaysNs[attempt])
                     continue
                 }
                 break
-            } else if attempt == 0 {
-                try? await Task.sleep(nanoseconds: 450_000_000)
+            } else if attempt < backoffDelaysNs.count {
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
 
@@ -1579,36 +1618,38 @@ enum iOSAppStoreCatalogResolver {
     }
 }
 
-/// Motore di installazione rapida 1-tocco sul nuovo iPhone:
-/// 1) Livello 1 (Predefinito): Mini-banner di sistema fisso in basso (`SKOverlay`, posizione `.bottom`) senza mai uscire da DirectSwitch
-///    né aprire/chiudere 100 pagine intere dell'App Store — il tasto «Ottieni» resta fisso sotto il pollice e sincronizza ogni app col nuovo iCloud.
-/// 2) Livello 2 (Fallback automatico): `SKStoreProductViewController` se una specifica app o build sideloaded non supporta `SKOverlay`.
-/// 3) Livello 3 (Fallback universale `Free-Install.ipa`): Link diretto `itms-apps://itunes.apple.com/app/id<trackId>` con concatenazione automatica al rientro.
+/// Motore di installazione in-app sul nuovo iPhone (senza MAI uscire verso l'app esterna App Store in coda):
+/// 1) Livello 1 (Predefinito): Mini-banner di sistema fisso in basso (`SKOverlay`, posizione `.bottom`) per restare in DirectSwitch.
+/// 2) Livello 2 (Fallback in-app): `SKStoreProductViewController` se `SKOverlay` non è supportato sullo specifico dispositivo/build,
+///    con controllo manuale «Interrompi / Prossima» alla chiusura della scheda (zero loop incontrollabili e zero apertura esterna dell'App Store).
 @MainActor
 final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDelegate, SKStoreProductViewControllerDelegate, UIAdaptivePresentationControllerDelegate {
     enum DeliveryMode: Equatable {
         case fastBottomOverlay
         case inlineStoreSheet
-        case externalAppStore
+        case inlinePausedPrompt
     }
 
     @Published var apps: [InstalledAppRecord] = []
     @Published var selectedIds: Set<String> = []
     @Published var completedIds: Set<String> = []
+    @Published var activeDownloadingIds: Set<String> = []
     @Published var alreadyInstalledIds: Set<String> = []
+    @Published var unavailableInStoreIds: Set<String> = []
     @Published var isEnrichingMetadata: Bool = false
 
     @Published var isRunningSequence: Bool = false
     @Published var isSingleOverlaySession: Bool = false
     @Published var isLoadingInlineCard: Bool = false
     @Published var isOverlayVisible: Bool = false
+    @Published var isWaitingInlineNextConfirmation: Bool = false
     @Published var overlaySafeBottomPadding: CGFloat = 78
     @Published var activeDeliveryMode: DeliveryMode = .fastBottomOverlay
 
     @Published var currentQueuePosition: Int = 0
     @Published var totalQueueCount: Int = 0
     @Published var currentActiveApp: InstalledAppRecord? = nil
-    @Published var waitingForExternalReturn: Bool = false
+    @Published var installerStatusNote: String? = nil
     @Published private(set) var historyStack: [InstalledAppRecord] = []
 
     /// Usato nei test unitari su simulatore per verificare la macchina a stati della coda senza invocare `storekitd`.
@@ -1617,16 +1658,41 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
     private var queue: [InstalledAppRecord] = []
     private var overlayUnsupportedOnDevice: Bool = false
     private var hasEverPresentedOverlaySuccessfully: Bool = false
-    private var preferExternalAppStore: Bool = false
+    private var consecutiveOverlayFailures: Int = 0
     private var inlineSheetHandledForCurrentStep: Bool = false
     private var isSwitchingOverlayProgrammatically: Bool = false
+    private var isDismissingByUserStop: Bool = false
+    private var queueGeneration: Int = 0
     private var currentPresentationAttemptId: UUID = UUID()
     private var autoAdvanceTask: Task<Void, Never>? = nil
     private var liveInstallMonitorTask: Task<Void, Never>? = nil
     private var activeOverlayInstance: SKOverlay? = nil
+    private weak var presentedStoreVC: SKStoreProductViewController? = nil
+
+    /// App presenti nel catalogo App Store con `appStoreId` valido, installabili in-app senza uscire da DirectSwitch.
+    var queueableApps: [InstalledAppRecord] {
+        apps.filter { ($0.appStoreId ?? 0) > 0 }
+    }
+
+    /// App non trovate nel catalogo App Store italiano (`appStoreId == nil`): non vengono MAI aperte automaticamente nell'App Store esterno.
+    var missingCatalogApps: [InstalledAppRecord] {
+        apps.filter { ($0.appStoreId ?? 0) <= 0 }
+    }
+
+    /// App in scaricamento o già installate/avviate mostrate nella barra di avanzamento inferiore.
+    var dockTrackedApps: [InstalledAppRecord] {
+        apps.filter { app in
+            currentActiveApp?.id == app.id
+                || activeDownloadingIds.contains(app.id)
+                || alreadyInstalledIds.contains(app.id)
+                || completedIds.contains(app.id)
+        }
+    }
 
     var pendingInstallableCount: Int {
-        apps.filter { selectedIds.contains($0.id) && !alreadyInstalledIds.contains($0.id) && !completedIds.contains($0.id) }.count
+        queueableApps.filter {
+            selectedIds.contains($0.id) && !alreadyInstalledIds.contains($0.id) && !completedIds.contains($0.id)
+        }.count
     }
 
     var canGoBackInQueue: Bool {
@@ -1634,9 +1700,11 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
     }
 
     var showsFloatingBottomBar: Bool {
-        (isRunningSequence || isSingleOverlaySession)
-            && activeDeliveryMode == .fastBottomOverlay
-            && currentActiveApp != nil
+        guard currentActiveApp != nil else { return false }
+        if isRunningSequence || isSingleOverlaySession {
+            return activeDeliveryMode == .fastBottomOverlay || isWaitingInlineNextConfirmation
+        }
+        return false
     }
 
     func reset() {
@@ -1644,8 +1712,11 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         apps = []
         selectedIds = []
         completedIds = []
+        activeDownloadingIds = []
         alreadyInstalledIds = []
+        unavailableInStoreIds = []
         historyStack = []
+        installerStatusNote = nil
         isEnrichingMetadata = false
     }
 
@@ -1657,28 +1728,34 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         if apps.map(\.id) == incomingApps.map(\.id) && !apps.isEmpty {
             refreshInstalledStatuses()
             completedIds.removeAll()
+            activeDownloadingIds.removeAll()
             selectedIds = Set(
                 apps
-                    .filter { !alreadyInstalledIds.contains($0.id) }
+                    .filter { ($0.appStoreId ?? 0) > 0 && !alreadyInstalledIds.contains($0.id) }
                     .map(\.id)
             )
             return
         }
 
         completedIds.removeAll()
+        activeDownloadingIds.removeAll()
+        unavailableInStoreIds.removeAll()
         historyStack.removeAll()
+        installerStatusNote = nil
         apps = incomingApps
         refreshInstalledStatuses()
         selectedIds = Set(
             incomingApps
-                .filter { !alreadyInstalledIds.contains($0.id) }
+                .filter { ($0.appStoreId ?? 0) > 0 && !alreadyInstalledIds.contains($0.id) }
                 .map(\.id)
         )
 
         guard !dryRunPresentationForTesting else { return }
         isEnrichingMetadata = true
+        let expectedIds = incomingApps.map(\.id)
         Task {
             let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(incomingApps)
+            guard self.apps.map(\.id) == expectedIds else { return }
             let byId = Dictionary(uniqueKeysWithValues: enriched.map { ($0.id, $0) })
             self.apps = enriched
             self.queue = self.queue.map { byId[$0.id] ?? $0 }
@@ -1687,6 +1764,9 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
                 self.currentActiveApp = updatedActive
             }
             self.refreshInstalledStatuses()
+            for app in enriched where (app.appStoreId ?? 0) > 0 && !self.alreadyInstalledIds.contains(app.id) && !self.completedIds.contains(app.id) {
+                self.selectedIds.insert(app.id)
+            }
             self.isEnrichingMetadata = false
         }
     }
@@ -1701,7 +1781,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         guard merged.count > apps.count else { return }
         apps = merged
         refreshInstalledStatuses()
-        for item in merged where !alreadyInstalledIds.contains(item.id) && !completedIds.contains(item.id) {
+        for item in merged where (item.appStoreId ?? 0) > 0 && !alreadyInstalledIds.contains(item.id) && !completedIds.contains(item.id) {
             selectedIds.insert(item.id)
         }
         guard !dryRunPresentationForTesting else { return }
@@ -1710,6 +1790,9 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
             let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(merged)
             self.apps = enriched
             self.refreshInstalledStatuses()
+            for app in enriched where (app.appStoreId ?? 0) > 0 && !self.alreadyInstalledIds.contains(app.id) && !self.completedIds.contains(app.id) {
+                self.selectedIds.insert(app.id)
+            }
             self.isEnrichingMetadata = false
         }
     }
@@ -1722,10 +1805,13 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
             }
         }
         alreadyInstalledIds = installed
+        if !installed.isEmpty {
+            activeDownloadingIds.subtract(installed)
+        }
     }
 
     func toggleSelection(for app: InstalledAppRecord) {
-        guard !alreadyInstalledIds.contains(app.id) else { return }
+        guard !alreadyInstalledIds.contains(app.id), (app.appStoreId ?? 0) > 0 else { return }
         if selectedIds.contains(app.id) {
             selectedIds.remove(app.id)
         } else {
@@ -1734,50 +1820,66 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
     }
 
     func selectAllPending() {
-        for app in apps where !alreadyInstalledIds.contains(app.id) {
+        for app in queueableApps where !alreadyInstalledIds.contains(app.id) {
             selectedIds.insert(app.id)
         }
     }
 
-    /// Installa una singola app mostrando subito il mini-banner `SKOverlay` fisso in basso (o fallback automatico).
+    /// Installa una singola app verificata nel catalogo mostrando subito il mini-banner `SKOverlay` fisso in basso (o scheda in-app).
     func installSingleApp(_ app: InstalledAppRecord) {
         stopSequence()
+        guard (app.appStoreId ?? 0) > 0 else {
+            unavailableInStoreIds.insert(app.id)
+            installerStatusNote = "«\(app.appName)» non ha una scheda App Store verificata: usa eventualmente la ricerca manuale in fondo."
+            return
+        }
+        installerStatusNote = nil
         currentActiveApp = app
         isSingleOverlaySession = true
+        isWaitingInlineNextConfirmation = false
         currentQueuePosition = 1
         totalQueueCount = 1
         startLiveInstallMonitor()
         presentAppFastBannerOrFallback(app: app, partOfSequence: false)
     }
 
-    /// Avvia la sequenza rapida con mini-banner fisso in basso per tutte le app selezionate.
+    /// Avvia la sequenza in-app per le sole app con `appStoreId` verificato (mai apertura esterna dell'App Store).
     func startAutomaticSequence() {
         stopSequence()
         refreshInstalledStatuses()
-        let pending = apps.filter {
+        let pending = queueableApps.filter {
             selectedIds.contains($0.id) && !alreadyInstalledIds.contains($0.id) && !completedIds.contains($0.id)
         }
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty else {
+            if !missingCatalogApps.isEmpty {
+                installerStatusNote = "Le app restanti non risultano nel catalogo App Store italiano e sono elencate in fondo."
+            }
+            return
+        }
 
+        installerStatusNote = nil
         queue = pending
         historyStack = []
         totalQueueCount = pending.count
         currentQueuePosition = 0
         isRunningSequence = true
         isSingleOverlaySession = false
-        waitingForExternalReturn = false
+        isWaitingInlineNextConfirmation = false
         startLiveInstallMonitor()
         advanceToNextInQueue()
     }
 
-    /// Conferma di aver premuto «Ottieni» sul mini-banner in basso e carica istantaneamente l'app successiva nello stesso punto.
+    /// Registra l'app corrente come avviata/in scaricamento in basso e passa subito alla successiva della coda.
     func confirmCurrentAndAdvance() {
         autoAdvanceTask?.cancel()
-        waitingForExternalReturn = false
         isLoadingInlineCard = false
+        isWaitingInlineNextConfirmation = false
 
         if let active = currentActiveApp {
             completedIds.insert(active.id)
+            if !alreadyInstalledIds.contains(active.id) && !unavailableInStoreIds.contains(active.id) {
+                activeDownloadingIds.insert(active.id)
+            }
             if isRunningSequence {
                 historyStack.append(active)
             }
@@ -1792,12 +1894,21 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         advanceToNextInQueue()
     }
 
+    /// Apre l'app successiva dopo una pausa nella modalità scheda in-app (solo su tocco esplicito dell'utente).
+    func resumePausedInlineNextApp() {
+        guard isRunningSequence, let active = currentActiveApp else { return }
+        isWaitingInlineNextConfirmation = false
+        installerStatusNote = nil
+        presentAppFastBannerOrFallback(app: active, partOfSequence: true)
+    }
+
     /// Torna immediatamente all'app precedente nel mini-banner se si è toccato «Prossima» per errore.
     func goBackToPreviousApp() {
         guard isRunningSequence, let previous = historyStack.popLast() else { return }
         autoAdvanceTask?.cancel()
-        waitingForExternalReturn = false
         isLoadingInlineCard = false
+        isWaitingInlineNextConfirmation = false
+        installerStatusNote = nil
 
         if let active = currentActiveApp {
             queue.insert(active, at: 0)
@@ -1807,6 +1918,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         }
 
         completedIds.remove(previous.id)
+        activeDownloadingIds.remove(previous.id)
         currentActiveApp = previous
         presentAppFastBannerOrFallback(app: previous, partOfSequence: true)
     }
@@ -1814,13 +1926,15 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
     /// Riapre il mini-banner `SKOverlay` dell'app corrente se l'utente lo ha chiuso scorrendo verso il basso.
     func reopenCurrentOverlay() {
         guard let active = currentActiveApp else { return }
+        isWaitingInlineNextConfirmation = false
         presentAppFastBannerOrFallback(app: active, partOfSequence: isRunningSequence)
     }
 
     func skipCurrentAndContinue() {
         autoAdvanceTask?.cancel()
-        waitingForExternalReturn = false
         isLoadingInlineCard = false
+        isWaitingInlineNextConfirmation = false
+        installerStatusNote = nil
         if let active = currentActiveApp, isRunningSequence {
             historyStack.append(active)
         }
@@ -1832,70 +1946,75 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         advanceToNextInQueue()
     }
 
+    /// Arresta IMMEDIATAMENTE l'intera sequenza: invalida ogni callback pendente, chiude eventuali overlay/schede
+    /// e garantisce che nessun'altra app venga mai aperta chiudendo o tornando nell'app.
     func stopSequence() {
+        isDismissingByUserStop = true
+        queueGeneration += 1
         currentPresentationAttemptId = UUID()
         autoAdvanceTask?.cancel()
         autoAdvanceTask = nil
-        liveInstallMonitorTask?.cancel()
-        liveInstallMonitorTask = nil
+        if queue.isEmpty && !isRunningSequence && activeDownloadingIds.isEmpty {
+            liveInstallMonitorTask?.cancel()
+            liveInstallMonitorTask = nil
+        }
         dismissOverlayIfPresent()
+        if !dryRunPresentationForTesting, let vc = presentedStoreVC {
+            presentedStoreVC = nil
+            vc.dismiss(animated: true)
+        } else {
+            presentedStoreVC = nil
+        }
         queue.removeAll()
         historyStack.removeAll()
         isRunningSequence = false
         isSingleOverlaySession = false
         isLoadingInlineCard = false
         isOverlayVisible = false
-        waitingForExternalReturn = false
+        isWaitingInlineNextConfirmation = false
         currentActiveApp = nil
+        isDismissingByUserStop = false
     }
 
     /// Chiamato quando DirectSwitch torna attiva in primo piano (`scenePhase == .active`):
-    /// se il download era stato aperto nell'App Store esterno, passa automaticamente all'app successiva della coda!
+    /// aggiorna solo gli stati `Installata ✓`, senza MAI aprire automaticamente altre app né lanciare App Store!
     func handleSceneBecameActive() {
         refreshInstalledStatuses()
-        guard isRunningSequence && waitingForExternalReturn else { return }
-        waitingForExternalReturn = false
-
-        if let active = currentActiveApp {
-            completedIds.insert(active.id)
-            historyStack.append(active)
-        }
-
-        if queue.isEmpty {
-            stopSequence()
-            return
-        }
-
-        autoAdvanceTask?.cancel()
-        autoAdvanceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 650_000_000)
-            guard let self, !Task.isCancelled, self.isRunningSequence else { return }
-            self.advanceToNextInQueue()
-        }
     }
 
     private func startLiveInstallMonitor() {
         liveInstallMonitorTask?.cancel()
         guard !dryRunPresentationForTesting else { return }
+        let capturedGeneration = queueGeneration
         liveInstallMonitorTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self, !Task.isCancelled else { return }
-                guard self.isRunningSequence || self.isSingleOverlaySession else { return }
                 self.refreshInstalledStatuses()
-                if let active = self.currentActiveApp, self.alreadyInstalledIds.contains(active.id) {
+                if self.queueGeneration == capturedGeneration,
+                   (self.isRunningSequence || self.isSingleOverlaySession),
+                   let active = self.currentActiveApp,
+                   self.alreadyInstalledIds.contains(active.id) {
                     self.confirmCurrentAndAdvance()
+                    continue
+                }
+                if !self.isRunningSequence && !self.isSingleOverlaySession && self.activeDownloadingIds.isEmpty {
+                    return
                 }
             }
         }
     }
 
     private func advanceToNextInQueue() {
+        guard isRunningSequence else { return }
         refreshInstalledStatuses()
         while !queue.isEmpty {
             let candidate = queue.removeFirst()
             currentQueuePosition += 1
             if alreadyInstalledIds.contains(candidate.id) || completedIds.contains(candidate.id) {
+                continue
+            }
+            guard (candidate.appStoreId ?? 0) > 0 else {
                 continue
             }
             currentActiveApp = candidate
@@ -1920,12 +2039,14 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
 
     private func presentAppFastBannerOrFallback(app: InstalledAppRecord, partOfSequence: Bool) {
         let attemptId = UUID()
+        let attemptGen = queueGeneration
         currentPresentationAttemptId = attemptId
 
         if dryRunPresentationForTesting {
             activeDeliveryMode = .fastBottomOverlay
             isOverlayVisible = true
             isLoadingInlineCard = false
+            isWaitingInlineNextConfirmation = false
             return
         }
 
@@ -1935,6 +2056,7 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
            let scene = Self.activeWindowScene() {
             activeDeliveryMode = .fastBottomOverlay
             isLoadingInlineCard = true
+            isWaitingInlineNextConfirmation = false
 
             let hadVisibleOverlay = isOverlayVisible || activeOverlayInstance != nil
             if hadVisibleOverlay {
@@ -1947,9 +2069,12 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
                 if hadVisibleOverlay {
                     try? await Task.sleep(nanoseconds: 160_000_000)
                 }
-                guard let self, self.currentPresentationAttemptId == attemptId else { return }
+                guard let self,
+                      self.queueGeneration == attemptGen,
+                      self.currentPresentationAttemptId == attemptId,
+                      (self.isRunningSequence || self.isSingleOverlaySession) else { return }
                 guard let liveScene = Self.activeWindowScene() else {
-                    self.presentInlineSheetOrExternalFallback(app: app, partOfSequence: partOfSequence, attemptId: attemptId)
+                    self.presentInlineStoreSheetOnly(app: app, partOfSequence: partOfSequence, attemptId: attemptId, attemptGen: attemptGen)
                     return
                 }
 
@@ -1961,40 +2086,52 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
                 self.activeOverlayInstance = overlay
                 overlay.present(in: liveScene)
 
-                // Timeout di sicurezza (2.3s): se su build sideloaded Free-Install `storekitd` ignora SKOverlay senza chiamare il delegate, scala subito al fallback
-                try? await Task.sleep(nanoseconds: 2_300_000_000)
-                guard self.currentPresentationAttemptId == attemptId, !self.isOverlayVisible else { return }
+                // Timeout di sicurezza (2.6s): se su questa build `storekitd` non mostra SKOverlay, scala alla scheda in-app StoreKit (mai all'App Store esterno)
+                try? await Task.sleep(nanoseconds: 2_600_000_000)
+                guard self.queueGeneration == attemptGen,
+                      self.currentPresentationAttemptId == attemptId,
+                      (self.isRunningSequence || self.isSingleOverlaySession),
+                      !self.isOverlayVisible else { return }
                 self.isLoadingInlineCard = false
-                if !self.hasEverPresentedOverlaySuccessfully {
+                self.consecutiveOverlayFailures += 1
+                if !self.hasEverPresentedOverlaySuccessfully && self.consecutiveOverlayFailures >= 2 {
                     self.overlayUnsupportedOnDevice = true
                 }
                 self.dismissOverlayIfPresent()
-                self.presentInlineSheetOrExternalFallback(app: app, partOfSequence: partOfSequence, attemptId: attemptId)
+                self.presentInlineStoreSheetOnly(app: app, partOfSequence: partOfSequence, attemptId: attemptId, attemptGen: attemptGen)
             }
             return
         }
 
-        presentInlineSheetOrExternalFallback(app: app, partOfSequence: partOfSequence, attemptId: attemptId)
+        presentInlineStoreSheetOnly(app: app, partOfSequence: partOfSequence, attemptId: attemptId, attemptGen: attemptGen)
     }
 
-    private func presentInlineSheetOrExternalFallback(app: InstalledAppRecord, partOfSequence: Bool, attemptId: UUID) {
-        guard currentPresentationAttemptId == attemptId else { return }
+    private func presentInlineStoreSheetOnly(
+        app: InstalledAppRecord,
+        partOfSequence: Bool,
+        attemptId: UUID,
+        attemptGen: Int
+    ) {
+        guard queueGeneration == attemptGen,
+              currentPresentationAttemptId == attemptId,
+              (isRunningSequence || isSingleOverlaySession) else { return }
 
-        guard !preferExternalAppStore,
-              let trackId = app.appStoreId, trackId > 0,
-              Self.topMostViewController() != nil else {
-            activeDeliveryMode = .externalAppStore
-            openExternalAndTrack(app: app, partOfSequence: partOfSequence)
+        guard let trackId = app.appStoreId, trackId > 0,
+              let presenter = Self.topMostViewController(),
+              presenter.presentedViewController == nil else {
+            markAppUnavailableInOverlay(app: app, partOfSequence: partOfSequence)
             return
         }
 
         activeDeliveryMode = .inlineStoreSheet
         isLoadingInlineCard = true
+        isWaitingInlineNextConfirmation = false
         inlineSheetHandledForCurrentStep = false
 
         let storeVC = SKStoreProductViewController()
         storeVC.delegate = self
         storeVC.presentationController?.delegate = self
+        self.presentedStoreVC = storeVC
 
         final class LoadTimeoutGate: @unchecked Sendable {
             private let lock = NSLock()
@@ -2010,12 +2147,15 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         let gate = LoadTimeoutGate()
 
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard gate.trySettle(), let self, self.currentPresentationAttemptId == attemptId else { return }
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard gate.trySettle(),
+                  let self,
+                  self.queueGeneration == attemptGen,
+                  self.currentPresentationAttemptId == attemptId,
+                  (self.isRunningSequence || self.isSingleOverlaySession) else { return }
             self.isLoadingInlineCard = false
-            self.preferExternalAppStore = true
-            self.activeDeliveryMode = .externalAppStore
-            self.openExternalAndTrack(app: app, partOfSequence: partOfSequence)
+            self.presentedStoreVC = nil
+            self.markAppUnavailableInOverlay(app: app, partOfSequence: partOfSequence)
         }
 
         let params: [String: Any] = [
@@ -2023,30 +2163,41 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         ]
         storeVC.loadProduct(withParameters: params) { [weak self] loaded, _ in
             Task { @MainActor [weak self] in
-                guard gate.trySettle(), let self, self.currentPresentationAttemptId == attemptId else { return }
+                guard gate.trySettle(),
+                      let self,
+                      self.queueGeneration == attemptGen,
+                      self.currentPresentationAttemptId == attemptId,
+                      (self.isRunningSequence || self.isSingleOverlaySession) else { return }
                 self.isLoadingInlineCard = false
-                if loaded, let livePresenter = Self.topMostViewController(), livePresenter.presentedViewController == nil {
+                if loaded,
+                   let livePresenter = Self.topMostViewController(),
+                   livePresenter.presentedViewController == nil {
                     livePresenter.present(storeVC, animated: true)
-                    if !partOfSequence {
-                        self.completedIds.insert(app.id)
-                    }
                 } else {
-                    self.preferExternalAppStore = true
-                    self.activeDeliveryMode = .externalAppStore
-                    self.openExternalAndTrack(app: app, partOfSequence: partOfSequence)
+                    self.presentedStoreVC = nil
+                    self.markAppUnavailableInOverlay(app: app, partOfSequence: partOfSequence)
                 }
             }
         }
     }
 
-    private func openExternalAndTrack(app: InstalledAppRecord, partOfSequence: Bool) {
-        if partOfSequence {
-            waitingForExternalReturn = true
-        } else {
-            completedIds.insert(app.id)
-            isSingleOverlaySession = false
+    /// Gestisce un'app non caricabile dal banner StoreKit senza MAI buttare fuori l'utente verso l'app esterna App Store.
+    private func markAppUnavailableInOverlay(app: InstalledAppRecord, partOfSequence: Bool) {
+        unavailableInStoreIds.insert(app.id)
+        installerStatusNote = "«\(app.appName)» non si apre nel banner rapido Apple (puoi cercarla manualmente in basso a fine elenco senza bloccare la coda)."
+        if !partOfSequence {
+            stopSequence()
+            return
         }
-        iOSAppStoreCatalogResolver.openDirectAppStorePage(for: app)
+        guard isRunningSequence else { return }
+        if queue.isEmpty {
+            stopSequence()
+            return
+        }
+        activeDeliveryMode = .inlinePausedPrompt
+        isWaitingInlineNextConfirmation = true
+        currentActiveApp = queue.removeFirst()
+        currentQueuePosition += 1
     }
 
     private func updateSafeBottomPadding(from endFrame: CGRect) {
@@ -2065,30 +2216,47 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
         overlaySafeBottomPadding = min(140, computed)
     }
 
-    private func handleInlineStoreDismissed() {
-        guard !inlineSheetHandledForCurrentStep else { return }
+    private func handleInlineStoreDismissed(expectedGeneration: Int) {
+        presentedStoreVC = nil
+        guard !isDismissingByUserStop,
+              queueGeneration == expectedGeneration,
+              !inlineSheetHandledForCurrentStep else { return }
         inlineSheetHandledForCurrentStep = true
 
         if let active = currentActiveApp {
             completedIds.insert(active.id)
+            if !alreadyInstalledIds.contains(active.id) {
+                activeDownloadingIds.insert(active.id)
+            }
             if isRunningSequence {
                 historyStack.append(active)
             }
         }
         refreshInstalledStatuses()
 
-        if isSingleOverlaySession {
+        if isSingleOverlaySession || !isRunningSequence {
             stopSequence()
             return
         }
 
-        guard isRunningSequence else { return }
-        autoAdvanceTask?.cancel()
-        autoAdvanceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard let self, !Task.isCancelled, self.isRunningSequence else { return }
-            self.advanceToNextInQueue()
+        // Quando si chiude la scheda in-app («Fine»): NON lancia subito un'altra scheda a sorpresa in faccia all'utente!
+        // Resta nella barra fissa in basso con i tasti espliciti «Interrompi» e «Prossima app →».
+        guard !queue.isEmpty else {
+            stopSequence()
+            return
         }
+        while !queue.isEmpty {
+            let nextApp = queue.removeFirst()
+            currentQueuePosition += 1
+            if alreadyInstalledIds.contains(nextApp.id) || completedIds.contains(nextApp.id) || (nextApp.appStoreId ?? 0) <= 0 {
+                continue
+            }
+            currentActiveApp = nextApp
+            activeDeliveryMode = .inlinePausedPrompt
+            isWaitingInlineNextConfirmation = true
+            return
+        }
+        stopSequence()
     }
 
     // MARK: - SKOverlayDelegate
@@ -2096,22 +2264,28 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
     nonisolated func storeOverlayWillStartPresentation(_ overlay: SKOverlay, transitionContext: SKOverlay.TransitionContext) {
         let endFrame = transitionContext.endFrame
         Task { @MainActor [weak self] in
-            guard let self, overlay === self.activeOverlayInstance else { return }
+            guard let self,
+                  overlay === self.activeOverlayInstance,
+                  (self.isRunningSequence || self.isSingleOverlaySession) else { return }
             self.updateSafeBottomPadding(from: endFrame)
             self.isOverlayVisible = true
             self.isLoadingInlineCard = false
             self.hasEverPresentedOverlaySuccessfully = true
+            self.consecutiveOverlayFailures = 0
         }
     }
 
     nonisolated func storeOverlayDidFinishPresentation(_ overlay: SKOverlay, transitionContext: SKOverlay.TransitionContext) {
         let endFrame = transitionContext.endFrame
         Task { @MainActor [weak self] in
-            guard let self, overlay === self.activeOverlayInstance else { return }
+            guard let self,
+                  overlay === self.activeOverlayInstance,
+                  (self.isRunningSequence || self.isSingleOverlaySession) else { return }
             self.updateSafeBottomPadding(from: endFrame)
             self.isOverlayVisible = true
             self.isLoadingInlineCard = false
             self.hasEverPresentedOverlaySuccessfully = true
+            self.consecutiveOverlayFailures = 0
         }
     }
 
@@ -2126,18 +2300,22 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
 
     nonisolated func storeOverlayDidFailToLoad(_ overlay: SKOverlay, error: Error) {
         Task { @MainActor [weak self] in
-            guard let self, overlay === self.activeOverlayInstance else { return }
+            guard let self,
+                  overlay === self.activeOverlayInstance,
+                  (self.isRunningSequence || self.isSingleOverlaySession) else { return }
             self.isLoadingInlineCard = false
             self.isOverlayVisible = false
             self.activeOverlayInstance = nil
-            if !self.hasEverPresentedOverlaySuccessfully {
+            self.consecutiveOverlayFailures += 1
+            if !self.hasEverPresentedOverlaySuccessfully && self.consecutiveOverlayFailures >= 2 {
                 self.overlayUnsupportedOnDevice = true
             }
             if let active = self.currentActiveApp {
-                self.presentInlineSheetOrExternalFallback(
+                self.presentInlineStoreSheetOnly(
                     app: active,
                     partOfSequence: self.isRunningSequence,
-                    attemptId: self.currentPresentationAttemptId
+                    attemptId: self.currentPresentationAttemptId,
+                    attemptGen: self.queueGeneration
                 )
             }
         }
@@ -2147,9 +2325,11 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
 
     nonisolated func productViewControllerDidFinish(_ viewController: SKStoreProductViewController) {
         Task { @MainActor [weak self] in
+            guard let self else { return }
+            let gen = self.queueGeneration
             viewController.dismiss(animated: true) {
                 Task { @MainActor [weak self] in
-                    self?.handleInlineStoreDismissed()
+                    self?.handleInlineStoreDismissed(expectedGeneration: gen)
                 }
             }
         }
@@ -2157,7 +2337,8 @@ final class iOSSequentialAppInstaller: NSObject, ObservableObject, SKOverlayDele
 
     nonisolated func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         Task { @MainActor [weak self] in
-            self?.handleInlineStoreDismissed()
+            guard let self else { return }
+            self.handleInlineStoreDismissed(expectedGeneration: self.queueGeneration)
         }
     }
 
@@ -2250,7 +2431,7 @@ private final class CameraFrameVisionWorker: NSObject, AVCaptureVideoDataOutputS
         from connection: AVCaptureConnection
     ) {
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastAnalyzedTimestamp >= 0.27 else { return }
+        guard now - lastAnalyzedTimestamp >= 0.22 else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastAnalyzedTimestamp = now
 
@@ -2259,7 +2440,7 @@ private final class CameraFrameVisionWorker: NSObject, AVCaptureVideoDataOutputS
             recognizedLines = iOSInstalledAppsScanner.recognizeSpatialCameraFrameLines(
                 in: pixelBuffer,
                 orientation: .right,
-                minConfidence: 0.56
+                minConfidence: 0.45
             )
         }
 
