@@ -768,7 +768,7 @@ final class DirectSwitchTests: XCTestCase {
             "io",
             "⬇️ Aruba OTP"
         ])
-        let titles = candidates.map(\.lookupQuery)
+        let titles = candidates.map(\.cleaned)
 
         XCTAssertTrue(titles.contains("NOW"))
         XCTAssertFalse(titles.contains("now"))
