@@ -452,4 +452,16 @@ class DirectSwitchProtocolTest {
         assertEquals("Contratto.pdf", decoded.fileName)
         assertEquals(4096L, decoded.sizeBytes)
     }
+
+    @Test
+    fun sanitizedRelativeSegmentsPreservesWholeStorageLocations() {
+        assertEquals(
+            listOf("Scheda_SD", "Backup_Foto", "2026"),
+            PublicDownloadsSaver.sanitizedRelativeSegments("Scheda_SD/Backup_Foto/2026")
+        )
+        assertEquals(
+            listOf("iCloud_Drive", "Azienda", "Preventivi"),
+            PublicDownloadsSaver.sanitizedRelativeSegments("iCloud_Drive\\Azienda/Preventivi")
+        )
+    }
 }

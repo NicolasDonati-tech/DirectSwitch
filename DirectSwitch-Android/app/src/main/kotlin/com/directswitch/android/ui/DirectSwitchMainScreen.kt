@@ -724,12 +724,13 @@ fun DirectSwitchMainScreen(
     val activePrecheckTarget = pairedTargetPayload
     if (activePrecheck != null && activePrecheckTarget != null) {
         val missingAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !activePrecheck.hasAllFilesAccess
+        val accessibleLocations = activePrecheck.locationSummaries.filter { it.isAccessible }
         AlertDialog(
             onDismissRequest = { pendingDocPrecheckReport = null },
             containerColor = DirectSwitchTheme.cardSurface,
             title = {
                 Text(
-                    text = "Controllo cartelle e file sul telefono",
+                    text = "Controllo posizioni sul telefono",
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
@@ -739,19 +740,22 @@ fun DirectSwitchMainScreen(
                     Text(
                         text = when {
                             missingAllFiles ->
-                                "Per leggere e copiare tutte le cartelle e sottocartelle nelle stesse posizioni sul nuovo telefono, autorizza «Accesso a tutti i file» oppure seleziona manualmente una cartella."
+                                "Per leggere e copiare le posizioni intere del telefono (Memoria interna, Download, Documenti, Scheda SD) ricreandole identiche sul nuovo telefono, attiva «Accesso a tutti i file»."
                             activePrecheck.totalFiles == 0 ->
-                                "Nessun documento o file leggibile trovato nelle cartelle controllate. Scegli una cartella dal telefono oppure continua comunque con le altre categorie."
+                                "Nessun documento o file rilevato nelle posizioni del telefono al momento. Puoi autorizzare un'altra posizione (es. SD, USB o Drive) oppure continuare comunque."
                             else ->
-                                "Trovati ${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle."
+                                "Pronte ${maxOf(1, accessibleLocations.size)} posizioni (${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle)."
                         },
                         fontSize = 13.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
-                    if (activePrecheck.folderSummaries.isNotEmpty()) {
+                    if (activePrecheck.locationSummaries.isNotEmpty()) {
                         Text(
-                            text = "Cartelle pronte (${activePrecheck.folderSummaries.size}): " +
-                                activePrecheck.folderSummaries.take(5).joinToString(", ") { "${it.folderPath} (${it.fileCount})" },
+                            text = "Posizioni rilevate: " +
+                                activePrecheck.locationSummaries.joinToString(" • ") {
+                                    if (it.isAccessible) "${it.locationName} (${it.fileCount} file)"
+                                    else "${it.locationName} (accesso richiesto)"
+                                },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = DirectSwitchTheme.teal
@@ -767,7 +771,7 @@ fun DirectSwitchMainScreen(
                             DocumentsAndWhatsAppScanner.openAllFilesAccessSettings(context)
                         }
                     ) {
-                        Text("Autorizza tutti i file", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                        Text("Autorizza accesso completo", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
                     }
                 } else {
                     TextButton(
@@ -776,7 +780,7 @@ fun DirectSwitchMainScreen(
                             folderTreePickerLauncher.launch(null)
                         }
                     ) {
-                        Text("Scegli cartella", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                        Text("Autorizza posizione", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
                     }
                 }
             },
@@ -789,7 +793,7 @@ fun DirectSwitchMainScreen(
                                 folderTreePickerLauncher.launch(null)
                             }
                         ) {
-                            Text("Scegli cartella", color = DirectSwitchTheme.blue)
+                            Text("Autorizza posizione", color = DirectSwitchTheme.blue)
                         }
                     }
                     TextButton(
@@ -1198,13 +1202,13 @@ private fun ReceiverPairingWizardView(
                         AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.orange)
                         Column {
                             Text(
-                                "Ricrea cartelle originali",
+                                "Ricrea posizioni e cartelle originali",
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = DirectSwitchTheme.textPrimary
                             )
                             Text(
-                                "Autorizza «Accesso a tutti i file» per salvare nelle identiche cartelle di origine",
+                                "Autorizza «Accesso a tutti i file» per salvare intere posizioni nelle identiche cartelle di origine",
                                 fontSize = 12.sp,
                                 color = DirectSwitchTheme.blue
                             )
@@ -1637,9 +1641,10 @@ private fun SenderCategoriesWizardView(
     if (categories.documents) {
         val wizardContext = LocalContext.current
         val folderSummaries = summary?.documentFolderSummaries.orEmpty()
+        val locationSummaries = summary?.documentLocationSummaries.orEmpty()
         val hasAllFiles = summary?.hasAllFilesAccess
             ?: DocumentsAndWhatsAppScanner.hasAllFilesAccess(wizardContext)
-        val hasPickedFoldersOrFiles = !vaultStatusNote.isNullOrBlank() ||
+        val hasPickedLocations = !vaultStatusNote.isNullOrBlank() ||
             remember(summary) { DocumentsAndWhatsAppScanner.getPersistedFolderTreeUris(wizardContext).isNotEmpty() }
 
         DirectSwitchCard(padding = 14.dp, spacing = 10.dp) {
@@ -1656,16 +1661,16 @@ private fun SenderCategoriesWizardView(
                     AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.teal)
                     Column {
                         Text(
-                            text = "Controllo cartelle e file sul telefono",
+                            text = "Posizioni intere sul telefono",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
                             text = if (summary != null) {
-                                "${summary.documentsCount} file in ${folderSummaries.size} cartelle • ${formatMb(summary.documentsBytes)}"
+                                "${maxOf(1, locationSummaries.size)} posizioni • ${summary.documentsCount} file in ${folderSummaries.size} cartelle • ${formatMb(summary.documentsBytes)}"
                             } else {
-                                "Scansione cartelle in corso..."
+                                "Scansione posizioni in corso..."
                             },
                             fontSize = 12.sp,
                             color = DirectSwitchTheme.textSecondary
@@ -1714,7 +1719,7 @@ private fun SenderCategoriesWizardView(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = "Accesso completo alle cartelle non attivo: tocca per autorizzare «Accesso a tutti i file» e leggere tutte le sottocartelle.",
+                            text = "Accesso completo non attivo: tocca per autorizzare «Accesso a tutti i file» e copiare intere posizioni (Memoria interna, Download, Documenti, Scheda SD).",
                             fontSize = 12.sp,
                             lineHeight = 16.sp,
                             color = DirectSwitchTheme.textPrimary,
@@ -1729,15 +1734,40 @@ private fun SenderCategoriesWizardView(
                 }
             }
 
+            if (locationSummaries.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    locationSummaries.forEach { loc ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = (if (loc.isAccessible) "✓ " else "⚠ ") + loc.locationName,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (loc.isAccessible) DirectSwitchTheme.textPrimary else DirectSwitchTheme.orange,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "${loc.folderCount} cartelle • ${loc.fileCount} file • ${formatMb(loc.totalBytes)}",
+                                fontSize = 12.sp,
+                                color = DirectSwitchTheme.textSecondary
+                            )
+                        }
+                    }
+                }
+            }
+
             if (folderSummaries.isEmpty()) {
                 Text(
-                    text = "Nessuna cartella o documento trovato al momento. Puoi selezionare una cartella qui sotto per mantenere tutte le sottocartelle.",
+                    text = "Attiva «Accesso a tutti i file» qui sopra per includere l'intera memoria del telefono, oppure autorizza una posizione esterna (SD / USB / Drive).",
                     fontSize = 12.sp,
                     color = DirectSwitchTheme.textSecondary
                 )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    folderSummaries.take(8).forEach { folder ->
+                    folderSummaries.take(6).forEach { folder ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1745,21 +1775,21 @@ private fun SenderCategoriesWizardView(
                         ) {
                             Text(
                                 text = "${folder.folderPath}/",
-                                fontSize = 12.sp,
+                                fontSize = 11.5.sp,
                                 fontWeight = FontWeight.Medium,
-                                color = DirectSwitchTheme.textPrimary,
+                                color = DirectSwitchTheme.textSecondary,
                                 modifier = Modifier.weight(1f)
                             )
                             Text(
                                 text = "${folder.fileCount} file • ${formatMb(folder.totalBytes)}",
-                                fontSize = 12.sp,
+                                fontSize = 11.5.sp,
                                 color = DirectSwitchTheme.textSecondary
                             )
                         }
                     }
-                    if (folderSummaries.size > 8) {
+                    if (folderSummaries.size > 6) {
                         Text(
-                            text = "e altre ${folderSummaries.size - 8} cartelle (${summary?.documentsCount ?: 0} file totali)",
+                            text = "e altre ${folderSummaries.size - 6} cartelle (${summary?.documentsCount ?: 0} file totali)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = DirectSwitchTheme.teal
@@ -1778,20 +1808,16 @@ private fun SenderCategoriesWizardView(
             }
 
             DirectSwitchSecondaryButton(
-                text = "Scegli cartella (con sottocartelle)",
+                text = "Autorizza un'altra posizione (SD / USB / Drive)",
                 onClick = onPickFolderTree
             )
-            DirectSwitchSecondaryButton(
-                text = "Aggiungi file o .zip WhatsApp",
-                onClick = onPickDocumentsOrWhatsApp
-            )
-            if (hasPickedFoldersOrFiles) {
+            if (hasPickedLocations) {
                 TextButton(
                     onClick = onClearPickedDocuments,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "Rimuovi cartelle e file selezionati manualmente",
+                        text = "Rimuovi posizioni esterne autorizzate",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.red
@@ -1799,9 +1825,10 @@ private fun SenderCategoriesWizardView(
                 }
             }
         }
-    } else if (categories.whatsAppVault) {
+    }
+    if (categories.whatsAppVault) {
         DirectSwitchSecondaryButton(
-            text = "Aggiungi file o .zip WhatsApp",
+            text = "Aggiungi archivio .zip WhatsApp (se esportato)",
             onClick = onPickDocumentsOrWhatsApp
         )
     }

@@ -130,10 +130,21 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var manifestItems: [String: ManifestItem] = [:]
     private var completedItemIds: Set<String> = []
     private var pendingLiveVideoTempURLs: [String: URL] = [:]
+    private var receiverDestSession: iOSDocumentsSandboxBridge.ReceiverDestinationSession?
     private var senderUploadedIdsBySession: [String: Set<String>] = [:]
     private var senderUploadedBytesBySession: [String: Int64] = [:]
     private var transferredBytes: Int64 = 0
     private var transferStartDate: Date = Date()
+
+    private func refreshReceiverDestinationSession() {
+        receiverDestSession?.close()
+        receiverDestSession = iOSDocumentsSandboxBridge.ReceiverDestinationSession.openFromPersistedBookmarks()
+    }
+
+    private func closeReceiverDestinationSession() {
+        receiverDestSession?.close()
+        receiverDestSession = nil
+    }
 
     /// Innalza il limite soft dei file descriptor aperti da 256 (default iOS) fino a 4096 per evitare errori `EMFILE`
     /// e blocchi socket oltre i 4.000+ file trasferiti consecutivamente.
@@ -397,6 +408,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     func stopReceiverServer() {
         UIApplication.shared.isIdleTimerDisabled = false
         cleanupPendingLiveVideos()
+        closeReceiverDestinationSession()
         activeSessionId = ""
         beaconBroadcastTask?.cancel()
         beaconBroadcastTask = nil
@@ -417,6 +429,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         stopReceiverServer()
         stopUdpAutoDiscovery()
         cleanupPendingLiveVideos()
+        closeReceiverDestinationSession()
         senderUploadedIdsBySession.removeAll()
         senderUploadedBytesBySession.removeAll()
         peerName = ""
@@ -1148,7 +1161,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let hasMedia = tierFiltered.contains { $0.category == .PHOTOS || $0.category == .VIDEOS }
             let hasDocs = tierFiltered.contains { $0.category == .DOCUMENTS || $0.category == .WHATSAPP_VAULT }
             let existingMediaKeys = hasMedia ? await iOSPhotoKitMigrator.existingDedupKeys() : Set<String>()
-            let existingDocKeys = hasDocs ? iOSDocumentsSandboxBridge.existingDocumentDedupKeys() : Set<String>()
+            if hasDocs {
+                refreshReceiverDestinationSession()
+            }
+            let existingDocKeys = hasDocs ? iOSDocumentsSandboxBridge.existingDocumentDedupKeys(including: receiverDestSession) : Set<String>()
 
             var acceptedItems: [ManifestItem] = []
             var skippedMediaDuplicates = 0
@@ -1302,12 +1318,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             } else {
                 let isPasswordsCsv = iOSDocumentsSandboxBridge.isPasswordsCsvFile(item.fileName)
-                savedOk = iOSDocumentsSandboxBridge.saveDocumentFile(item: item, sourceFileURL: tempPlainURL)
+                if receiverDestSession == nil {
+                    refreshReceiverDestinationSession()
+                }
+                let saveResult = iOSDocumentsSandboxBridge.saveDocumentFileToDestination(
+                    item: item,
+                    sourceFileURL: tempPlainURL,
+                    session: receiverDestSession
+                )
+                savedOk = saveResult.saved
                 if savedOk {
-                    let folderKey = item.category == .WHATSAPP_VAULT
-                        ? "WhatsApp_Vault"
-                        : iOSDocumentsSandboxBridge.normalizedFolderString(item.relativeAlbumOrFolder)
-                    receivedDocumentFolders[folderKey, default: 0] += 1
+                    receivedDocumentFolders[saveResult.displayFolder, default: 0] += 1
                 }
                 if savedOk && isPasswordsCsv {
                     receivedPasswordsCsvCount += 1
@@ -1345,6 +1366,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 }
             }
             cleanupPendingLiveVideos()
+            closeReceiverDestinationSession()
             isTransferring = false
             isBackgroundKeepAliveActive = false
             currentItemName = ""

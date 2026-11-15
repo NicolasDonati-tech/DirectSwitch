@@ -75,6 +75,8 @@ struct DirectSwitchMainView: View {
     @State private var documentPrecheckReport: iOSDocumentsPrecheckReport? = nil
     @State private var pendingTransferPrecheckAlert: iOSDocumentsPrecheckReport? = nil
     @State private var sharedVaultToast: String? = nil
+    @State private var receiverAuthorizedDestinations: [String] = iOSDocumentsSandboxBridge.receiverDestinationsSummary().destinations
+    @State private var receiverFallbackRootLabel: String? = iOSDocumentsSandboxBridge.receiverDestinationsSummary().fallbackRoot
 
     // Scansione locale e StoreKit Pass iPhone <-> Android
     @State private var scanSummary: iOSLocalDeviceScanSummary? = nil
@@ -172,6 +174,19 @@ struct DirectSwitchMainView: View {
                                     deniedPermissionsNote: receiverDeniedSummary,
                                     errorMessage: transport.errorMessage,
                                     preScannedAppsCount: transport.remoteScannedApps.count,
+                                    authorizedDestinations: receiverAuthorizedDestinations,
+                                    fallbackDestinationRoot: receiverFallbackRootLabel,
+                                    onAuthorizeDestinations: {
+                                        activeDocumentPickerMode = .receiverDestinations
+                                    },
+                                    onChooseFallbackRoot: {
+                                        activeDocumentPickerMode = .receiverFallbackRoot
+                                    },
+                                    onClearDestinations: {
+                                        iOSDocumentsSandboxBridge.clearReceiverDestinations()
+                                        receiverAuthorizedDestinations = []
+                                        receiverFallbackRootLabel = nil
+                                    },
                                     onOpenLiveAppScanner: {
                                         transport.showRemoteAppScannerOnReceiver = true
                                     },
@@ -247,7 +262,7 @@ struct DirectSwitchMainView: View {
                                     onDeleteTempAutoRecording: deleteTemporaryAutoRecording,
                                     onResetAppsToZero: resetSenderAppsToVerifiedOnly,
                                     onManageApps: { showSenderAppsSheet = true },
-                                    onAddFolders: { activeDocumentPickerMode = .folders },
+                                    onAddFolders: { activeDocumentPickerMode = .positions },
                                     onAddFilesOrWhatsApp: { activeDocumentPickerMode = .files },
                                     onRefreshDocumentCheck: { refreshAuthorizedSummary() },
                                     onClearStagedFiles: {
@@ -358,26 +373,41 @@ struct DirectSwitchMainView: View {
         }
         .sheet(item: $activeDocumentPickerMode) { mode in
             iOSDocumentOrFolderPickerRepresentable(mode: mode) { urls in
-                if mode == .folders {
-                    _ = iOSDocumentsSandboxBridge.authorizeFolderBookmarks(urls)
-                } else {
+                switch mode {
+                case .receiverDestinations:
+                    _ = iOSDocumentsSandboxBridge.authorizeReceiverDestinationBookmarks(urls)
+                    let summary = iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+                    receiverAuthorizedDestinations = summary.destinations
+                    receiverFallbackRootLabel = summary.fallbackRoot
+                case .receiverFallbackRoot:
+                    _ = iOSDocumentsSandboxBridge.setReceiverFallbackRootBookmark(urls)
+                    let summary = iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+                    receiverAuthorizedDestinations = summary.destinations
+                    receiverFallbackRootLabel = summary.fallbackRoot
+                case .positions, .folders:
+                    let result = iOSDocumentsSandboxBridge.authorizePositionBookmarks(urls)
+                    if !result.stagedFallback.isEmpty {
+                        pickedDocuments.append(contentsOf: result.stagedFallback)
+                    }
+                    refreshAuthorizedSummary()
+                case .files:
                     let imported = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
                     pickedDocuments.append(contentsOf: imported)
+                    refreshAuthorizedSummary()
                 }
-                refreshAuthorizedSummary()
             }
         }
         .alert(
-            "Controllo pre-trasferimento File e Cartelle",
+            "Controllo posizioni sul telefono",
             isPresented: Binding(
                 get: { pendingTransferPrecheckAlert != nil },
                 set: { if !$0 { pendingTransferPrecheckAlert = nil } }
             ),
             presenting: pendingTransferPrecheckAlert
         ) { report in
-            Button("Scegli cartelle o file su iPhone") {
+            Button("Autorizza intera posizione") {
                 pendingTransferPrecheckAlert = nil
-                activeDocumentPickerMode = .folders
+                activeDocumentPickerMode = .positions
             }
             if report.totalFiles > 0 {
                 Button("Continua comunque") {
@@ -456,6 +486,9 @@ struct DirectSwitchMainView: View {
         pairingErrorNote = nil
         receiverQrPayload = transport.startReceiverServer()
         receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
+        let destSummary = iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+        receiverAuthorizedDestinations = destSummary.destinations
+        receiverFallbackRootLabel = destSummary.fallbackRoot
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .receiveWaitCode
         }
@@ -528,15 +561,15 @@ struct DirectSwitchMainView: View {
 
     private func precheckAlertMessage(for report: iOSDocumentsPrecheckReport) -> String {
         if report.totalFiles == 0 && report.unreadableFilesCount == 0 {
-            return "Nessun file o cartella trovato in «File → Su iPhone → DirectSwitch» o nelle cartelle autorizzate. Aggiungi le cartelle originali da «File → Su iPhone» per mantenerle identiche sul nuovo telefono."
+            return "Nessun file trovato nelle posizioni di DirectSwitch o autorizzate. Tocca «Autorizza intera posizione», apri una posizione (es. Su iPhone o iCloud Drive) e fai Seleziona → Seleziona tutto → Apri per copiarla per intero."
         }
         if report.totalFiles == 0 && report.unreadableFilesCount > 0 {
-            return "Trovati \(report.unreadableFilesCount) file non ancora scaricati o non leggibili (es. su iCloud Drive). Scaricali nell'app File prima del trasferimento."
+            return "Trovati \(report.unreadableFilesCount) file non ancora scaricati o non leggibili (es. su iCloud Drive). Scaricali nell'app File prima di copiare la posizione."
         }
         if report.unreadableFilesCount > 0 {
-            return "Pronti \(report.totalFiles) file in \(report.folderSummaries.count) cartelle, ma \(report.unreadableFilesCount) file risultano illeggibili o ancora solo su iCloud e verrebbero saltati."
+            return "Pronti \(report.totalFiles) file in \(max(1, report.locationSummaries.count)) posizioni (\(report.folderSummaries.count) cartelle), ma \(report.unreadableFilesCount) file risultano illeggibili o solo su iCloud e verrebbero saltati."
         }
-        return "Controllo completato: \(report.totalFiles) file in \(report.folderSummaries.count) cartelle pronti."
+        return "Controllo completato: \(max(1, report.locationSummaries.count)) posizioni (\(report.totalFiles) file in \(report.folderSummaries.count) cartelle) pronte."
     }
 
     private func launchSenderTransfer() {
@@ -1902,7 +1935,7 @@ private struct DirectSwitchTransferProgressView: View {
                 Spacer()
                 InfoCircleButton(
                     title: "Importare le Password senza iCloud",
-                    message: "1. Tocca il pulsante qui sotto per aprire Impostazioni.\n2. Vai in App → Password (oppure Safari → Importa) e seleziona il file .csv salvato in «Su iPhone → DirectSwitch → Password_Esportate».\n3. Tutte le password verranno salvate nel Portachiavi locale con Face ID senza attivare iCloud!"
+                    message: "1. Tocca il pulsante qui sotto per aprire Impostazioni.\n2. Vai in App → Password (oppure Safari → Importa) e seleziona il file .csv salvato in «Password_Esportate» (vedi il riepilogo cartelle qui sotto).\n3. Tutte le password verranno salvate nel Portachiavi locale con Face ID senza attivare iCloud!"
                 )
             }
 
@@ -1923,7 +1956,7 @@ private struct DirectSwitchTransferProgressView: View {
             HStack(spacing: 10) {
                 Image(systemName: "folder.fill")
                     .foregroundColor(AppleTheme.blue)
-                Text("Cartelle e file salvati in **File → Su iPhone → DirectSwitch** mantenendo le cartelle originali:")
+                Text("Posizioni e cartelle ricreate su questo iPhone:")
                     .font(.system(size: 13))
                     .foregroundColor(AppleTheme.textSecondary)
                 Spacer()
@@ -1952,7 +1985,7 @@ private struct DirectSwitchTransferProgressView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     if sortedFolders.count > 12 {
-                        Text("…e altre \(sortedFolders.count - 12) cartelle in File → Su iPhone → DirectSwitch")
+                        Text("…e altre \(sortedFolders.count - 12) cartelle nelle rispettive posizioni di destinazione")
                             .font(.system(size: 12))
                             .foregroundColor(AppleTheme.textSecondary)
                     }

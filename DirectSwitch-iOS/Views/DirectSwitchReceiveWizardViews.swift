@@ -17,6 +17,11 @@ struct ReceivePairingStepView: View {
     let deniedPermissionsNote: String?
     let errorMessage: String?
     var preScannedAppsCount: Int = 0
+    var authorizedDestinations: [String] = []
+    var fallbackDestinationRoot: String? = nil
+    var onAuthorizeDestinations: (() -> Void)? = nil
+    var onChooseFallbackRoot: (() -> Void)? = nil
+    var onClearDestinations: (() -> Void)? = nil
     var onOpenLiveAppScanner: (() -> Void)? = nil
     var onOpenAppSettings: () -> Void
     var onCancel: () -> Void
@@ -175,6 +180,94 @@ struct ReceivePairingStepView: View {
                         .appleCard(padding: 13)
                     }
                     .buttonStyle(.plain)
+                }
+
+                if onAuthorizeDestinations != nil || onChooseFallbackRoot != nil {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Image(systemName: authorizedDestinations.isEmpty && fallbackDestinationRoot == nil ? "folder.badge.questionmark" : "folder.fill.badge.checkmark")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(authorizedDestinations.isEmpty && fallbackDestinationRoot == nil ? AppleTheme.orange : AppleTheme.green)
+                            Text("Posizioni di destinazione (fuori da DirectSwitch)")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Spacer()
+                            InfoCircleButton(
+                                title: "Salvataggio nelle posizioni originali",
+                                message: "Per evitare che i documenti finiscano tutti dentro la cartella dell'app DirectSwitch, autorizza le cartelle su «Su iPhone» (Download, Documenti…) o su «iCloud Drive» (puoi usare ⋯ → Seleziona → Seleziona tutto → Apri). Facoltativo: puoi anche indicare una posizione base dove creare eventuali cartelle nuove."
+                            )
+                        }
+
+                        if authorizedDestinations.isEmpty && fallbackDestinationRoot == nil {
+                            Text("Nessuna posizione autorizzata: i file non associati a una cartella autorizzata verranno salvati in File → Su iPhone → DirectSwitch.")
+                                .font(.system(size: 12))
+                                .foregroundColor(AppleTheme.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(Array(authorizedDestinations.prefix(4)), id: \.self) { label in
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(AppleTheme.green)
+                                        Text(label)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(AppleTheme.textPrimary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                                if authorizedDestinations.count > 4 {
+                                    Text("…e altre \(authorizedDestinations.count - 4) posizioni autorizzate")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                }
+                                if let fb = fallbackDestinationRoot {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "folder.badge.plus")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(AppleTheme.blue)
+                                        Text("Cartelle nuove → \(fb)")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(AppleTheme.blue)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                            }
+                        }
+
+                        if let onAuth = onAuthorizeDestinations {
+                            AppleSecondaryButton(
+                                title: authorizedDestinations.isEmpty ? "Autorizza posizioni (Su iPhone / iCloud)" : "Aggiungi altre posizioni su iPhone / iCloud",
+                                icon: "folder.badge.plus",
+                                tint: AppleTheme.blue,
+                                action: onAuth
+                            )
+                        }
+
+                        HStack(spacing: 12) {
+                            if let onFb = onChooseFallbackRoot {
+                                Button(action: onFb) {
+                                    Text(fallbackDestinationRoot == nil ? "Posizione base per nuove cartelle" : "Cambia posizione base")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(AppleTheme.blue)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Spacer()
+                            if (!authorizedDestinations.isEmpty || fallbackDestinationRoot != nil),
+                               let onClear = onClearDestinations {
+                                Button(action: onClear) {
+                                    Text("Azzera")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(AppleTheme.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .appleCard(padding: 14)
                 }
 
                 if let err = errorMessage, !err.isEmpty {

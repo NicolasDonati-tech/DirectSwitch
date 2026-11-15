@@ -863,4 +863,142 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(matchingFolder?.fileCount, 1)
         XCTAssertEqual(matchingFolder?.totalBytes, Int64(payload.count))
     }
+
+    func testDocumentsSandboxBridgeClassifiesWholePositionsWithoutContainerLeak() throws {
+        let onIPhoneRoot = URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/AppGroup/ABC/File Provider Storage")
+        let onIPhoneClassified = iOSDocumentsSandboxBridge.classifyPositionBaseFolder(for: onIPhoneRoot, isDirectory: true)
+        XCTAssertEqual(onIPhoneClassified.baseFolder, "")
+        XCTAssertEqual(onIPhoneClassified.locationLabel, "Su iPhone")
+
+        let onIPhoneSub = URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/AppGroup/ABC/File Provider Storage/Lavoro")
+        let subClassified = iOSDocumentsSandboxBridge.classifyPositionBaseFolder(for: onIPhoneSub, isDirectory: true)
+        XCTAssertEqual(subClassified.baseFolder, "Lavoro")
+        XCTAssertEqual(subClassified.locationLabel, "Su iPhone")
+
+        let iCloudFolder = URL(fileURLWithPath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Azienda")
+        let iCloudClassified = iOSDocumentsSandboxBridge.classifyPositionBaseFolder(for: iCloudFolder, isDirectory: true)
+        XCTAssertEqual(iCloudClassified.baseFolder, "iCloud_Drive/Azienda")
+        XCTAssertEqual(iCloudClassified.locationLabel, "iCloud Drive")
+
+        guard let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            XCTFail("Missing iOS Documents directory in test host")
+            return
+        }
+        let tag = "PosTest_\(UUID().uuidString.prefix(8))"
+        let testRoot = docsRoot.appendingPathComponent(tag, isDirectory: true)
+        let nestedDir = testRoot.appendingPathComponent("Contratti/2026", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: testRoot) }
+        try FileManager.default.createDirectory(at: nestedDir, withIntermediateDirectories: true)
+        try Data("ABCDE".utf8).write(to: nestedDir.appendingPathComponent("accordo.pdf"))
+
+        let report = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: [], includeWhatsAppVault: false)
+        let localPos = report.locationSummaries.first(where: { $0.locationName == "DirectSwitch (Su iPhone)" })
+        XCTAssertNotNil(localPos)
+        XCTAssertGreaterThanOrEqual(localPos?.fileCount ?? 0, 1)
+        XCTAssertGreaterThanOrEqual(localPos?.folderCount ?? 0, 1)
+    }
+
+    func testReceiverDestinationSessionPlacesFoldersIntoOriginalPositionsOutsideDirectSwitch() throws {
+        let fm = FileManager.default
+        let tempBase = fm.temporaryDirectory.appendingPathComponent("DS_RecvPos_\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? fm.removeItem(at: tempBase) }
+
+        let downloadDestDir = tempBase.appendingPathComponent("Download", isDirectory: true)
+        let documentiDestDir = tempBase.appendingPathComponent("Documenti", isDirectory: true)
+        let iCloudLavoroDir = tempBase.appendingPathComponent("Mobile Documents/com~apple~CloudDocs/Lavoro", isDirectory: true)
+        let fallbackBaseDir = tempBase.appendingPathComponent("Archivio_Esterno", isDirectory: true)
+        try fm.createDirectory(at: downloadDestDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: documentiDestDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: iCloudLavoroDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: fallbackBaseDir, withIntermediateDirectories: true)
+
+        guard let dDest = iOSDocumentsSandboxBridge.buildAuthorizedDestination(for: downloadDestDir),
+              let docDest = iOSDocumentsSandboxBridge.buildAuthorizedDestination(for: documentiDestDir),
+              let icloudDest = iOSDocumentsSandboxBridge.buildAuthorizedDestination(for: iCloudLavoroDir),
+              let fbDest = iOSDocumentsSandboxBridge.buildAuthorizedDestination(for: fallbackBaseDir) else {
+            XCTFail("Expected valid ReceiverAuthorizedDestination objects")
+            return
+        }
+
+        let destinations = [dDest, docDest, icloudDest]
+
+        // 1. Download/Fatture/2026 deve finire dentro <tempBase>/Download/Fatture/2026 (NON in DirectSwitch/)
+        let dlItem = ManifestItem(
+            id: "doc_1", category: .DOCUMENTS, fileName: "gennaio.pdf",
+            mimeType: "application/pdf", sizeBytes: 5, sha256: "a",
+            capturedEpochMillis: 1_700_000_000_000, relativeAlbumOrFolder: "Download/Fatture/2026",
+            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k1"
+        )
+        let dlResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: dlItem, destinations: destinations, fallbackRoot: fbDest)
+        XCTAssertEqual(dlResolved?.directoryURL.standardizedFileURL.path, downloadDestDir.appendingPathComponent("Fatture/2026").standardizedFileURL.path)
+        XCTAssertFalse(dlResolved?.displayFolder.contains("DirectSwitch") ?? true)
+
+        // 2. Alias cross-OS: Android Downloads/Note & Documents/Contratti -> iPhone Download/Note & Documenti/Contratti
+        let androidDlItem = ManifestItem(
+            id: "doc_2", category: .DOCUMENTS, fileName: "nota.txt",
+            mimeType: "text/plain", sizeBytes: 4, sha256: "b",
+            capturedEpochMillis: 0, relativeAlbumOrFolder: "Downloads/Note",
+            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k2"
+        )
+        let androidDlResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: androidDlItem, destinations: destinations, fallbackRoot: fbDest)
+        XCTAssertEqual(androidDlResolved?.directoryURL.standardizedFileURL.path, downloadDestDir.appendingPathComponent("Note").standardizedFileURL.path)
+
+        let androidDocsItem = ManifestItem(
+            id: "doc_3", category: .DOCUMENTS, fileName: "affitto.pdf",
+            mimeType: "application/pdf", sizeBytes: 4, sha256: "c",
+            capturedEpochMillis: 0, relativeAlbumOrFolder: "Documents/Contratti",
+            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k3"
+        )
+        let androidDocsResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: androidDocsItem, destinations: destinations, fallbackRoot: fbDest)
+        XCTAssertEqual(androidDocsResolved?.directoryURL.standardizedFileURL.path, documentiDestDir.appendingPathComponent("Contratti").standardizedFileURL.path)
+
+        // 3. iCloud_Drive/Lavoro/Preventivi deve andare dentro <iCloudLavoroDir>/Preventivi
+        let icloudItem = ManifestItem(
+            id: "doc_4", category: .DOCUMENTS, fileName: "offerta.docx",
+            mimeType: "application/octet-stream", sizeBytes: 4, sha256: "d",
+            capturedEpochMillis: 0, relativeAlbumOrFolder: "iCloud_Drive/Lavoro/Preventivi",
+            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k4"
+        )
+        let icloudResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: icloudItem, destinations: destinations, fallbackRoot: fbDest)
+        XCTAssertEqual(icloudResolved?.directoryURL.standardizedFileURL.path, iCloudLavoroDir.appendingPathComponent("Preventivi").standardizedFileURL.path)
+        XCTAssertTrue(icloudResolved?.displayFolder.hasPrefix("iCloud Drive") ?? false)
+
+        // 4. Cartella nuova non ancora autorizzata usa fallbackRoot esterno invece di app/DirectSwitch
+        let customItem = ManifestItem(
+            id: "doc_5", category: .DOCUMENTS, fileName: "progetto.pdf",
+            mimeType: "application/pdf", sizeBytes: 4, sha256: "e",
+            capturedEpochMillis: 0, relativeAlbumOrFolder: "Progetti_Nuovi/2026",
+            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k5"
+        )
+        let customResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: customItem, destinations: destinations, fallbackRoot: fbDest)
+        XCTAssertEqual(customResolved?.directoryURL.standardizedFileURL.path, fallbackBaseDir.appendingPathComponent("Progetti_Nuovi/2026").standardizedFileURL.path)
+
+        // 5. Verifica scrittura reale + anti-duplicato senza " (1)" su sessione attiva
+        let sourceTemp = tempBase.appendingPathComponent("src_gennaio.pdf")
+        try Data("HELLO".utf8).write(to: sourceTemp)
+        let session = iOSDocumentsSandboxBridge.ReceiverDestinationSession(destinations: destinations, fallbackRoot: fbDest)
+        let firstWrite = iOSDocumentsSandboxBridge.saveDocumentFileToDestination(item: dlItem, sourceFileURL: sourceTemp, session: session)
+        XCTAssertTrue(firstWrite.saved)
+        XCTAssertFalse(firstWrite.displayFolder.contains("DirectSwitch"))
+        let expectedDestFile = downloadDestDir.appendingPathComponent("Fatture/2026/gennaio.pdf")
+        XCTAssertTrue(fm.fileExists(atPath: expectedDestFile.path))
+
+        let secondWrite = iOSDocumentsSandboxBridge.saveDocumentFileToDestination(item: dlItem, sourceFileURL: sourceTemp, session: session)
+        XCTAssertTrue(secondWrite.saved)
+        let dupFile = downloadDestDir.appendingPathComponent("Fatture/2026/gennaio (1).pdf")
+        XCTAssertFalse(fm.fileExists(atPath: dupFile.path))
+
+        let dedupKeys = iOSDocumentsSandboxBridge.existingDocumentDedupKeys(including: session)
+        XCTAssertTrue(iOSDocumentsSandboxBridge.matchesExistingDocumentDedup(item: dlItem, existingKeys: dedupKeys))
+        XCTAssertTrue(iOSDocumentsSandboxBridge.matchesExistingDocumentDedup(
+            item: ManifestItem(
+                id: "doc_alias", category: .DOCUMENTS, fileName: "gennaio.pdf",
+                mimeType: "application/pdf", sizeBytes: 5, sha256: "a",
+                capturedEpochMillis: 1_700_000_000_000, relativeAlbumOrFolder: "Downloads/Fatture/2026",
+                width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k1"
+            ),
+            existingKeys: dedupKeys
+        ))
+        session.close()
+    }
 }
