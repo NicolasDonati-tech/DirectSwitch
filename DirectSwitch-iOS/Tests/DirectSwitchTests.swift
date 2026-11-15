@@ -797,4 +797,70 @@ final class DirectSwitchTests: XCTestCase {
             )
         )
     }
+
+    func testDocumentsSandboxBridgePreservesExactSubfoldersAndDeduplicates() throws {
+        guard let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            XCTFail("Missing iOS Documents directory in test host")
+            return
+        }
+
+        let uniqueTag = "DirectSwitchTest_\(UUID().uuidString.prefix(8))"
+        let testRootDir = docsRoot.appendingPathComponent(uniqueTag, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: testRootDir)
+        }
+
+        let relFolder = "\(uniqueTag)/Lavoro/2026/Fatture"
+        let item = ManifestItem(
+            id: "doc_test_1",
+            category: .DOCUMENTS,
+            fileName: "Fattura_01.pdf",
+            relativeAlbumOrFolder: relFolder,
+            sizeBytes: 15,
+            capturedEpochMillis: 1_700_000_000_000,
+            dedupKey: "doc_test_1_dedup",
+            mimeType: "application/pdf"
+        )
+
+        let targetDir = try XCTUnwrap(iOSDocumentsSandboxBridge.targetDirectory(for: item))
+        XCTAssertFalse(targetDir.path.contains("DirectSwitch_Documenti"))
+        XCTAssertTrue(targetDir.path.hasSuffix("/\(relFolder)"), "Unexpected path: \(targetDir.path)")
+
+        let tmpSrc1 = FileManager.default.temporaryDirectory.appendingPathComponent("src1_\(UUID().uuidString).pdf")
+        let tmpSrc2 = FileManager.default.temporaryDirectory.appendingPathComponent("src2_\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: tmpSrc1)
+            try? FileManager.default.removeItem(at: tmpSrc2)
+        }
+        let payload = Data("ContenutoPDF123".utf8)
+        try payload.write(to: tmpSrc1)
+        try payload.write(to: tmpSrc2)
+
+        XCTAssertTrue(iOSDocumentsSandboxBridge.saveDocumentFile(item: item, sourceFileURL: tmpSrc1))
+        XCTAssertTrue(iOSDocumentsSandboxBridge.saveDocumentFile(item: item, sourceFileURL: tmpSrc2))
+
+        let savedEntries = try FileManager.default.contentsOfDirectory(atPath: targetDir.path)
+        XCTAssertEqual(savedEntries, ["Fattura_01.pdf"])
+
+        let dedupKeys = iOSDocumentsSandboxBridge.existingDocumentDedupKeys()
+        XCTAssertTrue(iOSDocumentsSandboxBridge.matchesExistingDocumentDedup(item: item, existingKeys: dedupKeys))
+
+        let differentFolderItem = ManifestItem(
+            id: "doc_test_2",
+            category: .DOCUMENTS,
+            fileName: "Fattura_01.pdf",
+            relativeAlbumOrFolder: "\(uniqueTag)/AltraCartella",
+            sizeBytes: 15,
+            capturedEpochMillis: 1_700_000_000_000,
+            dedupKey: "doc_test_2_dedup",
+            mimeType: "application/pdf"
+        )
+        XCTAssertFalse(iOSDocumentsSandboxBridge.matchesExistingDocumentDedup(item: differentFolderItem, existingKeys: dedupKeys))
+
+        let report = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: [], includeWhatsAppVault: false)
+        let matchingFolder = report.folderSummaries.first(where: { $0.folderPath == relFolder })
+        XCTAssertNotNil(matchingFolder)
+        XCTAssertEqual(matchingFolder?.fileCount, 1)
+        XCTAssertEqual(matchingFolder?.totalBytes, Int64(payload.count))
+    }
 }

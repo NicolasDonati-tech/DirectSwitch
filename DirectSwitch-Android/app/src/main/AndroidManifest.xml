@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Rete Locale LAN, Hotspot 5GHz Diretto Offline e Wi-Fi Direct -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -37,6 +38,10 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
+    <!-- Accesso completo opzionale per leggere e ricreare esattamente le stesse cartelle originali su Android 11+ -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
 
     <!-- Scanner QR e Resilienza Anti-Blocco -->
     <uses-permission android:name="android.permission.CAMERA" />

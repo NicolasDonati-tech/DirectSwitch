@@ -83,6 +83,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var savedLivePhotos: Int = 0
     @Published var iCloudOptimizedSkippedHint: Int = 0
     @Published var receivedPasswordsCsvCount: Int = 0
+    @Published var receivedDocumentFolders: [String: Int] = [:]
     @Published var skippedDuplicates: Int = 0
     @Published var gatedPreviewCount: Int = 0
     @Published var isSessionConnected: Bool = false
@@ -212,6 +213,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         savedLivePhotos = 0
         iCloudOptimizedSkippedHint = 0
         receivedPasswordsCsvCount = 0
+        receivedDocumentFolders = [:]
         skippedDuplicates = 0
         gatedPreviewCount = 0
         transferredBytes = 0
@@ -432,6 +434,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         savedLivePhotos = 0
         iCloudOptimizedSkippedHint = 0
         receivedPasswordsCsvCount = 0
+        receivedDocumentFolders = [:]
         skippedDuplicates = 0
         gatedPreviewCount = 0
         transferredBytes = 0
@@ -548,6 +551,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         savedLivePhotos = 0
         iCloudOptimizedSkippedHint = 0
         receivedPasswordsCsvCount = 0
+        receivedDocumentFolders = [:]
         skippedDuplicates = 0
         gatedPreviewCount = 0
         failedItemsCount = 0
@@ -1053,6 +1057,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 savedLivePhotos = 0
                 iCloudOptimizedSkippedHint = 0
                 receivedPasswordsCsvCount = 0
+                receivedDocumentFolders = [:]
                 skippedDuplicates = 0
                 gatedPreviewCount = 0
                 failedItemsCount = 0
@@ -1141,13 +1146,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             let (tierFiltered, gated) = LicensePolicyEvaluator.filterItemsForTier(manifest.items, tier: currentTier)
             let hasMedia = tierFiltered.contains { $0.category == .PHOTOS || $0.category == .VIDEOS }
+            let hasDocs = tierFiltered.contains { $0.category == .DOCUMENTS || $0.category == .WHATSAPP_VAULT }
             let existingMediaKeys = hasMedia ? await iOSPhotoKitMigrator.existingDedupKeys() : Set<String>()
+            let existingDocKeys = hasDocs ? iOSDocumentsSandboxBridge.existingDocumentDedupKeys() : Set<String>()
 
             var acceptedItems: [ManifestItem] = []
             var skippedMediaDuplicates = 0
             for item in tierFiltered {
-                if completedItemIds.contains(item.id) ||
-                    ((item.category == .PHOTOS || item.category == .VIDEOS) && existingMediaKeys.contains(item.dedupKey)) {
+                let isDuplicateMedia = (item.category == .PHOTOS || item.category == .VIDEOS) && existingMediaKeys.contains(item.dedupKey)
+                let isDuplicateDoc = (item.category == .DOCUMENTS || item.category == .WHATSAPP_VAULT) &&
+                    iOSDocumentsSandboxBridge.matchesExistingDocumentDedup(item: item, existingKeys: existingDocKeys)
+                if completedItemIds.contains(item.id) || isDuplicateMedia || isDuplicateDoc {
                     skippedMediaDuplicates += 1
                 } else {
                     acceptedItems.append(item)
@@ -1294,6 +1303,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             } else {
                 let isPasswordsCsv = iOSDocumentsSandboxBridge.isPasswordsCsvFile(item.fileName)
                 savedOk = iOSDocumentsSandboxBridge.saveDocumentFile(item: item, sourceFileURL: tempPlainURL)
+                if savedOk {
+                    let folderKey = item.category == .WHATSAPP_VAULT
+                        ? "WhatsApp_Vault"
+                        : iOSDocumentsSandboxBridge.normalizedFolderString(item.relativeAlbumOrFolder)
+                    receivedDocumentFolders[folderKey, default: 0] += 1
+                }
                 if savedOk && isPasswordsCsv {
                     receivedPasswordsCsvCount += 1
                 }
@@ -1707,6 +1722,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             speedMegabytesPerSec = 0.0
             iCloudOptimizedSkippedHint = 0
             receivedPasswordsCsvCount = 0
+            receivedDocumentFolders = [:]
             UIApplication.shared.isIdleTimerDisabled = true
             iOSBackgroundTransferKeepAlive.shared.beginActiveSession(
                 roleLabel: "Invio dati a \(qrPayload.receiverName)"
@@ -1763,11 +1779,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let scannedAssets = scanResult.items
             iCloudOptimizedSkippedHint = scanResult.iCloudOptimizedCount
 
-            let filteredPickedDocs = pickedDocuments.filter { pair in
-                switch pair.0.category {
-                case .WHATSAPP_VAULT: return includeWhatsAppVault
-                case .DOCUMENTS: return includeDocuments
-                default: return includeDocuments
+            let collectedDocs = iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
+                explicitPicked: pickedDocuments,
+                includeDocuments: includeDocuments,
+                includeWhatsAppVault: includeWhatsAppVault
+            )
+            let filteredPickedDocs = collectedDocs.items
+            let activeDocSecurityScopes = collectedDocs.activeSecurityScopes
+            defer {
+                for scopedURL in activeDocSecurityScopes {
+                    scopedURL.stopAccessingSecurityScopedResource()
                 }
             }
             let allItems = scannedAssets.map(\.0) + filteredPickedDocs.map(\.0)
@@ -2010,6 +2031,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
                 currentItemName = item.fileName
                 statusLabel = "Invio \(item.fileName) (\(completedItems + 1)/\(totalItems))..."
+
+                guard iOSDocumentsSandboxBridge.prepareReadableFileForUpload(at: docURL) else {
+                    failedItemsCount += 1
+                    continue
+                }
 
                 if let sentBytes = try await sendFileResiliently(item: item, plainFileURL: docURL) {
                     uploadedIdSet.insert(item.id)

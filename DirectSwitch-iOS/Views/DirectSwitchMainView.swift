@@ -69,9 +69,11 @@ struct DirectSwitchMainView: View {
         senderAppsCatalog.filter { !deselectedSenderAppIds.contains($0.id) }
     }
 
-    // File e archivi WhatsApp allegati
-    @State private var showDocumentImporter: Bool = false
+    // File e archivi WhatsApp allegati + pre-controllo cartelle su iPhone
+    @State private var activeDocumentPickerMode: iOSDocumentPickerMode? = nil
     @State private var pickedDocuments: [(ManifestItem, URL)] = []
+    @State private var documentPrecheckReport: iOSDocumentsPrecheckReport? = nil
+    @State private var pendingTransferPrecheckAlert: iOSDocumentsPrecheckReport? = nil
     @State private var sharedVaultToast: String? = nil
 
     // Scansione locale e StoreKit Pass iPhone <-> Android
@@ -214,6 +216,7 @@ struct DirectSwitchMainView: View {
                                     isScanningDevice: isScanningDevice,
                                     isLocalProUnlocked: isProUnlocked,
                                     pickedDocuments: pickedDocuments,
+                                    documentPrecheck: documentPrecheckReport,
                                     selectedAppsCount: selectedSenderApps.count,
                                     totalDetectedAppsCount: senderAppsCatalog.count,
                                     selectedAppsPreview: selectedSenderApps,
@@ -244,10 +247,12 @@ struct DirectSwitchMainView: View {
                                     onDeleteTempAutoRecording: deleteTemporaryAutoRecording,
                                     onResetAppsToZero: resetSenderAppsToVerifiedOnly,
                                     onManageApps: { showSenderAppsSheet = true },
-                                    onAddFilesOrWhatsApp: { showDocumentImporter = true },
+                                    onAddFolders: { activeDocumentPickerMode = .folders },
+                                    onAddFilesOrWhatsApp: { activeDocumentPickerMode = .files },
+                                    onRefreshDocumentCheck: { refreshAuthorizedSummary() },
                                     onClearStagedFiles: {
                                         pickedDocuments.removeAll()
-                                        iOSDocumentsSandboxBridge.clearStagedVault()
+                                        iOSDocumentsSandboxBridge.clearAllPickedDocumentsAndBookmarks()
                                         refreshAuthorizedSummary()
                                     },
                                     onOpenProSheet: { showProSheet = true },
@@ -351,16 +356,52 @@ struct DirectSwitchMainView: View {
         .onOpenURL { incomingURL in
             handleIncomingURL(incomingURL)
         }
-        .fileImporter(
-            isPresented: $showDocumentImporter,
-            allowedContentTypes: [.item, .folder],
-            allowsMultipleSelection: true
-        ) { result in
-            if case .success(let urls) = result {
-                let imported = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
-                pickedDocuments.append(contentsOf: imported)
+        .sheet(item: $activeDocumentPickerMode) { mode in
+            iOSDocumentOrFolderPickerRepresentable(mode: mode) { urls in
+                if mode == .folders {
+                    _ = iOSDocumentsSandboxBridge.authorizeFolderBookmarks(urls)
+                } else {
+                    let imported = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
+                    pickedDocuments.append(contentsOf: imported)
+                }
                 refreshAuthorizedSummary()
             }
+        }
+        .alert(
+            "Controllo pre-trasferimento File e Cartelle",
+            isPresented: Binding(
+                get: { pendingTransferPrecheckAlert != nil },
+                set: { if !$0 { pendingTransferPrecheckAlert = nil } }
+            ),
+            presenting: pendingTransferPrecheckAlert
+        ) { report in
+            Button("Scegli cartelle o file su iPhone") {
+                pendingTransferPrecheckAlert = nil
+                activeDocumentPickerMode = .folders
+            }
+            if report.totalFiles > 0 {
+                Button("Continua comunque") {
+                    let paired = pairedTargetPayload
+                    pendingTransferPrecheckAlert = nil
+                    if let paired {
+                        launchSenderTransferWithPayload(paired, isResume: false)
+                    }
+                }
+            } else if includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeApps || includeWhatsApp {
+                Button("Invia escludendo Documenti") {
+                    includeDocuments = false
+                    let paired = pairedTargetPayload
+                    pendingTransferPrecheckAlert = nil
+                    if let paired {
+                        launchSenderTransferWithPayload(paired, isResume: false)
+                    }
+                }
+            }
+            Button("Annulla", role: .cancel) {
+                pendingTransferPrecheckAlert = nil
+            }
+        } message: { report in
+            Text(precheckAlertMessage(for: report))
         }
         .sheet(isPresented: $showSenderAppsSheet) {
             SenderAppsSelectionSheet(
@@ -485,8 +526,33 @@ struct DirectSwitchMainView: View {
         }
     }
 
+    private func precheckAlertMessage(for report: iOSDocumentsPrecheckReport) -> String {
+        if report.totalFiles == 0 && report.unreadableFilesCount == 0 {
+            return "Nessun file o cartella trovato in «File → Su iPhone → DirectSwitch» o nelle cartelle autorizzate. Aggiungi le cartelle originali da «File → Su iPhone» per mantenerle identiche sul nuovo telefono."
+        }
+        if report.totalFiles == 0 && report.unreadableFilesCount > 0 {
+            return "Trovati \(report.unreadableFilesCount) file non ancora scaricati o non leggibili (es. su iCloud Drive). Scaricali nell'app File prima del trasferimento."
+        }
+        if report.unreadableFilesCount > 0 {
+            return "Pronti \(report.totalFiles) file in \(report.folderSummaries.count) cartelle, ma \(report.unreadableFilesCount) file risultano illeggibili o ancora solo su iCloud e verrebbero saltati."
+        }
+        return "Controllo completato: \(report.totalFiles) file in \(report.folderSummaries.count) cartelle pronti."
+    }
+
     private func launchSenderTransfer() {
         guard let paired = pairedTargetPayload else { return }
+        if includeDocuments {
+            let staged = pickedDocuments.map(\.0)
+            let precheck = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                stagedItems: staged,
+                includeWhatsAppVault: false
+            )
+            documentPrecheckReport = precheck
+            if precheck.totalFiles == 0 || precheck.unreadableFilesCount > 0 {
+                pendingTransferPrecheckAlert = precheck
+                return
+            }
+        }
         launchSenderTransferWithPayload(paired, isResume: false)
     }
 
@@ -820,7 +886,13 @@ struct DirectSwitchMainView: View {
         isScanningDevice = true
         let staged = pickedDocuments.map(\.0)
         Task {
-            scanSummary = await iOSDeviceDataAnalyzer.requestPermissionsAndScanAll(stagedItems: staged)
+            async let summaryTask = iOSDeviceDataAnalyzer.requestPermissionsAndScanAll(stagedItems: staged)
+            async let precheckTask = Task.detached(priority: .utility) {
+                iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
+            }.value
+            let (summary, precheck) = await (summaryTask, precheckTask)
+            scanSummary = summary
+            documentPrecheckReport = precheck
             isScanningDevice = false
         }
     }
@@ -828,10 +900,14 @@ struct DirectSwitchMainView: View {
     private func refreshAuthorizedSummary() {
         let staged = pickedDocuments.map(\.0)
         Task {
-            let summary = await Task.detached(priority: .utility) {
-                iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged)
+            let (summary, precheck) = await Task.detached(priority: .utility) {
+                (
+                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged),
+                    iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
+                )
             }.value
             scanSummary = summary
+            documentPrecheckReport = precheck
         }
     }
 
@@ -1686,14 +1762,47 @@ private struct DirectSwitchTransferProgressView: View {
                     )
                 }
 
-                if isReceiverMode && transport.isCompleted && ((scope.documents && transport.completedItems > 0) || transport.importedSms > 0) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder.fill")
-                            .foregroundColor(AppleTheme.blue)
-                        Text("Documenti, cartelle «Su iPhone» e file ricevuti sono in **File → Su iPhone → DirectSwitch → DirectSwitch_Documenti**.")
-                            .font(.system(size: 13))
-                            .foregroundColor(AppleTheme.textSecondary)
-                        Spacer()
+                if isReceiverMode && transport.isCompleted && ((scope.documents && transport.completedItems > 0) || !transport.receivedDocumentFolders.isEmpty || transport.importedSms > 0) {
+                    let sortedFolders = transport.receivedDocumentFolders.sorted { $0.key < $1.key }
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "folder.fill")
+                                .foregroundColor(AppleTheme.blue)
+                            Text("Cartelle e file salvati in **File → Su iPhone → DirectSwitch** mantenendo le cartelle originali:")
+                                .font(.system(size: 13))
+                                .foregroundColor(AppleTheme.textSecondary)
+                            Spacer()
+                        }
+
+                        if !sortedFolders.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(sortedFolders.prefix(12)), id: \.key) { entry in
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "folder.badge.plus")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(AppleTheme.blue)
+                                        Text(entry.key)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(AppleTheme.textPrimary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Spacer()
+                                        Text("\(entry.value) file")
+                                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                            .foregroundColor(AppleTheme.textSecondary)
+                                    }
+                                    .padding(.vertical, 5)
+                                    .padding(.horizontal, 10)
+                                    .background(AppleTheme.fill.opacity(0.6))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+                                if sortedFolders.count > 12 {
+                                    Text("…e altre \(sortedFolders.count - 12) cartelle in File → Su iPhone → DirectSwitch")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                }
+                            }
+                        }
                     }
                     .appleCard(padding: 14)
                 }
@@ -1834,7 +1943,7 @@ private struct DirectSwitchTransferProgressView: View {
                 Spacer()
                 InfoCircleButton(
                     title: "Importare le Password senza iCloud",
-                    message: "1. Tocca il pulsante qui sotto per aprire Impostazioni.\n2. Vai in App → Password (oppure Safari → Importa) e seleziona il file .csv salvato in «Su iPhone → DirectSwitch → DirectSwitch_Documenti → Password_Esportate».\n3. Tutte le password verranno salvate nel Portachiavi locale con Face ID senza attivare iCloud!"
+                    message: "1. Tocca il pulsante qui sotto per aprire Impostazioni.\n2. Vai in App → Password (oppure Safari → Importa) e seleziona il file .csv salvato in «Su iPhone → DirectSwitch → Password_Esportate».\n3. Tutte le password verranno salvate nel Portachiavi locale con Face ID senza attivare iCloud!"
                 )
             }
 

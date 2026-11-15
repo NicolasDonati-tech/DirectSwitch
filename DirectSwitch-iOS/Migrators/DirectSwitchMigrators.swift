@@ -15,6 +15,22 @@ import StoreKit
 import UIKit
 
 /// Riepilogo locale dei dati e dello spazio disponibile sull'iPhone (parità con `LocalDeviceScanSummary` Android).
+struct iOSDocumentFolderSummary: Sendable, Equatable, Identifiable {
+    var id: String { folderPath }
+    let folderPath: String
+    let fileCount: Int
+    let totalBytes: Int64
+}
+
+struct iOSDocumentsPrecheckReport: Sendable, Equatable {
+    let totalFiles: Int
+    let totalBytes: Int64
+    let authorizedBookmarkFoldersCount: Int
+    let localAppFolderFilesCount: Int
+    let unreadableFilesCount: Int
+    let folderSummaries: [iOSDocumentFolderSummary]
+}
+
 struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     let contactsCount: Int
     let photosCount: Int
@@ -25,6 +41,9 @@ struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     let calendarEventsCount: Int
     var remindersCount: Int = 0
     let documentsCount: Int
+    var documentsBytes: Int64 = 0
+    var documentFoldersCount: Int = 0
+    var documentFolderSummaries: [iOSDocumentFolderSummary] = []
     let whatsappArchivesCount: Int
     let freeStorageBytes: Int64
     let totalStorageBytes: Int64
@@ -202,8 +221,18 @@ enum iOSDeviceDataAnalyzer {
             }
         }
 
-        let docsCount = stagedItems.filter { $0.category == .DOCUMENTS }.count
-        let waCount = stagedItems.filter { $0.category == .WHATSAPP_VAULT }.count
+        let docPrecheck = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+            stagedItems: stagedItems,
+            includeWhatsAppVault: false
+        )
+        let waLocalCount = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+            stagedItems: stagedItems,
+            includeWhatsAppVault: true
+        )
+            .folderSummaries
+            .filter { $0.folderPath.hasPrefix("WhatsApp_Vault") }
+            .reduce(0) { $0 + $1.fileCount }
+        let waCount = max(stagedItems.filter { $0.category == .WHATSAPP_VAULT }.count, waLocalCount)
 
         return iOSLocalDeviceScanSummary(
             contactsCount: contactsCount,
@@ -214,7 +243,10 @@ enum iOSDeviceDataAnalyzer {
             videosBytes: videosBytes,
             calendarEventsCount: calendarCount,
             remindersCount: knownRemindersCount,
-            documentsCount: docsCount,
+            documentsCount: docPrecheck.totalFiles,
+            documentsBytes: docPrecheck.totalBytes,
+            documentFoldersCount: docPrecheck.folderSummaries.count,
+            documentFolderSummaries: docPrecheck.folderSummaries,
             whatsappArchivesCount: waCount,
             freeStorageBytes: freeBytes,
             totalStorageBytes: totalBytes,
@@ -1088,7 +1120,7 @@ enum iOSSmsArchiveStore {
               let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return 0
         }
-        let targetDir = docsRoot.appendingPathComponent("DirectSwitch_Documenti", isDirectory: true)
+        let targetDir = docsRoot
             .appendingPathComponent("SMS_Archivio", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
@@ -1129,13 +1161,28 @@ enum iOSDocumentsSandboxBridge {
         switch ext.lowercased() {
         case "pdf": return "application/pdf"
         case "zip": return "application/zip"
-        case "txt": return "text/plain"
+        case "rar": return "application/vnd.rar"
+        case "7z": return "application/x-7z-compressed"
+        case "txt", "md", "log": return "text/plain"
         case "csv": return "text/csv"
+        case "json": return "application/json"
+        case "xml": return "application/xml"
+        case "html", "htm": return "text/html"
+        case "rtf": return "application/rtf"
+        case "epub": return "application/epub+zip"
+        case "doc": return "application/msword"
+        case "docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        case "xls": return "application/vnd.ms-excel"
+        case "xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        case "ppt": return "application/vnd.ms-powerpoint"
+        case "pptx": return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         case "vcf": return "text/vcard"
         case "ics": return "text/calendar"
-        case "m4a": return "audio/mp4"
+        case "m4a", "aac": return "audio/mp4"
         case "mp3": return "audio/mpeg"
-        case "opus": return "audio/ogg"
+        case "wav": return "audio/wav"
+        case "flac": return "audio/flac"
+        case "opus", "ogg": return "audio/ogg"
         default: return "application/octet-stream"
         }
     }
@@ -1162,7 +1209,25 @@ enum iOSDocumentsSandboxBridge {
         return candidate
     }
 
-    /// Ricostruisce in sicurezza la gerarchia di sottocartelle dentro `Su iPhone -> DirectSwitch -> DirectSwitch_Documenti`.
+    private static let folderBookmarksDefaultsKey = "directswitch_ios_folder_bookmarks_v1"
+
+    private static let genericContainerFolders: Set<String> = [
+        "mobile documents",
+        "com~apple~clouddocs",
+        "inbox",
+        "tmp",
+        "temp",
+        "directswitch_sharedvault",
+        "directswitch_documenti",
+        "file provider storage",
+        "localstorage",
+        "shared",
+        "documents",
+        "on my iphone",
+        "su iphone"
+    ]
+
+    /// Ricostruisce in sicurezza la gerarchia di sottocartelle dentro `Su iPhone -> DirectSwitch`.
     static func sanitizedRelativeComponents(_ rawFolder: String) -> [String] {
         let normalized = rawFolder.replacingOccurrences(of: "\\", with: "/")
         return normalized
@@ -1171,30 +1236,57 @@ enum iOSDocumentsSandboxBridge {
             .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 
+    static func normalizedFolderString(_ rawFolder: String, fallback: String = "Documenti") -> String {
+        let comps = sanitizedRelativeComponents(rawFolder)
+        return comps.isEmpty ? fallback : comps.joined(separator: "/")
+    }
+
     static func targetDirectory(for item: ManifestItem) -> URL? {
         guard let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }
-        var dir = docsRoot.appendingPathComponent("DirectSwitch_Documenti", isDirectory: true)
+        var dir = docsRoot
         if item.category == .WHATSAPP_VAULT {
             dir = dir.appendingPathComponent("WhatsApp_Vault", isDirectory: true)
         } else {
-            for comp in sanitizedRelativeComponents(item.relativeAlbumOrFolder) {
-                dir = dir.appendingPathComponent(comp, isDirectory: true)
+            let comps = sanitizedRelativeComponents(item.relativeAlbumOrFolder)
+            if comps.isEmpty {
+                dir = dir.appendingPathComponent("Documenti", isDirectory: true)
+            } else {
+                for comp in comps {
+                    dir = dir.appendingPathComponent(comp, isDirectory: true)
+                }
             }
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    /// Salva un file decifrato su disco nella cartella pubblica visibile nell'app "File" di iPhone (`UIFileSharingEnabled`).
+    private static func existingEqualSizeMatch(at exactURL: URL, incomingSize: Int64) -> Bool {
+        guard incomingSize > 0, FileManager.default.fileExists(atPath: exactURL.path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: exactURL.path) else {
+            return false
+        }
+        let existingSize = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? -1
+        return existingSize == incomingSize
+    }
+
+    /// Salva un file decifrato su disco nella cartella visibile in "File -> Su iPhone -> DirectSwitch",
+    /// preservando esattamente le cartelle originali ed evitando duplicati identici.
     static func saveDocumentFile(item: ManifestItem, sourceFileURL: URL) -> Bool {
         guard let targetDir = targetDirectory(for: item) else { return false }
         let safeFileName = URL(fileURLWithPath: item.fileName).lastPathComponent
-        let destURL = uniqueDestinationURL(
-            in: targetDir,
-            preferredFileName: safeFileName.isEmpty ? "documento_\(item.id)" : safeFileName
-        )
+        let preferredName = safeFileName.isEmpty ? "documento_\(item.id)" : safeFileName
+        let exactDestURL = targetDir.appendingPathComponent(preferredName)
+
+        let sourceAttrs = try? FileManager.default.attributesOfItem(atPath: sourceFileURL.path)
+        let sourceSize = (sourceAttrs?[.size] as? Int64) ?? (sourceAttrs?[.size] as? NSNumber)?.int64Value ?? item.sizeBytes
+        if existingEqualSizeMatch(at: exactDestURL, incomingSize: sourceSize) {
+            try? FileManager.default.removeItem(at: sourceFileURL)
+            return true
+        }
+
+        let destURL = uniqueDestinationURL(in: targetDir, preferredFileName: preferredName)
         do {
             if FileManager.default.fileExists(atPath: destURL.path) {
                 try FileManager.default.removeItem(at: destURL)
@@ -1204,6 +1296,7 @@ enum iOSDocumentsSandboxBridge {
         } catch {
             do {
                 try FileManager.default.copyItem(at: sourceFileURL, to: destURL)
+                try? FileManager.default.removeItem(at: sourceFileURL)
                 return true
             } catch {
                 return false
@@ -1214,16 +1307,468 @@ enum iOSDocumentsSandboxBridge {
     static func saveDocument(item: ManifestItem, plainData: Data) -> Bool {
         guard let targetDir = targetDirectory(for: item) else { return false }
         let safeFileName = URL(fileURLWithPath: item.fileName).lastPathComponent
-        let destURL = uniqueDestinationURL(
-            in: targetDir,
-            preferredFileName: safeFileName.isEmpty ? "documento_\(item.id)" : safeFileName
-        )
+        let preferredName = safeFileName.isEmpty ? "documento_\(item.id)" : safeFileName
+        let exactDestURL = targetDir.appendingPathComponent(preferredName)
+        if existingEqualSizeMatch(at: exactDestURL, incomingSize: Int64(plainData.count)) {
+            return true
+        }
+        let destURL = uniqueDestinationURL(in: targetDir, preferredFileName: preferredName)
         do {
             try plainData.write(to: destURL, options: .atomic)
             return true
         } catch {
             return false
         }
+    }
+
+    private static func documentDedupTokens(folder: String, fileName: String, sizeBytes: Int64, modMs: Int64) -> [String] {
+        let folderKey = normalizedFolderString(folder).lowercased()
+        let nameKey = fileName.lowercased()
+        let base = "\(folderKey)/\(nameKey)_\(sizeBytes)"
+        return [base, "\(base)_\(modMs)"]
+    }
+
+    static func existingDocumentDedupKeys() -> Set<String> {
+        guard let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return []
+        }
+        var keys: Set<String> = []
+        let resolvedRoot = docsRoot.resolvingSymlinksInPath().path
+        if let enumerator = FileManager.default.enumerator(
+            at: docsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let childURL as URL in enumerator {
+                let relFolder = computeRelativeFolder(
+                    childURL: childURL,
+                    resolvedRootPath: resolvedRoot,
+                    baseFolderName: ""
+                )
+                if relFolder == "Inbox" || relFolder.hasPrefix("Inbox/") {
+                    continue
+                }
+                let vals = try? childURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                if vals?.isDirectory == true { continue }
+                let info = inspectReadableFile(at: childURL)
+                guard info.readable, info.size > 0 else { continue }
+                let modMs = Int64(info.modDate.timeIntervalSince1970 * 1000.0)
+                for token in documentDedupTokens(
+                    folder: relFolder,
+                    fileName: childURL.lastPathComponent,
+                    sizeBytes: info.size,
+                    modMs: modMs
+                ) {
+                    keys.insert(token)
+                }
+            }
+        }
+        return keys
+    }
+
+    static func matchesExistingDocumentDedup(item: ManifestItem, existingKeys: Set<String>) -> Bool {
+        let folder = item.category == .WHATSAPP_VAULT
+            ? "WhatsApp_Vault"
+            : normalizedFolderString(item.relativeAlbumOrFolder)
+        let nameKey = URL(fileURLWithPath: item.fileName).lastPathComponent.lowercased()
+        let sizeKey = "\(folder.lowercased())/\(nameKey)_\(item.sizeBytes)"
+        return existingKeys.contains(sizeKey) || existingKeys.contains("\(sizeKey)_\(item.capturedEpochMillis)")
+    }
+
+    // MARK: - Segnalibri persistenti delle cartelle autorizzate e controllo iCloud
+
+    @discardableResult
+    static func authorizeFolderBookmarks(_ urls: [URL]) -> Int {
+        var existingDatas = (UserDefaults.standard.array(forKey: folderBookmarksDefaultsKey) as? [Data]) ?? []
+        var existingPaths: Set<String> = []
+        var cleanExistingDatas: [Data] = []
+        for data in existingDatas {
+            var stale = false
+            if let resolved = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) {
+                let stdPath = resolved.standardizedFileURL.path
+                if existingPaths.insert(stdPath).inserted {
+                    cleanExistingDatas.append(data)
+                }
+            }
+        }
+        existingDatas = cleanExistingDatas
+
+        var addedCount = 0
+        for url in urls where url.isFileURL {
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { url.stopAccessingSecurityScopedResource() }
+            }
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            guard isDir else { continue }
+            let stdPath = url.standardizedFileURL.path
+            guard !existingPaths.contains(stdPath) else { continue }
+            if let bookmark = try? url.bookmarkData(
+                options: .minimalBookmark,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            ) {
+                existingDatas.append(bookmark)
+                existingPaths.insert(stdPath)
+                addedCount += 1
+            }
+        }
+        UserDefaults.standard.set(existingDatas, forKey: folderBookmarksDefaultsKey)
+        return addedCount
+    }
+
+    static func persistedFolderBookmarksCount() -> Int {
+        resolveBookmarkedFolderURLs().count
+    }
+
+    static func clearFolderBookmarks() {
+        UserDefaults.standard.removeObject(forKey: folderBookmarksDefaultsKey)
+    }
+
+    static func resolveBookmarkedFolderURLs() -> [URL] {
+        guard let datas = UserDefaults.standard.array(forKey: folderBookmarksDefaultsKey) as? [Data], !datas.isEmpty else {
+            return []
+        }
+        var resolvedURLs: [URL] = []
+        var refreshedDatas: [Data] = []
+        var seenPaths: Set<String> = []
+
+        for data in datas {
+            var isStale = false
+            guard let url = try? URL(
+                resolvingBookmarkData: data,
+                options: [],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            ) else {
+                continue
+            }
+            let stdPath = url.standardizedFileURL.path
+            guard seenPaths.insert(stdPath).inserted else { continue }
+            let accessed = url.startAccessingSecurityScopedResource()
+            var existsDir = ObjCBool(false)
+            let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &existsDir) && existsDir.boolValue
+            if exists {
+                resolvedURLs.append(url)
+                if isStale, let renewed = try? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    refreshedDatas.append(renewed)
+                } else {
+                    refreshedDatas.append(data)
+                }
+            }
+            if accessed {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        if refreshedDatas.count != datas.count {
+            UserDefaults.standard.set(refreshedDatas, forKey: folderBookmarksDefaultsKey)
+        }
+        return resolvedURLs
+    }
+
+    static func prepareReadableFileForUpload(at url: URL) -> Bool {
+        inspectReadableFile(at: url).readable
+    }
+
+    static func inspectReadableFile(at url: URL) -> (readable: Bool, size: Int64, modDate: Date) {
+        let vals = try? url.resourceValues(forKeys: [
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey,
+            .fileSizeKey,
+            .contentModificationDateKey
+        ])
+        if vals?.isUbiquitousItem == true,
+           vals?.ubiquitousItemDownloadingStatus != URLUbiquitousItemDownloadingStatus.current {
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        }
+
+        var resultSize: Int64 = 0
+        var resultDate: Date = Date()
+        var isReadable = false
+        var coordError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: url, options: [.withoutChanges], error: &coordError) { readURL in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: readURL.path) else {
+                return
+            }
+            let size = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            guard size > 0 else { return }
+            if let handle = try? FileHandle(forReadingFrom: readURL) {
+                handle.closeFile()
+                resultSize = size
+                resultDate = (attrs[.modificationDate] as? Date) ?? Date()
+                isReadable = true
+            }
+        }
+        if isReadable {
+            return (true, resultSize, resultDate)
+        }
+        // Fallback diretto per URL locali senza coordinazione (es. temp dir nei test)
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
+            let size = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            if size > 0, let handle = try? FileHandle(forReadingFrom: url) {
+                handle.closeFile()
+                return (true, size, (attrs[.modificationDate] as? Date) ?? Date())
+            }
+        }
+        return (false, 0, Date())
+    }
+
+    private static func inferMeaningfulParentFolder(for url: URL, fileExtension ext: String) -> String {
+        let candidate = url.deletingLastPathComponent().lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = candidate.lowercased()
+        if !candidate.isEmpty,
+           candidate != ".",
+           candidate != "..",
+           !genericContainerFolders.contains(lower),
+           UUID(uuidString: candidate) == nil {
+            return candidate
+        }
+        return ext == "csv" ? "Password_Esportate" : "Documenti"
+    }
+
+    private static func computeRelativeFolder(
+        childURL: URL,
+        resolvedRootPath: String,
+        baseFolderName: String
+    ) -> String {
+        let childDirPath = childURL.deletingLastPathComponent().resolvingSymlinksInPath().path
+        var subRel = ""
+        if childDirPath.hasPrefix(resolvedRootPath) {
+            subRel = String(childDirPath.dropFirst(resolvedRootPath.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+        }
+        if baseFolderName.isEmpty {
+            return subRel.isEmpty ? "Documenti" : subRel
+        }
+        return subRel.isEmpty ? baseFolderName : "\(baseFolderName)/\(subRel)"
+    }
+
+    private static func buildManifestItem(
+        fileName: String,
+        relativeFolder: String,
+        size: Int64,
+        modDate: Date,
+        counter: Int
+    ) -> ManifestItem {
+        let modMs = Int64(modDate.timeIntervalSince1970 * 1000.0)
+        let lower = fileName.lowercased()
+        let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+        let isWhatsApp = lower.contains("whatsapp") || ext == "opus" || (ext == "zip" && lower.contains("chat")) ||
+            relativeFolder.lowercased().hasPrefix("whatsapp_vault")
+        let category: TransferCategory = isWhatsApp ? .WHATSAPP_VAULT : .DOCUMENTS
+        let cleanRel = normalizedFolderString(relativeFolder)
+        let folderToUse = isWhatsApp ? "WhatsApp_Vault" : cleanRel
+        return ManifestItem(
+            id: "doc_\(UUID().uuidString.prefix(8).lowercased())_\(counter)",
+            category: category,
+            fileName: fileName,
+            relativeAlbumOrFolder: folderToUse,
+            sizeBytes: size,
+            capturedEpochMillis: modMs,
+            dedupKey: "\(folderToUse.lowercased())/\(lower)_\(size)_\(modMs)",
+            mimeType: mimeForExtension(ext)
+        )
+    }
+
+    private static func enumerateDirectoryItems(
+        rootURL: URL,
+        baseFolderName: String,
+        skipInbox: Bool,
+        includeWhatsAppVault: Bool,
+        counter: inout Int,
+        seenDedup: inout Set<String>,
+        unreadableCount: inout Int,
+        collector: (ManifestItem, URL) -> Void
+    ) {
+        let resolvedRoot = rootURL.resolvingSymlinksInPath().path
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        for case let childURL as URL in enumerator {
+            let vals = try? childURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if vals?.isDirectory == true { continue }
+            let relFolder = computeRelativeFolder(
+                childURL: childURL,
+                resolvedRootPath: resolvedRoot,
+                baseFolderName: baseFolderName
+            )
+            if skipInbox && (relFolder == "Inbox" || relFolder.hasPrefix("Inbox/") ||
+                relFolder == "SMS_Archivio" || relFolder.hasPrefix("SMS_Archivio/")) {
+                continue
+            }
+            let info = inspectReadableFile(at: childURL)
+            guard info.readable, info.size > 0 else {
+                unreadableCount += 1
+                continue
+            }
+            let safeName = childURL.lastPathComponent
+            let item = buildManifestItem(
+                fileName: safeName.isEmpty ? "documento_\(counter).bin" : safeName,
+                relativeFolder: relFolder,
+                size: info.size,
+                modDate: info.modDate,
+                counter: counter
+            )
+            if item.category == .WHATSAPP_VAULT && !includeWhatsAppVault {
+                continue
+            }
+            let normKey = "\(item.relativeAlbumOrFolder.lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
+            guard seenDedup.insert(normKey).inserted else { continue }
+            counter += 1
+            collector(item, childURL)
+        }
+    }
+
+    /// Scansione di pre-controllo sul dispositivo iOS:
+    /// 1) cartella locale dell'app (`File -> Su iPhone -> DirectSwitch`)
+    /// 2) cartelle autorizzate dall'utente tramite segnalibro persistente
+    /// 3) file singoli già preparati manualmente.
+    static func inspectPreTransferDocuments(
+        stagedItems: [ManifestItem] = [],
+        includeWhatsAppVault: Bool = false
+    ) -> iOSDocumentsPrecheckReport {
+        var counter = 0
+        var seenKeys: Set<String> = []
+        var unreadableCount = 0
+        var localAppFiles = 0
+        var collected: [ManifestItem] = []
+
+        if let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            enumerateDirectoryItems(
+                rootURL: docsRoot,
+                baseFolderName: "",
+                skipInbox: true,
+                includeWhatsAppVault: includeWhatsAppVault,
+                counter: &counter,
+                seenDedup: &seenKeys,
+                unreadableCount: &unreadableCount
+            ) { item, _ in
+                localAppFiles += 1
+                collected.append(item)
+            }
+        }
+
+        let bookmarkedFolders = resolveBookmarkedFolderURLs()
+        for folderURL in bookmarkedFolders {
+            let accessed = folderURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { folderURL.stopAccessingSecurityScopedResource() }
+            }
+            let rootName = folderURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+            enumerateDirectoryItems(
+                rootURL: folderURL,
+                baseFolderName: rootName.isEmpty ? "Cartella_iPhone" : rootName,
+                skipInbox: false,
+                includeWhatsAppVault: includeWhatsAppVault,
+                counter: &counter,
+                seenDedup: &seenKeys,
+                unreadableCount: &unreadableCount
+            ) { item, _ in
+                collected.append(item)
+            }
+        }
+
+        for item in stagedItems {
+            if item.category == .WHATSAPP_VAULT && !includeWhatsAppVault {
+                continue
+            }
+            let normKey = "\(normalizedFolderString(item.relativeAlbumOrFolder).lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
+            if seenKeys.insert(normKey).inserted {
+                collected.append(item)
+            }
+        }
+
+        var grouped: [String: (count: Int, bytes: Int64)] = [:]
+        var totalBytes: Int64 = 0
+        for item in collected {
+            let folder = normalizedFolderString(item.relativeAlbumOrFolder)
+            let prev = grouped[folder] ?? (0, 0)
+            grouped[folder] = (prev.count + 1, prev.bytes + item.sizeBytes)
+            totalBytes += item.sizeBytes
+        }
+        let summaries = grouped.map { key, val in
+            iOSDocumentFolderSummary(folderPath: key, fileCount: val.count, totalBytes: val.bytes)
+        }.sorted { lhs, rhs in
+            if lhs.fileCount != rhs.fileCount { return lhs.fileCount > rhs.fileCount }
+            return lhs.folderPath.localizedCaseInsensitiveCompare(rhs.folderPath) == .orderedAscending
+        }
+
+        return iOSDocumentsPrecheckReport(
+            totalFiles: collected.count,
+            totalBytes: totalBytes,
+            authorizedBookmarkFoldersCount: bookmarkedFolders.count,
+            localAppFolderFilesCount: localAppFiles,
+            unreadableFilesCount: unreadableCount,
+            folderSummaries: summaries
+        )
+    }
+
+    /// Raccoglie tutti i documenti verificati e pronti all'invio mantenendo attivi gli accessi security-scoped alle cartelle.
+    static func collectAllVerifiedDocumentsForTransfer(
+        explicitPicked: [(ManifestItem, URL)],
+        includeDocuments: Bool,
+        includeWhatsAppVault: Bool
+    ) -> (items: [(ManifestItem, URL)], activeSecurityScopes: [URL]) {
+        var counter = 0
+        var seenKeys: Set<String> = []
+        var unreadableCount = 0
+        var results: [(ManifestItem, URL)] = []
+        var activeScopes: [URL] = []
+
+        func appendIfCategoryMatches(_ item: ManifestItem, _ url: URL) {
+            let allow = (item.category == .WHATSAPP_VAULT && includeWhatsAppVault) ||
+                        (item.category != .WHATSAPP_VAULT && includeDocuments)
+            if allow {
+                results.append((item, url))
+            }
+        }
+
+        if let docsRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            enumerateDirectoryItems(
+                rootURL: docsRoot,
+                baseFolderName: "",
+                skipInbox: true,
+                includeWhatsAppVault: includeWhatsAppVault,
+                counter: &counter,
+                seenDedup: &seenKeys,
+                unreadableCount: &unreadableCount
+            ) { item, url in
+                appendIfCategoryMatches(item, url)
+            }
+        }
+
+        let bookmarkedFolders = resolveBookmarkedFolderURLs()
+        for folderURL in bookmarkedFolders {
+            if folderURL.startAccessingSecurityScopedResource() {
+                activeScopes.append(folderURL)
+            }
+            let rootName = folderURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+            enumerateDirectoryItems(
+                rootURL: folderURL,
+                baseFolderName: rootName.isEmpty ? "Cartella_iPhone" : rootName,
+                skipInbox: false,
+                includeWhatsAppVault: includeWhatsAppVault,
+                counter: &counter,
+                seenDedup: &seenKeys,
+                unreadableCount: &unreadableCount
+            ) { item, url in
+                appendIfCategoryMatches(item, url)
+            }
+        }
+
+        for (item, url) in explicitPicked {
+            let normKey = "\(normalizedFolderString(item.relativeAlbumOrFolder).lowercased())/\(item.fileName.lowercased())_\(item.sizeBytes)"
+            guard seenKeys.insert(normKey).inserted else { continue }
+            appendIfCategoryMatches(item, url)
+        }
+
+        return (results, activeScopes)
     }
 
     /// Copia nel Vault singoli file, archivi `.zip` di WhatsApp, file Password `.csv` oppure INTERE CARTELLE
@@ -1240,33 +1785,19 @@ enum iOSDocumentsSandboxBridge {
                 in: stagingDir,
                 preferredFileName: "\(UUID().uuidString.prefix(6))_\(safeName)"
             )
+            let info = inspectReadableFile(at: sourceURL)
+            guard info.readable, info.size > 0 else { return }
             do {
                 try FileManager.default.copyItem(at: sourceURL, to: stagedURL)
                 if removeInboxIfApplicable && sourceURL.path.contains("/Documents/Inbox/") {
                     try? FileManager.default.removeItem(at: sourceURL)
                 }
-                let attrs = try FileManager.default.attributesOfItem(atPath: stagedURL.path)
-                let size = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0
-                guard size > 0 else {
-                    try? FileManager.default.removeItem(at: stagedURL)
-                    return
-                }
-                let modDate = (attrs[.modificationDate] as? Date) ?? Date()
-                let modMs = Int64(modDate.timeIntervalSince1970 * 1000.0)
-                let lower = safeName.lowercased()
-                let ext = sourceURL.pathExtension.lowercased()
-                let isWhatsApp = lower.contains("whatsapp") || ext == "opus" || (ext == "zip" && lower.contains("chat"))
-                let category: TransferCategory = isWhatsApp ? .WHATSAPP_VAULT : .DOCUMENTS
-                let folderToUse = isWhatsApp ? "WhatsApp_Vault" : (relativeFolder.isEmpty ? "Documenti" : relativeFolder)
-                let item = ManifestItem(
-                    id: "doc_\(UUID().uuidString.prefix(8).lowercased())_\(counter)",
-                    category: category,
+                let item = buildManifestItem(
                     fileName: safeName,
-                    relativeAlbumOrFolder: folderToUse,
-                    sizeBytes: size,
-                    capturedEpochMillis: modMs,
-                    dedupKey: "\(folderToUse.lowercased())/\(lower)_\(size)_\(modMs)",
-                    mimeType: mimeForExtension(ext)
+                    relativeFolder: relativeFolder,
+                    size: info.size,
+                    modDate: info.modDate,
+                    counter: counter
                 )
                 counter += 1
                 results.append((item, stagedURL))
@@ -1295,20 +1826,18 @@ enum iOSDocumentsSandboxBridge {
                     for case let childURL as URL in enumerator {
                         let vals = try? childURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
                         if vals?.isDirectory == true { continue }
-                        let childDirPath = childURL.deletingLastPathComponent().resolvingSymlinksInPath().path
-                        var subRel = ""
-                        if childDirPath.hasPrefix(resolvedRootPath) {
-                            subRel = String(childDirPath.dropFirst(resolvedRootPath.count))
-                                .trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
-                        }
-                        let fullRel = subRel.isEmpty ? cleanRoot : "\(cleanRoot)/\(subRel)"
+                        let fullRel = computeRelativeFolder(
+                            childURL: childURL,
+                            resolvedRootPath: resolvedRootPath,
+                            baseFolderName: cleanRoot
+                        )
                         stageSingleFile(sourceURL: childURL, relativeFolder: fullRel, removeInboxIfApplicable: false)
                     }
                 }
             } else {
                 let ext = url.pathExtension.lowercased()
-                let defaultFolder = ext == "csv" ? "Password_Esportate" : "Documenti"
-                stageSingleFile(sourceURL: url, relativeFolder: defaultFolder, removeInboxIfApplicable: true)
+                let inferredFolder = inferMeaningfulParentFolder(for: url, fileExtension: ext)
+                stageSingleFile(sourceURL: url, relativeFolder: inferredFolder, removeInboxIfApplicable: true)
             }
         }
         return results
@@ -1321,6 +1850,11 @@ enum iOSDocumentsSandboxBridge {
 
     static func clearStagedVault() {
         try? FileManager.default.removeItem(at: stagingVaultDirectory())
+    }
+
+    static func clearAllPickedDocumentsAndBookmarks() {
+        clearStagedVault()
+        clearFolderBookmarks()
     }
 }
 

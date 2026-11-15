@@ -21,6 +21,7 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -53,18 +54,21 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PhoneIphone
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -105,11 +109,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.DeviceDataAnalyzer
 import com.directswitch.android.migrators.DirectSwitchBillingManager
+import com.directswitch.android.migrators.DocumentPrecheckReport
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.GoogleSetupBridge
 import com.directswitch.android.migrators.InstalledAppsScanner
@@ -216,6 +223,7 @@ fun DirectSwitchMainScreen(
     var bootstrapPortalUrl by remember { mutableStateOf<String?>(null) }
     var bootstrapWifiQrString by remember { mutableStateOf<String?>(null) }
     var vaultStatusNote by remember { mutableStateOf<String?>(null) }
+    var pendingDocPrecheckReport by remember { mutableStateOf<DocumentPrecheckReport?>(null) }
 
     var categories by remember { mutableStateOf(CategorySelectionState()) }
     var isReceiverFlow by remember { mutableStateOf(false) }
@@ -256,6 +264,37 @@ fun DirectSwitchMainScreen(
                 vaultStatusNote = if (added > 0) "$added file pronti per la copia" else null
             }
         }
+    }
+
+    val folderTreePickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    DocumentsAndWhatsAppScanner.savePickedFolderTree(context, treeUri)
+                }
+                scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+                vaultStatusNote = if (ok) {
+                    "Cartella autorizzata: tutte le sottocartelle verranno mantenute intatte."
+                } else {
+                    "Impossibile leggere la cartella selezionata."
+                }
+            }
+        }
+    }
+
+    val currentLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(currentLifecycleOwner, step) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && step == WizardStep.SENDER_SELECT_CATEGORIES) {
+                scope.launch {
+                    scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+                }
+            }
+        }
+        currentLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { currentLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     fun buildRequiredPermissions(): List<String> {
@@ -368,6 +407,26 @@ fun DirectSwitchMainScreen(
             autoDiscovery.stopScanning()
             server.stop()
             hotspotController.stopHotspot()
+        }
+    }
+
+    fun launchSenderTransfer(targetPayload: QrPairingPayload) {
+        pendingDocPrecheckReport = null
+        isReceiverFlow = false
+        vaultStatusNote = null
+        step = WizardStep.TRANSFER_PROGRESS
+        scope.launch {
+            client.executeTransfer(
+                qrPayload = targetPayload,
+                includeContacts = categories.contacts,
+                includePhotos = categories.photos,
+                includeVideos = categories.videos,
+                includeCalendars = categories.calendars,
+                includeSms = categories.sms,
+                includeDocuments = categories.documents,
+                includeWhatsAppVault = categories.whatsAppVault,
+                includeInstalledApps = categories.installedApps
+            )
         }
     }
 
@@ -591,8 +650,24 @@ fun DirectSwitchMainScreen(
                             summary = scanSummary,
                             isLocalPro = isProUnlocked,
                             categories = categories,
+                            vaultStatusNote = vaultStatusNote,
                             onUpdateCategories = { categories = it },
                             onPickDocumentsOrWhatsApp = { documentPickerLauncher.launch(arrayOf("*/*")) },
+                            onPickFolderTree = { folderTreePickerLauncher.launch(null) },
+                            onRefreshDocumentCheck = {
+                                scope.launch {
+                                    scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+                                }
+                            },
+                            onClearPickedDocuments = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        DocumentsAndWhatsAppScanner.clearPickedDocumentsAndFolders(context)
+                                    }
+                                    vaultStatusNote = null
+                                    scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+                                }
+                            },
                             onOpenProSheet = { showProSheet = true },
                             onChangeDevice = {
                                 pairedTargetPayload = null
@@ -601,21 +676,25 @@ fun DirectSwitchMainScreen(
                                 step = WizardStep.SENDER_CONNECT
                             },
                             onStartTransfer = {
-                                isReceiverFlow = false
-                                vaultStatusNote = null
-                                step = WizardStep.TRANSFER_PROGRESS
-                                scope.launch {
-                                    client.executeTransfer(
-                                        qrPayload = target,
-                                        includeContacts = categories.contacts,
-                                        includePhotos = categories.photos,
-                                        includeVideos = categories.videos,
-                                        includeCalendars = categories.calendars,
-                                        includeSms = categories.sms,
-                                        includeDocuments = categories.documents,
-                                        includeWhatsAppVault = categories.whatsAppVault,
-                                        includeInstalledApps = categories.installedApps
-                                    )
+                                if (categories.documents) {
+                                    scope.launch {
+                                        val precheck = withContext(Dispatchers.IO) {
+                                            DocumentsAndWhatsAppScanner.inspectPreTransferDocuments(
+                                                context = context,
+                                                includeDocuments = true,
+                                                includeWhatsAppVault = false
+                                            )
+                                        }
+                                        val missingAllFiles =
+                                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !precheck.hasAllFilesAccess
+                                        if (missingAllFiles || precheck.totalFiles == 0) {
+                                            pendingDocPrecheckReport = precheck
+                                        } else {
+                                            launchSenderTransfer(target)
+                                        }
+                                    }
+                                } else {
+                                    launchSenderTransfer(target)
                                 }
                             }
                         )
@@ -639,6 +718,88 @@ fun DirectSwitchMainScreen(
                 }
             }
         }
+    }
+
+    val activePrecheck = pendingDocPrecheckReport
+    val activePrecheckTarget = pairedTargetPayload
+    if (activePrecheck != null && activePrecheckTarget != null) {
+        val missingAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !activePrecheck.hasAllFilesAccess
+        AlertDialog(
+            onDismissRequest = { pendingDocPrecheckReport = null },
+            containerColor = DirectSwitchTheme.cardSurface,
+            title = {
+                Text(
+                    text = "Controllo cartelle e file sul telefono",
+                    fontWeight = FontWeight.Bold,
+                    color = DirectSwitchTheme.textPrimary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = when {
+                            missingAllFiles ->
+                                "Per leggere e copiare tutte le cartelle e sottocartelle nelle stesse posizioni sul nuovo telefono, autorizza «Accesso a tutti i file» oppure seleziona manualmente una cartella."
+                            activePrecheck.totalFiles == 0 ->
+                                "Nessun documento o file leggibile trovato nelle cartelle controllate. Scegli una cartella dal telefono oppure continua comunque con le altre categorie."
+                            else ->
+                                "Trovati ${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle."
+                        },
+                        fontSize = 13.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                    if (activePrecheck.folderSummaries.isNotEmpty()) {
+                        Text(
+                            text = "Cartelle pronte (${activePrecheck.folderSummaries.size}): " +
+                                activePrecheck.folderSummaries.take(5).joinToString(", ") { "${it.folderPath} (${it.fileCount})" },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = DirectSwitchTheme.teal
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (missingAllFiles) {
+                    TextButton(
+                        onClick = {
+                            pendingDocPrecheckReport = null
+                            DocumentsAndWhatsAppScanner.openAllFilesAccessSettings(context)
+                        }
+                    ) {
+                        Text("Autorizza tutti i file", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                    }
+                } else {
+                    TextButton(
+                        onClick = {
+                            pendingDocPrecheckReport = null
+                            folderTreePickerLauncher.launch(null)
+                        }
+                    ) {
+                        Text("Scegli cartella", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                    }
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (missingAllFiles) {
+                        TextButton(
+                            onClick = {
+                                pendingDocPrecheckReport = null
+                                folderTreePickerLauncher.launch(null)
+                            }
+                        ) {
+                            Text("Scegli cartella", color = DirectSwitchTheme.blue)
+                        }
+                    }
+                    TextButton(
+                        onClick = { launchSenderTransfer(activePrecheckTarget) }
+                    ) {
+                        Text("Continua lo stesso", color = DirectSwitchTheme.textSecondary)
+                    }
+                }
+            }
+        )
     }
 
     if (showProSheet) {
@@ -1003,6 +1164,58 @@ private fun ReceiverPairingWizardView(
         }
     }
 
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val localContext = LocalContext.current
+        val localLifecycle = LocalLifecycleOwner.current
+        var hasAllFilesInReceiver by remember {
+            mutableStateOf(DocumentsAndWhatsAppScanner.hasAllFilesAccess(localContext))
+        }
+        DisposableEffect(localLifecycle) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    hasAllFilesInReceiver = DocumentsAndWhatsAppScanner.hasAllFilesAccess(localContext)
+                }
+            }
+            localLifecycle.lifecycle.addObserver(observer)
+            onDispose { localLifecycle.lifecycle.removeObserver(observer) }
+        }
+        if (!hasAllFilesInReceiver) {
+            DirectSwitchCard(padding = 14.dp) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            DocumentsAndWhatsAppScanner.openAllFilesAccessSettings(localContext)
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.orange)
+                        Column {
+                            Text(
+                                "Ricrea cartelle originali",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = DirectSwitchTheme.textPrimary
+                            )
+                            Text(
+                                "Autorizza «Accesso a tutti i file» per salvare nelle identiche cartelle di origine",
+                                fontSize = 12.sp,
+                                color = DirectSwitchTheme.blue
+                            )
+                        }
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.textMuted)
+                }
+            }
+        }
+    }
+
     DirectSwitchSecondaryButton(
         text = "Annulla",
         onClick = onCancel,
@@ -1208,8 +1421,12 @@ private fun SenderCategoriesWizardView(
     summary: LocalDeviceScanSummary?,
     isLocalPro: Boolean,
     categories: CategorySelectionState,
+    vaultStatusNote: String?,
     onUpdateCategories: (CategorySelectionState) -> Unit,
     onPickDocumentsOrWhatsApp: () -> Unit,
+    onPickFolderTree: () -> Unit,
+    onRefreshDocumentCheck: () -> Unit,
+    onClearPickedDocuments: () -> Unit,
     onOpenProSheet: () -> Unit,
     onChangeDevice: () -> Unit,
     onStartTransfer: () -> Unit
@@ -1364,7 +1581,7 @@ private fun SenderCategoriesWizardView(
             icon = Icons.Filled.Description,
             iconColor = DirectSwitchTheme.teal,
             title = "Documenti e File",
-            subtitle = summary?.let { "${it.documentsCount} documenti" },
+            subtitle = summary?.let { "${it.documentsCount} file • ${it.documentFoldersCount} cartelle" },
             checked = categories.documents,
             onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
         )
@@ -1417,10 +1634,177 @@ private fun SenderCategoriesWizardView(
         }
     }
 
-    DirectSwitchSecondaryButton(
-        text = "Aggiungi altri file o .zip WhatsApp",
-        onClick = onPickDocumentsOrWhatsApp
-    )
+    if (categories.documents) {
+        val wizardContext = LocalContext.current
+        val folderSummaries = summary?.documentFolderSummaries.orEmpty()
+        val hasAllFiles = summary?.hasAllFilesAccess
+            ?: DocumentsAndWhatsAppScanner.hasAllFilesAccess(wizardContext)
+        val hasPickedFoldersOrFiles = !vaultStatusNote.isNullOrBlank() ||
+            remember(summary) { DocumentsAndWhatsAppScanner.getPersistedFolderTreeUris(wizardContext).isNotEmpty() }
+
+        DirectSwitchCard(padding = 14.dp, spacing = 10.dp) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.teal)
+                    Column {
+                        Text(
+                            text = "Controllo cartelle e file sul telefono",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.textPrimary
+                        )
+                        Text(
+                            text = if (summary != null) {
+                                "${summary.documentsCount} file in ${folderSummaries.size} cartelle • ${formatMb(summary.documentsBytes)}"
+                            } else {
+                                "Scansione cartelle in corso..."
+                            },
+                            fontSize = 12.sp,
+                            color = DirectSwitchTheme.textSecondary
+                        )
+                    }
+                }
+                TextButton(onClick = onRefreshDocumentCheck) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "Ricontrolla",
+                            tint = DirectSwitchTheme.blue,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            "Ricontrolla",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = DirectSwitchTheme.blue
+                        )
+                    }
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFiles) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { DocumentsAndWhatsAppScanner.openAllFilesAccessSettings(wizardContext) },
+                    shape = RoundedCornerShape(12.dp),
+                    color = DirectSwitchTheme.orange.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, DirectSwitchTheme.orange.copy(alpha = 0.45f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = DirectSwitchTheme.orange,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Accesso completo alle cartelle non attivo: tocca per autorizzare «Accesso a tutti i file» e leggere tutte le sottocartelle.",
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            color = DirectSwitchTheme.textPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = DirectSwitchTheme.orange
+                        )
+                    }
+                }
+            }
+
+            if (folderSummaries.isEmpty()) {
+                Text(
+                    text = "Nessuna cartella o documento trovato al momento. Puoi selezionare una cartella qui sotto per mantenere tutte le sottocartelle.",
+                    fontSize = 12.sp,
+                    color = DirectSwitchTheme.textSecondary
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    folderSummaries.take(8).forEach { folder ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${folder.folderPath}/",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = DirectSwitchTheme.textPrimary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "${folder.fileCount} file • ${formatMb(folder.totalBytes)}",
+                                fontSize = 12.sp,
+                                color = DirectSwitchTheme.textSecondary
+                            )
+                        }
+                    }
+                    if (folderSummaries.size > 8) {
+                        Text(
+                            text = "e altre ${folderSummaries.size - 8} cartelle (${summary?.documentsCount ?: 0} file totali)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = DirectSwitchTheme.teal
+                        )
+                    }
+                }
+            }
+
+            if (!vaultStatusNote.isNullOrBlank()) {
+                Text(
+                    text = vaultStatusNote,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = DirectSwitchTheme.blue
+                )
+            }
+
+            DirectSwitchSecondaryButton(
+                text = "Scegli cartella (con sottocartelle)",
+                onClick = onPickFolderTree
+            )
+            DirectSwitchSecondaryButton(
+                text = "Aggiungi file o .zip WhatsApp",
+                onClick = onPickDocumentsOrWhatsApp
+            )
+            if (hasPickedFoldersOrFiles) {
+                TextButton(
+                    onClick = onClearPickedDocuments,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Rimuovi cartelle e file selezionati manualmente",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.red
+                    )
+                }
+            }
+        }
+    } else if (categories.whatsAppVault) {
+        DirectSwitchSecondaryButton(
+            text = "Aggiungi file o .zip WhatsApp",
+            onClick = onPickDocumentsOrWhatsApp
+        )
+    }
 
     DirectSwitchPrimaryButton(
         text = "Copia i dati",
@@ -1675,6 +2059,68 @@ private fun TransferProgressWizardView(
                 text = "Aggiungi account Mail / Google",
                 onClick = { InstalledAppsScanner.openAddAccountSettings(context) }
             )
+        }
+    }
+
+    if (isReceiver && progress.isCompleted && progress.receivedDocumentFolders.isNotEmpty()) {
+        val sortedFolders = progress.receivedDocumentFolders.entries.sortedBy { it.key.lowercase() }
+        val totalReceivedFiles = sortedFolders.sumOf { it.value }
+        DirectSwitchCard(padding = 14.dp, spacing = 8.dp) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.teal)
+                    Column {
+                        Text(
+                            text = "Cartelle ricreate su questo telefono",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.textPrimary
+                        )
+                        Text(
+                            text = "$totalReceivedFiles file in ${sortedFolders.size} cartelle originali",
+                            fontSize = 12.sp,
+                            color = DirectSwitchTheme.textSecondary
+                        )
+                    }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                sortedFolders.take(8).forEach { (folderPath, count) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "$folderPath/",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = DirectSwitchTheme.textPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "$count file",
+                            fontSize = 12.sp,
+                            color = DirectSwitchTheme.textSecondary
+                        )
+                    }
+                }
+                if (sortedFolders.size > 8) {
+                    Text(
+                        text = "e altre ${sortedFolders.size - 8} cartelle salvate nella memoria del telefono.",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.teal
+                    )
+                }
+            }
         }
     }
 

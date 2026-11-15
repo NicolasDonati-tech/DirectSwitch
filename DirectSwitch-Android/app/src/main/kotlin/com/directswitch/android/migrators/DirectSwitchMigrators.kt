@@ -28,7 +28,9 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.provider.Telephony
+import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.protocol.CalendarEventRecord
 import com.directswitch.android.protocol.ContactTransferRecord
@@ -44,6 +46,22 @@ import java.io.File
 import java.io.InputStream
 import java.util.TimeZone
 
+/** Riepilogo dei file e delle cartelle rilevate per singolo percorso relativo. */
+data class DocumentFolderSummary(
+    val folderPath: String,
+    val fileCount: Int,
+    val totalBytes: Long
+)
+
+/** Esito del controllo pre-trasferimento sui documenti e cartelle presenti sul telefono. */
+data class DocumentPrecheckReport(
+    val totalFiles: Int,
+    val totalBytes: Long,
+    val hasAllFilesAccess: Boolean,
+    val persistedFoldersCount: Int,
+    val folderSummaries: List<DocumentFolderSummary>
+)
+
 /** Riepilogo dei contenuti rilevati localmente sul dispositivo prima del trasferimento. */
 data class LocalDeviceScanSummary(
     val contactsCount: Int,
@@ -54,6 +72,10 @@ data class LocalDeviceScanSummary(
     val calendarEventsCount: Int,
     val smsCount: Int,
     val documentsCount: Int = 0,
+    val documentsBytes: Long = 0L,
+    val documentFoldersCount: Int = 0,
+    val hasAllFilesAccess: Boolean = false,
+    val documentFolderSummaries: List<DocumentFolderSummary> = emptyList(),
     val whatsappArchivesCount: Int = 0,
     val installedAppsCount: Int = 0,
     val freeStorageBytes: Long,
@@ -112,22 +134,31 @@ object CloudSaveEntitlementDetector {
 }
 
 /**
- * Salva documenti ricevuti, esportazioni WhatsApp e archivi SMS nella cartella PUBBLICA
- * `Download/DirectSwitch/<subFolder>` tramite `MediaStore.Downloads` (Android 10–16, zero permessi extra)
- * o su `Environment.DIRECTORY_DOWNLOADS` con scansione media su Android 8–9.
- *
- * A differenza di `getExternalFilesDir` (`/Android/data/...`, nascosto su Android 11+), i file salvati
- * qui compaiono immediatamente nell'app "File" / "Download" di sistema senza mai sovrascrivere omonimi.
+ * Ricrea esattamente la gerarchia di cartelle originale sul nuovo Android:
+ * - Se è attivo l'accesso completo ai file (Android 11+ `MANAGE_EXTERNAL_STORAGE`) o Android 8–9,
+ *   salva direttamente nel percorso reale `/storage/emulated/0/<cartella_originale>/<sottocartelle>`.
+ * - In modalità Scoped Storage (Android 10–16 senza accesso completo), mappa nativamente `Download/...`
+ *   in `MediaStore.Downloads` e `Documents/...` o cartelle personalizzate in `MediaStore.Files` (`Documents/...`)
+ *   preservando ogni sottocartella ed evitando duplicati a parità di nome e dimensione.
  */
 object PublicDownloadsSaver {
+    fun sanitizedRelativeSegments(rawFolder: String): List<String> =
+        rawFolder.replace('\\', '/')
+            .split('/')
+            .map { seg ->
+                seg.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+            }
+            .filter { it.isNotEmpty() && it != "." && it != ".." }
+
     fun saveBytes(
         context: Context,
         subFolder: String,
         fileName: String,
         mimeType: String,
-        bytes: ByteArray
+        bytes: ByteArray,
+        expectedSizeBytes: Long = bytes.size.toLong()
     ): Boolean = ByteArrayInputStream(bytes).use { stream ->
-        saveStream(context, subFolder, fileName, mimeType, stream)
+        saveStream(context, subFolder, fileName, mimeType, stream, expectedSizeBytes)
     }
 
     fun saveStream(
@@ -135,45 +166,37 @@ object PublicDownloadsSaver {
         subFolder: String,
         fileName: String,
         mimeType: String,
-        inputStream: InputStream
+        inputStream: InputStream,
+        expectedSizeBytes: Long = -1L
     ): Boolean {
         return try {
-            val safeSub = subFolder
-                .replace(Regex("[^a-zA-Z0-9 _-]"), "")
-                .trim()
-                .ifEmpty { "Documenti" }
+            val segments = sanitizedRelativeSegments(subFolder)
+            val normalizedSegments = segments.ifEmpty { listOf(Environment.DIRECTORY_DOCUMENTS) }
             val safeName = File(fileName).name
                 .replace(Regex("[\\\\/:*?\"<>|]"), "_")
                 .ifBlank { "file_${System.currentTimeMillis()}" }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver = context.contentResolver
-                val relPath = "${Environment.DIRECTORY_DOWNLOADS}/DirectSwitch/$safeSub"
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+            val canWriteDirectRoot = DocumentsAndWhatsAppScanner.hasAllFilesAccess(context) ||
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+
+            if (canWriteDirectRoot) {
+                @Suppress("DEPRECATION")
+                val storageRoot = Environment.getExternalStorageDirectory()
+                var targetDir = storageRoot
+                for (seg in normalizedSegments) {
+                    targetDir = File(targetDir, seg)
                 }
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
-                val written = resolver.openOutputStream(uri)?.use { out ->
-                    inputStream.copyTo(out, bufferSize = 256 * 1024)
-                    true
-                } ?: false
-                if (!written) {
-                    resolver.delete(uri, null, null)
+                if (!targetDir.exists() && !targetDir.mkdirs()) {
+                    // Fallback a MediaStore su Android 10+ se la scrittura diretta non fosse ammessa su quel volume
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        return saveViaMediaStore(context, normalizedSegments, safeName, mimeType, inputStream, expectedSizeBytes)
+                    }
                     return false
                 }
-                val done = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                val exactExisting = File(targetDir, safeName)
+                if (exactExisting.exists() && expectedSizeBytes > 0L && exactExisting.length() == expectedSizeBytes) {
+                    return true
                 }
-                resolver.update(uri, done, null, null)
-                true
-            } else {
-                @Suppress("DEPRECATION")
-                val downloadsRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val targetDir = File(File(downloadsRoot, "DirectSwitch"), safeSub)
-                if (!targetDir.exists() && !targetDir.mkdirs()) return false
                 val destFile = uniqueDestinationFile(targetDir, safeName)
                 destFile.outputStream().use { out ->
                     inputStream.copyTo(out, bufferSize = 256 * 1024)
@@ -184,10 +207,93 @@ object PublicDownloadsSaver {
                     arrayOf(mimeType),
                     null
                 )
-                true
+                return true
             }
+
+            saveViaMediaStore(context, normalizedSegments, safeName, mimeType, inputStream, expectedSizeBytes)
         } catch (t: Throwable) {
-            DirectSwitchLog.warn("Salvataggio in Download/DirectSwitch fallito", t)
+            DirectSwitchLog.warn("Salvataggio file nella cartella originale fallito", t)
+            false
+        }
+    }
+
+    private fun saveViaMediaStore(
+        context: Context,
+        segments: List<String>,
+        safeName: String,
+        mimeType: String,
+        inputStream: InputStream,
+        expectedSizeBytes: Long
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val resolver = context.contentResolver
+        val firstLower = segments.firstOrNull()?.lowercase().orEmpty()
+        val tailPath = segments.drop(1).joinToString("/")
+
+        val (collectionUri, relPath) = when {
+            firstLower == "download" || firstLower == "downloads" -> {
+                val p = if (tailPath.isEmpty()) Environment.DIRECTORY_DOWNLOADS else "${Environment.DIRECTORY_DOWNLOADS}/$tailPath"
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI to p
+            }
+            firstLower == "documents" || firstLower == "documenti" -> {
+                val p = if (tailPath.isEmpty()) Environment.DIRECTORY_DOCUMENTS else "${Environment.DIRECTORY_DOCUMENTS}/$tailPath"
+                MediaStore.Files.getContentUri("external") to p
+            }
+            firstLower == "whatsapp_vault" || firstLower == "sms_archivio" || firstLower == "password_esportate" -> {
+                val full = segments.joinToString("/")
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI to "${Environment.DIRECTORY_DOWNLOADS}/DirectSwitch/$full"
+            }
+            else -> {
+                val full = segments.joinToString("/")
+                MediaStore.Files.getContentUri("external") to "${Environment.DIRECTORY_DOCUMENTS}/$full"
+            }
+        }
+
+        // Evita duplicati identici nella stessa cartella MediaStore
+        if (expectedSizeBytes > 0L && mediaStoreFileExists(context, collectionUri, relPath, safeName, expectedSizeBytes)) {
+            return true
+        }
+
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(collectionUri, values) ?: return false
+        val written = resolver.openOutputStream(uri)?.use { out ->
+            inputStream.copyTo(out, bufferSize = 256 * 1024)
+            true
+        } ?: false
+        if (!written) {
+            resolver.delete(uri, null, null)
+            return false
+        }
+        val done = ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_PENDING, 0)
+        }
+        resolver.update(uri, done, null, null)
+        return true
+    }
+
+    private fun mediaStoreFileExists(
+        context: Context,
+        collectionUri: Uri,
+        relPath: String,
+        displayName: String,
+        expectedSizeBytes: Long
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return try {
+            val normalizedRel = if (relPath.endsWith("/")) relPath else "$relPath/"
+            context.contentResolver.query(
+                collectionUri,
+                arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.SIZE} = ?",
+                arrayOf(displayName, normalizedRel, expectedSizeBytes.toString()),
+                null
+            )?.use { c -> c.moveToFirst() } ?: false
+        } catch (_: Throwable) {
             false
         }
     }
@@ -932,23 +1038,95 @@ object SmsSystemScanner {
 }
 
 /**
- * Scanner compatibile Scoped Storage (Android 8–16, `targetSdk = 36`) per Documenti e Vault WhatsApp:
- * 1. Legge il Vault interno alimentato tramite condivisione diretta (`Intent.ACTION_SEND` da WhatsApp -> "Esporta chat")
- *    oppure tramite il selettore di sistema Storage Access Framework (`OpenMultipleDocuments`).
- * 2. Interroga `MediaStore.Files` per eventuali documenti/export visibili all'app.
- * 3. Su Android 8–9 scansiona anche `Download` e `Documents`.
+ * Scanner completo e pre-check cartelle per Documenti, File e Archivi WhatsApp su Android 8–16 (`targetSdk = 36`):
+ * 1. Supporta l'accesso completo opzionale a tutte le cartelle (`MANAGE_EXTERNAL_STORAGE` su Android 11+) per leggere
+ *    ogni file mantenendo l'alberatura esatta `/storage/emulated/0/<cartella>/<sottocartelle>`.
+ * 2. Supporta intere cartelle scelte con il selettore SAF (`OpenDocumentTree`) persistendo i permessi tra riavvii.
+ * 3. Interroga `MediaStore.Files` estraendo il reale percorso `RELATIVE_PATH` / `DATA` invece di appiattire in "Documenti".
+ * 4. Include i file condivisi o selezionati nel Vault interno (`shared_vault`).
  */
 object DocumentsAndWhatsAppScanner {
-    private val supportedDocExtensions = setOf(
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "zip", "rar", "7z", "ics", "vcf"
+    private const val PREFS_NAME = "directswitch_docs_prefs"
+    private const val KEY_TREE_URIS = "persisted_doc_tree_uris"
+
+    private val mediaGalleryExtensions = setOf(
+        "jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "dng", "raw",
+        "mp4", "mov", "m4v", "3gp", "mkv", "avi", "webm"
     )
+
+    private val supportedDocExtensions = setOf(
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+        "txt", "csv", "md", "json", "xml", "html", "htm", "epub", "mobi",
+        "pages", "numbers", "key", "zip", "rar", "7z", "tar", "gz",
+        "ics", "vcf", "m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "apk", "dwg", "svg"
+    )
+
+    fun hasAllFilesAccess(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun openAllFilesAccessSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val specific = Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (runCatching { context.startActivity(specific) }.isFailure) {
+                runCatching { context.startActivity(fallback) }
+            }
+        } else {
+            val appSettings = Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(appSettings) }
+        }
+    }
 
     private fun sharedVaultDir(context: Context): File =
         File(context.filesDir, "shared_vault").apply { mkdirs() }
 
+    fun savePickedFolderTree(context: Context, treeUri: Uri): Boolean {
+        return runCatching {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(treeUri, flags)
+            }
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val current = prefs.getStringSet(KEY_TREE_URIS, emptySet()).orEmpty().toMutableSet()
+            current.add(treeUri.toString())
+            prefs.edit().putStringSet(KEY_TREE_URIS, current).apply()
+            true
+        }.getOrDefault(false)
+    }
+
+    fun getPersistedFolderTreeUris(context: Context): List<Uri> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val rawSet = prefs.getStringSet(KEY_TREE_URIS, emptySet()).orEmpty()
+        return rawSet.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() }
+    }
+
+    fun clearPickedDocumentsAndFolders(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_TREE_URIS)
+            .apply()
+        runCatching { sharedVaultDir(context).deleteRecursively() }
+        sharedVaultDir(context)
+    }
+
     /**
      * Importa nel Vault di invio uno o più `Uri` provenienti da `ACTION_SEND` (es. "Esporta chat" di WhatsApp)
-     * o dal file picker di sistema (`OpenMultipleDocuments`). Restituisce il numero di file aggiunti.
+     * o dal file picker di sistema (`OpenMultipleDocuments`), cercando di preservare la sottocartella reale se disponibile.
      */
     fun importSharedUrisIntoVault(context: Context, uris: List<Uri>): Int {
         if (uris.isEmpty()) return 0
@@ -958,13 +1136,22 @@ object DocumentsAndWhatsAppScanner {
 
         for (uri in uris) {
             try {
-                val rawName = queryDisplayName(context, uri)
+                val (rawName, relDirHint) = queryDisplayNameAndRelativeFolder(context, uri)
+                val effectiveName = rawName
                     ?: uri.lastPathSegment?.substringAfterLast('/')
                     ?: "allegato_${System.currentTimeMillis()}"
-                val safeName = File(rawName).name
+                val safeName = File(effectiveName).name
                     .replace(Regex("[\\\\/:*?\"<>|]"), "_")
                     .ifBlank { "file_${System.currentTimeMillis()}" }
-                val dest = File(vault, safeName)
+
+                val relSegments = relDirHint?.let { PublicDownloadsSaver.sanitizedRelativeSegments(it) }.orEmpty()
+                var destParent = vault
+                for (seg in relSegments) {
+                    destParent = File(destParent, seg)
+                }
+                destParent.mkdirs()
+
+                val dest = File(destParent, safeName)
                 val copied = resolver.openInputStream(uri)?.use { input ->
                     dest.outputStream().use { out ->
                         input.copyTo(out, bufferSize = 256 * 1024)
@@ -983,20 +1170,87 @@ object DocumentsAndWhatsAppScanner {
         return imported
     }
 
-    private fun queryDisplayName(context: Context, uri: Uri): String? {
-        return try {
-            context.contentResolver.query(
-                uri,
-                arrayOf(OpenableColumns.DISPLAY_NAME),
-                null,
-                null,
-                null
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) cursor.getString(0) else null
+    private fun queryDisplayNameAndRelativeFolder(context: Context, uri: Uri): Pair<String?, String?> {
+        var displayName: String? = null
+        var relFolder: String? = null
+        runCatching {
+            val cols = buildList {
+                add(OpenableColumns.DISPLAY_NAME)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    add(MediaStore.MediaColumns.RELATIVE_PATH)
+                }
+            }.toTypedArray()
+            context.contentResolver.query(uri, cols, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0) displayName = cursor.getString(nameIdx)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                        if (relIdx >= 0) {
+                            relFolder = cursor.getString(relIdx)?.trim('/')?.takeIf { it.isNotBlank() }
+                        }
+                    }
+                }
             }
-        } catch (_: Throwable) {
-            null
         }
+        if (relFolder.isNullOrBlank() && uri.authority == "com.android.externalstorage.documents") {
+            runCatching {
+                val docId = android.provider.DocumentsContract.getDocumentId(uri)
+                val colon = docId.indexOf(':')
+                if (colon >= 0) {
+                    val inner = docId.substring(colon + 1)
+                    val slash = inner.lastIndexOf('/')
+                    if (slash > 0) {
+                        relFolder = inner.substring(0, slash)
+                    }
+                }
+            }
+        }
+        return displayName to relFolder
+    }
+
+    fun inspectPreTransferDocuments(
+        context: Context,
+        includeDocuments: Boolean = true,
+        includeWhatsAppVault: Boolean = false
+    ): DocumentPrecheckReport {
+        val entries = scanDocumentAndWhatsAppEntries(
+            context = context,
+            includeDocuments = includeDocuments,
+            includeWhatsAppVault = includeWhatsAppVault
+        )
+        val docEntries = entries.filter { it.manifestItem.category == TransferCategory.DOCUMENTS }
+        val grouped = docEntries.groupBy {
+            it.manifestItem.relativeAlbumOrFolder.ifBlank { Environment.DIRECTORY_DOCUMENTS }
+        }
+        val summaries = grouped.map { (folder, list) ->
+            DocumentFolderSummary(
+                folderPath = folder,
+                fileCount = list.size,
+                totalBytes = list.sumOf { it.manifestItem.sizeBytes }
+            )
+        }.sortedWith(compareByDescending<DocumentFolderSummary> { it.fileCount }.thenBy { it.folderPath.lowercase() })
+
+        return DocumentPrecheckReport(
+            totalFiles = docEntries.size,
+            totalBytes = docEntries.sumOf { it.manifestItem.sizeBytes },
+            hasAllFilesAccess = hasAllFilesAccess(context),
+            persistedFoldersCount = getPersistedFolderTreeUris(context).size,
+            folderSummaries = summaries
+        )
+    }
+
+    fun buildExistingDocumentDedupKeys(context: Context): Set<String> {
+        return scanDocumentAndWhatsAppEntries(
+            context = context,
+            includeDocuments = true,
+            includeWhatsAppVault = true
+        ).map { entry ->
+            val relNorm = PublicDownloadsSaver.sanitizedRelativeSegments(entry.manifestItem.relativeAlbumOrFolder)
+                .joinToString("/")
+                .lowercase()
+            "${relNorm}/${entry.manifestItem.fileName.lowercase()}_${entry.manifestItem.sizeBytes}"
+        }.toHashSet()
     }
 
     fun scanDocumentAndWhatsAppEntries(
@@ -1008,40 +1262,46 @@ object DocumentsAndWhatsAppScanner {
         val out = mutableListOf<LocalMediaEntry>()
         var idxCounter = 0L
 
-        fun classifyCategory(lowerName: String, ext: String): TransferCategory? {
+        fun classifyFile(lowerName: String, ext: String, allowAnyNonHidden: Boolean): TransferCategory? {
+            if (lowerName.startsWith(".") || ext == "tmp" || ext == "nomedia" || ext == "part") return null
             val isWhatsAppExport = lowerName.contains("whatsapp") && (ext == "zip" || ext == "txt")
-            val isDoc = (ext in supportedDocExtensions || lowerName.isNotEmpty()) && !isWhatsAppExport
             return when {
                 isWhatsAppExport && includeWhatsAppVault -> TransferCategory.WHATSAPP_VAULT
-                isDoc && includeDocuments && ext in supportedDocExtensions -> TransferCategory.DOCUMENTS
+                !isWhatsAppExport && includeDocuments && (allowAnyNonHidden || ext in supportedDocExtensions) ->
+                    TransferCategory.DOCUMENTS
                 else -> null
             }
         }
 
-        // 1. Vault esplicito (condivisioni da WhatsApp / File Picker SAF: funziona sempre su Android 11–16)
-        val vaultFiles = sharedVaultDir(context).listFiles()?.toList().orEmpty()
-        for (file in vaultFiles) {
-            if (!file.isFile || file.length() <= 0L) continue
+        fun normalizeFolderOrFallback(rawFolder: String?, cat: TransferCategory): String {
+            if (cat == TransferCategory.WHATSAPP_VAULT) return "WhatsApp_Vault"
+            val clean = PublicDownloadsSaver.sanitizedRelativeSegments(rawFolder.orEmpty()).joinToString("/")
+            return clean.ifEmpty { Environment.DIRECTORY_DOCUMENTS }
+        }
+
+        // 1. Vault esplicito (preserva eventuali sottocartelle ricostruite al suo interno)
+        val vaultRoot = sharedVaultDir(context)
+        vaultRoot.walkTopDown().forEach { file ->
+            if (!file.isFile || file.length() <= 0L) return@forEach
             val lowerName = file.name.lowercase()
             val ext = file.extension.lowercase()
-            val isWa = lowerName.contains("whatsapp") && (ext == "zip" || ext == "txt")
-            val cat = when {
-                isWa && includeWhatsAppVault -> TransferCategory.WHATSAPP_VAULT
-                !isWa && includeDocuments -> TransferCategory.DOCUMENTS
-                else -> null
-            } ?: continue
+            val cat = classifyFile(lowerName, ext, allowAnyNonHidden = true) ?: return@forEach
+            val relParent = file.parentFile?.relativeToOrNull(vaultRoot)?.path
+                ?.replace('\\', '/')
+                ?.takeIf { it.isNotBlank() && it != "." }
+            val folder = normalizeFolderOrFallback(relParent, cat)
             idxCounter++
-            val dedupKey = "${lowerName}_${file.length()}_${file.lastModified()}"
+            val canonicalDedup = "${folder.lowercase()}/${lowerName}_${file.length()}_${file.lastModified()}"
             out.add(
                 LocalMediaEntry(
                     manifestItem = ManifestItem(
                         id = "${cat.name.lowercase()}_vault_$idxCounter",
                         category = cat,
                         fileName = file.name,
-                        relativeAlbumOrFolder = if (isWa) "WhatsApp_Vault" else "Documenti",
+                        relativeAlbumOrFolder = folder,
                         sizeBytes = file.length(),
                         capturedEpochMillis = file.lastModified(),
-                        dedupKey = dedupKey,
+                        dedupKey = canonicalDedup,
                         mimeType = mimeForExtension(ext)
                     ),
                     contentUri = Uri.fromFile(file)
@@ -1049,109 +1309,218 @@ object DocumentsAndWhatsAppScanner {
             )
         }
 
-        // 2. Query MediaStore.Files per documenti visibili all'app
-        try {
-            val filesUri = MediaStore.Files.getContentUri("external")
-            val projection = arrayOf(
-                MediaStore.Files.FileColumns._ID,
-                MediaStore.Files.FileColumns.DISPLAY_NAME,
-                MediaStore.Files.FileColumns.SIZE,
-                MediaStore.Files.FileColumns.DATE_MODIFIED,
-                MediaStore.Files.FileColumns.MIME_TYPE
-            )
-            val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ?"
-            val selectionArgs = arrayOf(MediaStore.Files.FileColumns.MEDIA_TYPE_NONE.toString())
-            context.contentResolver.query(
-                filesUri,
-                projection,
-                selection,
-                selectionArgs,
-                "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
-            )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
-                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
-                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
-                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
+        // 2. Cartelle SAF scelte esplicitamente con `OpenDocumentTree` (preserva tutta la gerarchia!)
+        for (treeUri in getPersistedFolderTreeUris(context)) {
+            val rootDoc = runCatching { DocumentFile.fromTreeUri(context, treeUri) }.getOrNull() ?: continue
+            if (!rootDoc.exists() || !rootDoc.canRead()) continue
+            val rootName = rootDoc.name?.trim()?.takeIf { it.isNotBlank() } ?: "Cartella_Android"
 
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idCol)
-                    val name = cursor.getString(nameCol)?.trim().orEmpty()
-                    val size = cursor.getLong(sizeCol)
-                    if (name.isEmpty() || size <= 0L) continue
-                    val lower = name.lowercase()
-                    val ext = name.substringAfterLast('.', "").lowercase()
-                    val cat = classifyCategory(lower, ext) ?: continue
-                    val modMillis = cursor.getLong(dateCol) * 1000L
-                    val mime = cursor.getString(mimeCol) ?: mimeForExtension(ext)
-                    idxCounter++
-                    out.add(
-                        LocalMediaEntry(
-                            manifestItem = ManifestItem(
-                                id = "${cat.name.lowercase()}_ms_$id",
-                                category = cat,
-                                fileName = name,
-                                relativeAlbumOrFolder = if (cat == TransferCategory.WHATSAPP_VAULT) "WhatsApp_Vault" else "Documenti",
-                                sizeBytes = size,
-                                capturedEpochMillis = modMillis,
-                                dedupKey = "${lower}_${size}_$modMillis",
-                                mimeType = mime
-                            ),
-                            contentUri = ContentUris.withAppendedId(filesUri, id)
+            fun walkTree(dir: DocumentFile, currentRelFolder: String) {
+                for (child in dir.listFiles()) {
+                    val childName = child.name?.trim().orEmpty()
+                    if (childName.isEmpty() || childName.startsWith(".")) continue
+                    if (child.isDirectory) {
+                        walkTree(child, "$currentRelFolder/$childName")
+                    } else if (child.isFile) {
+                        val size = child.length()
+                        if (size <= 0L) continue
+                        val lower = childName.lowercase()
+                        val ext = childName.substringAfterLast('.', "").lowercase()
+                        val cat = classifyFile(lower, ext, allowAnyNonHidden = true) ?: continue
+                        val mod = child.lastModified()
+                        idxCounter++
+                        out.add(
+                            LocalMediaEntry(
+                                manifestItem = ManifestItem(
+                                    id = "${cat.name.lowercase()}_saf_$idxCounter",
+                                    category = cat,
+                                    fileName = childName,
+                                    relativeAlbumOrFolder = currentRelFolder,
+                                    sizeBytes = size,
+                                    capturedEpochMillis = mod,
+                                    dedupKey = "${currentRelFolder.lowercase()}/${lower}_${size}_$mod",
+                                    mimeType = child.type ?: mimeForExtension(ext)
+                                ),
+                                contentUri = child.uri
+                            )
                         )
-                    )
+                    }
                 }
             }
-        } catch (t: Throwable) {
-            DirectSwitchLog.warn("Scansione MediaStore.Files fallita", t)
+            walkTree(rootDoc, rootName)
         }
 
-        // 3. Fallback Android 8–9 su cartelle pubbliche
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        // 3. Scansione diretta di tutte le cartelle dello storage interno se autorizzato (Accesso a tutti i file su Android 11+ o Android 8–9)
+        if (hasAllFilesAccess(context)) {
             @Suppress("DEPRECATION")
-            val legacyRoots = listOfNotNull(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-            )
-            for (root in legacyRoots) {
-                if (!root.exists() || !root.canRead()) continue
-                root.walkTopDown().maxDepth(3).forEach { file ->
-                    if (!file.isFile || file.length() <= 0L) return@forEach
-                    val lowerName = file.name.lowercase()
-                    val ext = file.extension.lowercase()
-                    val cat = classifyCategory(lowerName, ext) ?: return@forEach
-                    idxCounter++
-                    val dedupKey = "${lowerName}_${file.length()}_${file.lastModified()}"
-                    out.add(
-                        LocalMediaEntry(
-                            manifestItem = ManifestItem(
-                                id = "${cat.name.lowercase()}_$idxCounter",
-                                category = cat,
-                                fileName = file.name,
-                                relativeAlbumOrFolder = if (cat == TransferCategory.WHATSAPP_VAULT) "WhatsApp_Vault" else "Documenti",
-                                sizeBytes = file.length(),
-                                capturedEpochMillis = file.lastModified(),
-                                dedupKey = dedupKey,
-                                mimeType = mimeForExtension(ext)
-                            ),
-                            contentUri = Uri.fromFile(file)
-                        )
-                    )
+            val storageRoot = Environment.getExternalStorageDirectory()
+            if (storageRoot != null && storageRoot.exists() && storageRoot.canRead()) {
+                val excludedRootDirs = setOf("android", "lost.dir", ".thumbnails", ".trash", "alarms", "notifications", "ringtones")
+                val galleryRoots = setOf("dcim", "pictures", "movies")
+                val storagePathPrefix = storageRoot.absolutePath.trimEnd('/') + "/"
+
+                fun walkStorageDir(dir: File, depth: Int) {
+                    if (depth > 10 || !dir.isDirectory || !dir.canRead()) return
+                    val children = dir.listFiles() ?: return
+                    for (entry in children) {
+                        val name = entry.name
+                        if (name.startsWith(".")) continue
+                        if (entry.isDirectory) {
+                            if (depth == 0 && name.lowercase() in excludedRootDirs) continue
+                            walkStorageDir(entry, depth + 1)
+                        } else if (entry.isFile) {
+                            val size = entry.length()
+                            if (size <= 0L) continue
+                            val parentPath = entry.parentFile?.absolutePath ?: continue
+                            val rawRel = if (parentPath.startsWith(storagePathPrefix)) {
+                                parentPath.removePrefix(storagePathPrefix)
+                            } else if (parentPath == storageRoot.absolutePath) {
+                                Environment.DIRECTORY_DOCUMENTS
+                            } else {
+                                Environment.DIRECTORY_DOCUMENTS
+                            }
+                            val firstSegLower = rawRel.substringBefore('/').lowercase()
+                            val ext = entry.extension.lowercase()
+                            // Nei percorsi galleria DCIM/Pictures/Movies salta foto e video (già gestiti dalla categoria Foto/Video)
+                            if (firstSegLower in galleryRoots && ext in mediaGalleryExtensions) continue
+
+                            val cat = classifyFile(name.lowercase(), ext, allowAnyNonHidden = firstSegLower !in galleryRoots) ?: continue
+                            val folder = normalizeFolderOrFallback(rawRel, cat)
+                            idxCounter++
+                            out.add(
+                                LocalMediaEntry(
+                                    manifestItem = ManifestItem(
+                                        id = "${cat.name.lowercase()}_fs_$idxCounter",
+                                        category = cat,
+                                        fileName = name,
+                                        relativeAlbumOrFolder = folder,
+                                        sizeBytes = size,
+                                        capturedEpochMillis = entry.lastModified(),
+                                        dedupKey = "${folder.lowercase()}/${name.lowercase()}_${size}_${entry.lastModified()}",
+                                        mimeType = mimeForExtension(ext)
+                                    ),
+                                    contentUri = Uri.fromFile(entry)
+                                )
+                            )
+                        }
+                    }
                 }
+                walkStorageDir(storageRoot, 0)
+            }
+        } else {
+            // 4. Fallback Scoped Storage (senza MANAGE_EXTERNAL_STORAGE): legge MediaStore.Files mantenendo RELATIVE_PATH reale!
+            try {
+                val filesUri = MediaStore.Files.getContentUri("external")
+                val projection = buildList {
+                    add(MediaStore.Files.FileColumns._ID)
+                    add(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                    add(MediaStore.Files.FileColumns.SIZE)
+                    add(MediaStore.Files.FileColumns.DATE_MODIFIED)
+                    add(MediaStore.Files.FileColumns.MIME_TYPE)
+                    add(MediaStore.Files.FileColumns.MEDIA_TYPE)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        add(MediaStore.Files.FileColumns.RELATIVE_PATH)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        add(MediaStore.Files.FileColumns.DATA)
+                    }
+                }.toTypedArray()
+
+                val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} != ? AND ${MediaStore.Files.FileColumns.MEDIA_TYPE} != ?"
+                val selectionArgs = arrayOf(
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
+                )
+                context.contentResolver.query(
+                    filesUri,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
+                )?.use { cursor ->
+                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+                    val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                    val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+                    val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
+                    val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
+                    val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        cursor.getColumnIndex(MediaStore.Files.FileColumns.RELATIVE_PATH)
+                    } else -1
+                    @Suppress("DEPRECATION")
+                    val dataCol = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        cursor.getColumnIndex(MediaStore.Files.FileColumns.DATA)
+                    } else -1
+
+                    @Suppress("DEPRECATION")
+                    val extPrefix = Environment.getExternalStorageDirectory()?.absolutePath?.trimEnd('/')?.plus("/")
+
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(idCol)
+                        val name = cursor.getString(nameCol)?.trim().orEmpty()
+                        val size = cursor.getLong(sizeCol)
+                        if (name.isEmpty() || size <= 0L) continue
+                        val lower = name.lowercase()
+                        val ext = name.substringAfterLast('.', "").lowercase()
+                        if (ext in mediaGalleryExtensions) continue
+                        val cat = classifyFile(lower, ext, allowAnyNonHidden = false) ?: continue
+
+                        val rawRel: String? = if (relCol >= 0) {
+                            cursor.getString(relCol)?.trim('/')
+                        } else if (dataCol >= 0 && extPrefix != null) {
+                            val fullPath = cursor.getString(dataCol)
+                            val parentPath = fullPath?.let { File(it).parentFile?.absolutePath }
+                            if (parentPath?.startsWith(extPrefix) == true) parentPath.removePrefix(extPrefix) else null
+                        } else null
+
+                        val folder = normalizeFolderOrFallback(rawRel, cat)
+                        val modMillis = cursor.getLong(dateCol) * 1000L
+                        val mime = cursor.getString(mimeCol) ?: mimeForExtension(ext)
+                        idxCounter++
+                        out.add(
+                            LocalMediaEntry(
+                                manifestItem = ManifestItem(
+                                    id = "${cat.name.lowercase()}_ms_$id",
+                                    category = cat,
+                                    fileName = name,
+                                    relativeAlbumOrFolder = folder,
+                                    sizeBytes = size,
+                                    capturedEpochMillis = modMillis,
+                                    dedupKey = "${folder.lowercase()}/${lower}_${size}_$modMillis",
+                                    mimeType = mime
+                                ),
+                                contentUri = ContentUris.withAppendedId(filesUri, id)
+                            )
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                DirectSwitchLog.warn("Scansione MediaStore.Files fallita", t)
             }
         }
 
-        return out.distinctBy { it.manifestItem.dedupKey }
+        // Deduplica per percorso relativo esatto + nome file + dimensione byte (stesso nome in cartelle diverse resta distinto!)
+        return out.distinctBy { entry ->
+            val f = entry.manifestItem.relativeAlbumOrFolder.lowercase()
+            "${f}/${entry.manifestItem.fileName.lowercase()}_${entry.manifestItem.sizeBytes}"
+        }
     }
 
-    private fun mimeForExtension(ext: String): String = when (ext) {
-        "pdf" -> "application/pdf"
-        "zip" -> "application/zip"
-        "txt" -> "text/plain"
-        "csv" -> "text/csv"
-        "vcf" -> "text/vcard"
-        "ics" -> "text/calendar"
-        else -> "application/octet-stream"
+    private fun mimeForExtension(ext: String): String {
+        val lower = ext.lowercase()
+        val systemMime = runCatching { MimeTypeMap.getSingleton().getMimeTypeFromExtension(lower) }.getOrNull()
+        if (!systemMime.isNullOrBlank()) return systemMime
+        return when (lower) {
+            "pdf" -> "application/pdf"
+            "zip" -> "application/zip"
+            "txt" -> "text/plain"
+            "csv" -> "text/csv"
+            "vcf" -> "text/vcard"
+            "ics" -> "text/calendar"
+            "m4a" -> "audio/mp4"
+            "mp3" -> "audio/mpeg"
+            "opus" -> "audio/ogg"
+            else -> "application/octet-stream"
+        }
     }
 }
 
@@ -1216,7 +1585,7 @@ object InstalledAppsScanner {
     }
 }
 
-/** Aggrega i conteggi locali per la dashboard iniziale e di selezione categorie. */
+/** Aggrega i conteggi locali e le cartelle rilevate per la dashboard iniziale e il controllo pre-trasferimento. */
 object DeviceDataAnalyzer {
     fun scanSummary(context: Context): LocalDeviceScanSummary {
         val contacts = ContactsSmartMerger.readAllContacts(context).size
@@ -1225,13 +1594,16 @@ object DeviceDataAnalyzer {
         val videos = media.filter { it.manifestItem.category == TransferCategory.VIDEOS }
         val calendars = CalendarMigrator.readEvents(context).size
         val sms = SmsSystemScanner.countSms(context)
-        val docsAndWa = DocumentsAndWhatsAppScanner.scanDocumentAndWhatsAppEntries(
-            context,
+        val docPrecheck = DocumentsAndWhatsAppScanner.inspectPreTransferDocuments(
+            context = context,
             includeDocuments = true,
             includeWhatsAppVault = true
         )
-        val docsCount = docsAndWa.count { it.manifestItem.category == TransferCategory.DOCUMENTS }
-        val waCount = docsAndWa.count { it.manifestItem.category == TransferCategory.WHATSAPP_VAULT }
+        val waEntries = DocumentsAndWhatsAppScanner.scanDocumentAndWhatsAppEntries(
+            context = context,
+            includeDocuments = false,
+            includeWhatsAppVault = true
+        )
         val appsCount = InstalledAppsScanner.scanUserInstalledApps(context).size
         val (freeBytes, totalBytes) = StorageCapacityChecker.getFreeAndTotalBytes(context)
 
@@ -1243,8 +1615,12 @@ object DeviceDataAnalyzer {
             videosBytes = videos.sumOf { it.manifestItem.sizeBytes },
             calendarEventsCount = calendars,
             smsCount = sms,
-            documentsCount = docsCount,
-            whatsappArchivesCount = waCount,
+            documentsCount = docPrecheck.totalFiles,
+            documentsBytes = docPrecheck.totalBytes,
+            documentFoldersCount = docPrecheck.folderSummaries.size,
+            hasAllFilesAccess = docPrecheck.hasAllFilesAccess,
+            documentFolderSummaries = docPrecheck.folderSummaries,
+            whatsappArchivesCount = waEntries.size,
             installedAppsCount = appsCount,
             freeStorageBytes = freeBytes,
             totalStorageBytes = totalBytes

@@ -18,6 +18,7 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import com.directswitch.android.DirectSwitchLog
@@ -98,6 +99,7 @@ data class LiveTransferProgress(
     val skippedDuplicates: Int = 0,
     val failedItemsCount: Int = 0,
     val receivedInstalledApps: List<InstalledAppRecord> = emptyList(),
+    val receivedDocumentFolders: Map<String, Int> = emptyMap(),
     val isCompleted: Boolean = false,
     val pendingNativeWhatsAppMigration: Boolean = false,
     val errorMessage: String? = null
@@ -244,6 +246,7 @@ class DirectSwitchTransferServer(
     private val completedIds = ConcurrentHashMap.newKeySet<String>()
     private val transferredBytesCounter = AtomicLong(0L)
     private val completedFilesCounter = AtomicInteger(0)
+    private val docFolderCounts = ConcurrentHashMap<String, Int>()
     private var transferStartMillis = 0L
 
     fun startReceiverSession(
@@ -264,6 +267,7 @@ class DirectSwitchTransferServer(
         requestedWhatsAppMigration.set(false)
         manifestMap.clear()
         completedIds.clear()
+        docFolderCounts.clear()
         transferredBytesCounter.set(0L)
         completedFilesCounter.set(0)
 
@@ -521,6 +525,7 @@ class DirectSwitchTransferServer(
                         receiverHasCloudSavePro = receiverHasCloudSavePro
                     )
                     val enoughSpace = req.totalEstimatedBytes < (freeBytes - 200L * 1024L * 1024L)
+                    docFolderCounts.clear()
                     transferStartMillis = System.currentTimeMillis()
                     handshakeCompleted.set(enoughSpace)
 
@@ -590,11 +595,18 @@ class DirectSwitchTransferServer(
                         activeTier
                     )
                     val existingMediaKeys = MediaExifScannerAndImporter.buildExistingDedupKeys(context)
+                    val existingDocKeys = DocumentsAndWhatsAppScanner.buildExistingDocumentDedupKeys(context)
                     val acceptedItems = mutableListOf<ManifestItem>()
                     var skippedMediaDups = 0
 
                     for (item in tierFilteredItems) {
-                        if (item.id in completedIds || item.dedupKey in existingMediaKeys) {
+                        val isMediaDup = (item.category == TransferCategory.PHOTOS || item.category == TransferCategory.VIDEOS) &&
+                            item.dedupKey in existingMediaKeys
+                        val docKey = "${PublicDownloadsSaver.sanitizedRelativeSegments(item.relativeAlbumOrFolder).joinToString("/").lowercase()}/${item.fileName.lowercase()}_${item.sizeBytes}"
+                        val isDocDup = (item.category == TransferCategory.DOCUMENTS || item.category == TransferCategory.WHATSAPP_VAULT) &&
+                            docKey in existingDocKeys
+
+                        if (item.id in completedIds || isMediaDup || isDocDup) {
                             skippedMediaDups++
                         } else {
                             manifestMap[item.id] = item
@@ -671,23 +683,27 @@ class DirectSwitchTransferServer(
                             .ifBlank { "file_${safeTempId}" }
                         val safeItem = item.copy(fileName = sanitizedFileName)
 
+                        val subFolder = if (safeItem.category == TransferCategory.WHATSAPP_VAULT) {
+                            "WhatsApp_Vault"
+                        } else {
+                            PublicDownloadsSaver.sanitizedRelativeSegments(safeItem.relativeAlbumOrFolder)
+                                .joinToString("/")
+                                .ifBlank { Environment.DIRECTORY_DOCUMENTS }
+                        }
+
                         val importedOk = if (safeItem.category == TransferCategory.PHOTOS || safeItem.category == TransferCategory.VIDEOS) {
                             tempDecrypted.inputStream().use { plainIn ->
                                 MediaExifScannerAndImporter.importMediaStream(context, safeItem, plainIn)
                             }
                         } else {
-                            val subFolder = if (safeItem.category == TransferCategory.WHATSAPP_VAULT) {
-                                "WhatsApp_Vault"
-                            } else {
-                                "Documenti"
-                            }
                             tempDecrypted.inputStream().use { plainIn ->
                                 PublicDownloadsSaver.saveStream(
                                     context = context,
                                     subFolder = subFolder,
                                     fileName = sanitizedFileName,
                                     mimeType = safeItem.mimeType,
-                                    inputStream = plainIn
+                                    inputStream = plainIn,
+                                    expectedSizeBytes = safeItem.sizeBytes
                                 )
                             }
                         }
@@ -695,6 +711,10 @@ class DirectSwitchTransferServer(
                         if (!importedOk) {
                             writeJsonResponse(output, 500, """{"error":"Impossibile salvare il file su archivio pubblico"}""")
                             return
+                        }
+
+                        if (safeItem.category != TransferCategory.PHOTOS && safeItem.category != TransferCategory.VIDEOS) {
+                            docFolderCounts[subFolder] = (docFolderCounts[subFolder] ?: 0) + 1
                         }
 
                         completedIds.add(itemId)
@@ -707,7 +727,8 @@ class DirectSwitchTransferServer(
                             currentFileName = sanitizedFileName,
                             completedItems = doneFiles,
                             transferredBytes = doneBytes,
-                            speedMegabytesPerSec = speedMbs
+                            speedMegabytesPerSec = speedMbs,
+                            receivedDocumentFolders = docFolderCounts.toMap()
                         )
                         writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes,"sha256":"$actualSha256"}""")
                     } finally {

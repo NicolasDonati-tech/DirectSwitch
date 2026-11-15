@@ -9,6 +9,52 @@
 import SwiftUI
 import AVFoundation
 import UIKit
+import UniformTypeIdentifiers
+
+enum iOSDocumentPickerMode: String, Identifiable {
+    case folders
+    case files
+
+    var id: String { rawValue }
+}
+
+struct iOSDocumentOrFolderPickerRepresentable: UIViewControllerRepresentable {
+    let mode: iOSDocumentPickerMode
+    let onPickedURLs: ([URL]) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let contentTypes: [UTType] = mode == .folders ? [.folder] : [.item]
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: false)
+        picker.allowsMultipleSelection = true
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        private let parent: iOSDocumentOrFolderPickerRepresentable
+
+        init(parent: iOSDocumentOrFolderPickerRepresentable) {
+            self.parent = parent
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            parent.onPickedURLs(urls)
+            parent.dismiss()
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            parent.dismiss()
+        }
+    }
+}
 
 enum SendTargetDestination: Equatable {
     case newIPhone
@@ -430,6 +476,7 @@ struct SendCategoriesStepView: View {
     let isScanningDevice: Bool
     let isLocalProUnlocked: Bool
     let pickedDocuments: [(ManifestItem, URL)]
+    let documentPrecheck: iOSDocumentsPrecheckReport?
     let selectedAppsCount: Int
     let totalDetectedAppsCount: Int
     let selectedAppsPreview: [InstalledAppRecord]
@@ -458,7 +505,9 @@ struct SendCategoriesStepView: View {
     var onDeleteTempAutoRecording: () -> Void
     var onResetAppsToZero: (() -> Void)? = nil
     var onManageApps: () -> Void
+    var onAddFolders: () -> Void
     var onAddFilesOrWhatsApp: () -> Void
+    var onRefreshDocumentCheck: () -> Void
     var onClearStagedFiles: () -> Void
     var onOpenProSheet: () -> Void
     var onChangePairedDevice: () -> Void
@@ -492,7 +541,15 @@ struct SendCategoriesStepView: View {
     }
 
     private var docsCount: Int {
-        pickedDocuments.filter { $0.0.category == .DOCUMENTS }.count
+        documentPrecheck?.totalFiles
+            ?? scanSummary?.documentsCount
+            ?? pickedDocuments.filter { $0.0.category == .DOCUMENTS }.count
+    }
+
+    private var docFoldersCount: Int {
+        documentPrecheck?.folderSummaries.count
+            ?? scanSummary?.documentFoldersCount
+            ?? 0
     }
 
     private var whatsAppCount: Int {
@@ -693,7 +750,7 @@ struct SendCategoriesStepView: View {
                         icon: "doc.fill",
                         iconColor: AppleTheme.teal,
                         title: "Documenti, Cartelle e Password",
-                        countBadge: docsCount > 0 ? "\(docsCount) file pronti" : "File e Cartelle",
+                        countBadge: docsCount > 0 ? "\(docsCount) file • \(max(1, docFoldersCount)) cartelle" : "Controllo su iPhone",
                         infoMessage: "Trasferisce documenti, PDF, Memo Vocali salvati in File, intere cartelle «Su iPhone» (mantenendo tutte le sottocartelle) e file Password .csv esportati.",
                         isOn: $includeDocuments
                     )
@@ -976,35 +1033,103 @@ struct SendCategoriesStepView: View {
 
                 // Visibile ESCLUSIVAMENTE quando la spunta «Documenti, Cartelle e Password» è attiva in blu
                 if includeDocuments {
+                    let activePrecheck = documentPrecheck
+                    let folderSummaries = activePrecheck?.folderSummaries ?? scanSummary?.documentFolderSummaries ?? []
+                    let totalFilesFound = activePrecheck?.totalFiles ?? docsCount
+                    let totalBytesFound = activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0
+                    let unreadableCount = activePrecheck?.unreadableFilesCount ?? 0
+                    let hasAuthorizedAnyFolders = (activePrecheck?.authorizedBookmarkFoldersCount ?? 0) > 0 || !pickedDocuments.isEmpty
+
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Cartelle «Su iPhone», File o Password .csv")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
+                        HStack(spacing: 10) {
+                            AppleSettingsIcon(systemName: "folder.fill", color: AppleTheme.teal)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Controllo cartelle e file sul telefono")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                Text(totalFilesFound > 0
+                                    ? "\(totalFilesFound) file in \(folderSummaries.count) cartelle • \(DirectSwitchUIHelpers.formatBytes(totalBytesFound))"
+                                    : "Cartella app + cartelle autorizzate «Su iPhone»"
+                                )
+                                    .font(.system(size: 12))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                            }
                             Spacer()
+                            Button(action: onRefreshDocumentCheck) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.clockwise")
+                                    Text("Ricontrolla")
+                                }
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(AppleTheme.blue)
+                            }
+                            .buttonStyle(.plain)
                             InfoCircleButton(
-                                title: "Cartelle «Su iPhone» e Password senza iCloud",
-                                message: "• Puoi selezionare singoli file oppure INTERE CARTELLE da «Su iPhone» nell'app File (inclusi Memo Vocali salvati in File e PDF): DirectSwitch ricrea automaticamente tutte le sottocartelle sul nuovo iPhone.\n\n• Vuoi passare anche le Password salvate senza Portachiavi iCloud? Apri Impostazioni → App → Password (o Safari) → Esporta password (.csv), salva il file e allegalo qui: sul nuovo iPhone comparirà il tasto rapido per reimportarle tutte!"
+                                title: "Controllo Cartelle su iPhone",
+                                message: "• Su iPhone DirectSwitch controlla automaticamente i file nella propria cartella «File → Su iPhone → DirectSwitch» e tutte le cartelle esterne autorizzate (mantenute in memoria anche ai trasferimenti successivi).\n• Tutte le cartelle e sottocartelle selezionate vengono ricreate identiche sul nuovo telefono.\n• Per le Password senza iCloud esporta il .csv da Impostazioni → App → Password e allegalo qui sotto."
                             )
                         }
 
+                        if unreadableCount > 0 {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(AppleTheme.orange)
+                                    .font(.system(size: 14))
+                                Text("\(unreadableCount) file risultano ancora solo su iCloud o non leggibili: scaricali in File prima di avviare.")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                            }
+                            .padding(10)
+                            .background(AppleTheme.orange.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+
+                        if folderSummaries.isEmpty {
+                            Text("Nessuna cartella selezionata al momento. Su iOS premi «Scegli cartelle «Su iPhone»» per autorizzare le cartelle del telefono da mantenere intatte.")
+                                .font(.system(size: 12))
+                                .foregroundColor(AppleTheme.textSecondary)
+                        } else {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(Array(folderSummaries.prefix(8))) { folder in
+                                    HStack {
+                                        Text("\(folder.folderPath)/")
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundColor(AppleTheme.textPrimary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text("\(folder.fileCount) file • \(DirectSwitchUIHelpers.formatBytes(folder.totalBytes))")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(AppleTheme.textSecondary)
+                                    }
+                                }
+                                if folderSummaries.count > 8 {
+                                    Text("e altre \(folderSummaries.count - 8) cartelle (\(totalFilesFound) file totali)")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(AppleTheme.teal)
+                                }
+                            }
+                        }
+
                         AppleSecondaryButton(
-                            title: pickedDocuments.isEmpty
-                                ? "Scegli file, cartelle «Su iPhone» o Password .csv"
-                                : "Aggiungi altri file o cartelle (\(pickedDocuments.count) pronti)",
+                            title: "Scegli cartelle «Su iPhone» (con sottocartelle)",
                             icon: "folder.badge.plus",
                             tint: AppleTheme.blue,
+                            action: onAddFolders
+                        )
+
+                        AppleSecondaryButton(
+                            title: pickedDocuments.isEmpty
+                                ? "Scegli file singoli, .zip o Password .csv"
+                                : "Aggiungi altri file singoli (\(pickedDocuments.count) allegati)",
+                            icon: "doc.badge.plus",
+                            tint: AppleTheme.teal,
                             action: onAddFilesOrWhatsApp
                         )
 
-                        if !pickedDocuments.isEmpty {
+                        if hasAuthorizedAnyFolders {
                             HStack {
-                                Text(pickedDocuments.map { $0.0.fileName }.joined(separator: ", "))
-                                    .font(.system(size: 12))
-                                    .foregroundColor(AppleTheme.textSecondary)
-                                    .lineLimit(1)
                                 Spacer()
-                                Button("Rimuovi", action: onClearStagedFiles)
+                                Button("Rimuovi cartelle e file autorizzati", action: onClearStagedFiles)
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(AppleTheme.red)
                                     .buttonStyle(.plain)

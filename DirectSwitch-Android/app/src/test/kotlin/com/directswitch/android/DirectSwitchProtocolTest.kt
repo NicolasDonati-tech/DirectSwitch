@@ -1,5 +1,6 @@
 package com.directswitch.android
 
+import com.directswitch.android.migrators.PublicDownloadsSaver
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchCrypto
 import com.directswitch.android.protocol.DirectSwitchJson
@@ -415,5 +416,40 @@ class DirectSwitchProtocolTest {
         val raw = DirectSwitchJson.instance.encodeToString(manifest)
         val decoded = DirectSwitchJson.instance.decodeFromString<TransferManifest>(raw)
         assertEquals(apps, decoded.installedAppsPayload)
+    }
+
+    @Test
+    fun sanitizedRelativeSegmentsPreservesNestedFoldersAndStripsTraversal() {
+        assertEquals(
+            listOf("Lavoro", "2026", "Fatture"),
+            PublicDownloadsSaver.sanitizedRelativeSegments("../Lavoro\\2026/Fatture/./")
+        )
+        assertEquals(
+            listOf("Documents", "Contratti_2026"),
+            PublicDownloadsSaver.sanitizedRelativeSegments("Documents/Contratti:2026")
+        )
+        assertEquals(
+            emptyList<String>(),
+            PublicDownloadsSaver.sanitizedRelativeSegments(" / .. / . ")
+        )
+    }
+
+    @Test
+    fun manifestItemPreservesDeepDocumentFolderPath() {
+        val item = ManifestItem(
+            id = "doc_001",
+            category = TransferCategory.DOCUMENTS,
+            fileName = "Contratto.pdf",
+            relativeAlbumOrFolder = "Lavoro/2026/Clienti/Contratti",
+            sizeBytes = 4096L,
+            capturedEpochMillis = 1_700_000_000_000L,
+            dedupKey = "doc_dedup_001",
+            mimeType = "application/pdf"
+        )
+        val raw = DirectSwitchJson.instance.encodeToString(item)
+        val decoded = DirectSwitchJson.instance.decodeFromString<ManifestItem>(raw)
+        assertEquals("Lavoro/2026/Clienti/Contratti", decoded.relativeAlbumOrFolder)
+        assertEquals("Contratto.pdf", decoded.fileName)
+        assertEquals(4096L, decoded.sizeBytes)
     }
 }
