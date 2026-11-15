@@ -925,9 +925,8 @@ final class DirectSwitchTests: XCTestCase {
         // 1. Download/Fatture/2026 deve finire dentro <tempBase>/Download/Fatture/2026 (NON in DirectSwitch/)
         let dlItem = ManifestItem(
             id: "doc_1", category: .DOCUMENTS, fileName: "gennaio.pdf",
-            mimeType: "application/pdf", sizeBytes: 5, sha256: "a",
-            capturedEpochMillis: 1_700_000_000_000, relativeAlbumOrFolder: "Download/Fatture/2026",
-            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k1"
+            relativeAlbumOrFolder: "Download/Fatture/2026", sizeBytes: 5,
+            capturedEpochMillis: 1_700_000_000_000, dedupKey: "k1", mimeType: "application/pdf"
         )
         let dlResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: dlItem, destinations: destinations, fallbackRoot: fbDest)
         XCTAssertEqual(dlResolved?.directoryURL.standardizedFileURL.path, downloadDestDir.appendingPathComponent("Fatture/2026").standardizedFileURL.path)
@@ -936,18 +935,16 @@ final class DirectSwitchTests: XCTestCase {
         // 2. Alias cross-OS: Android Downloads/Note & Documents/Contratti -> iPhone Download/Note & Documenti/Contratti
         let androidDlItem = ManifestItem(
             id: "doc_2", category: .DOCUMENTS, fileName: "nota.txt",
-            mimeType: "text/plain", sizeBytes: 4, sha256: "b",
-            capturedEpochMillis: 0, relativeAlbumOrFolder: "Downloads/Note",
-            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k2"
+            relativeAlbumOrFolder: "Downloads/Note", sizeBytes: 4,
+            capturedEpochMillis: 0, dedupKey: "k2", mimeType: "text/plain"
         )
         let androidDlResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: androidDlItem, destinations: destinations, fallbackRoot: fbDest)
         XCTAssertEqual(androidDlResolved?.directoryURL.standardizedFileURL.path, downloadDestDir.appendingPathComponent("Note").standardizedFileURL.path)
 
         let androidDocsItem = ManifestItem(
             id: "doc_3", category: .DOCUMENTS, fileName: "affitto.pdf",
-            mimeType: "application/pdf", sizeBytes: 4, sha256: "c",
-            capturedEpochMillis: 0, relativeAlbumOrFolder: "Documents/Contratti",
-            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k3"
+            relativeAlbumOrFolder: "Documents/Contratti", sizeBytes: 4,
+            capturedEpochMillis: 0, dedupKey: "k3", mimeType: "application/pdf"
         )
         let androidDocsResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: androidDocsItem, destinations: destinations, fallbackRoot: fbDest)
         XCTAssertEqual(androidDocsResolved?.directoryURL.standardizedFileURL.path, documentiDestDir.appendingPathComponent("Contratti").standardizedFileURL.path)
@@ -955,9 +952,8 @@ final class DirectSwitchTests: XCTestCase {
         // 3. iCloud_Drive/Lavoro/Preventivi deve andare dentro <iCloudLavoroDir>/Preventivi
         let icloudItem = ManifestItem(
             id: "doc_4", category: .DOCUMENTS, fileName: "offerta.docx",
-            mimeType: "application/octet-stream", sizeBytes: 4, sha256: "d",
-            capturedEpochMillis: 0, relativeAlbumOrFolder: "iCloud_Drive/Lavoro/Preventivi",
-            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k4"
+            relativeAlbumOrFolder: "iCloud_Drive/Lavoro/Preventivi", sizeBytes: 4,
+            capturedEpochMillis: 0, dedupKey: "k4", mimeType: "application/octet-stream"
         )
         let icloudResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: icloudItem, destinations: destinations, fallbackRoot: fbDest)
         XCTAssertEqual(icloudResolved?.directoryURL.standardizedFileURL.path, iCloudLavoroDir.appendingPathComponent("Preventivi").standardizedFileURL.path)
@@ -966,9 +962,8 @@ final class DirectSwitchTests: XCTestCase {
         // 4. Cartella nuova non ancora autorizzata usa fallbackRoot esterno invece di app/DirectSwitch
         let customItem = ManifestItem(
             id: "doc_5", category: .DOCUMENTS, fileName: "progetto.pdf",
-            mimeType: "application/pdf", sizeBytes: 4, sha256: "e",
-            capturedEpochMillis: 0, relativeAlbumOrFolder: "Progetti_Nuovi/2026",
-            width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k5"
+            relativeAlbumOrFolder: "Progetti_Nuovi/2026", sizeBytes: 4,
+            capturedEpochMillis: 0, dedupKey: "k5", mimeType: "application/pdf"
         )
         let customResolved = iOSDocumentsSandboxBridge.resolveWritableTargetDirectory(for: customItem, destinations: destinations, fallbackRoot: fbDest)
         XCTAssertEqual(customResolved?.directoryURL.standardizedFileURL.path, fallbackBaseDir.appendingPathComponent("Progetti_Nuovi/2026").standardizedFileURL.path)
@@ -993,9 +988,8 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertTrue(iOSDocumentsSandboxBridge.matchesExistingDocumentDedup(
             item: ManifestItem(
                 id: "doc_alias", category: .DOCUMENTS, fileName: "gennaio.pdf",
-                mimeType: "application/pdf", sizeBytes: 5, sha256: "a",
-                capturedEpochMillis: 1_700_000_000_000, relativeAlbumOrFolder: "Downloads/Fatture/2026",
-                width: 0, height: 0, durationMillis: 0, pairedMediaGroupId: nil, dedupKey: "k1"
+                relativeAlbumOrFolder: "Downloads/Fatture/2026", sizeBytes: 5,
+                capturedEpochMillis: 1_700_000_000_000, dedupKey: "k1", mimeType: "application/pdf"
             ),
             existingKeys: dedupKeys
         ))
