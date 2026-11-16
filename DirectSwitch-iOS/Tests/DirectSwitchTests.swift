@@ -166,8 +166,18 @@ final class DirectSwitchTests: XCTestCase {
                 dedupKey: "d_1"
             )
         )
+        sampleItems.append(
+            ManifestItem(
+                id: "wa_1",
+                category: .WHATSAPP_VAULT,
+                fileName: "WhatsApp_Chat.zip",
+                sizeBytes: 4096,
+                dedupKey: "w_1"
+            )
+        )
         let (allowed, gated) = LicensePolicyEvaluator.filterItemsForTier(sampleItems, tier: .CROSS_OS_PREVIEW)
-        XCTAssertEqual(allowed.count, 25)
+        XCTAssertEqual(allowed.count, 26)
+        XCTAssertTrue(allowed.contains(where: { $0.id == "wa_1" }))
         XCTAssertEqual(gated, 6)
     }
 

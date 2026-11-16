@@ -71,9 +71,9 @@ fun WhatsAppNativeTransferCard(
 
     val headerSubtitle = when {
         isIphoneToThisAndroid ->
-            "Gratuito dentro WhatsApp: una sola scansione QR, senza Android Switch."
+            "Gratuito dentro WhatsApp: una sola scansione QR, senza Android Switch"
         isThisAndroidToIphone ->
-            "Passaggio diretto della cronologia chat WhatsApp sul nuovo iPhone."
+            "Gratuito dentro WhatsApp: trasferimento diretto via QR senza Passa a iOS e senza formattare"
         else ->
             "Passaggio gratuito della cronologia WhatsApp via Codice QR sullo stesso numero."
     }
@@ -84,8 +84,8 @@ fun WhatsAppNativeTransferCard(
             "2" to "Sul vecchio iPhone apri direttamente WhatsApp (senza usare lo scanner di DirectSwitch) → Impostazioni → Chat → Trasferisci chat su Android → Inizia e inquadra il QR una sola volta."
         )
         isThisAndroidToIphone -> listOf(
-            "1" to "Su questo Android apri WhatsApp → Impostazioni → Chat → Trasferisci chat.",
-            "2" to "Sul nuovo iPhone conferma con «Passa a iOS» / WhatsApp usando lo stesso numero di telefono."
+            "1" to "Sul nuovo iPhone apri WhatsApp e verifica lo stesso numero fino al Codice QR (anche su iPhone già configurato, senza usare Passa a iOS e senza formattare).",
+            "2" to "Su questo Android tocca «Apri WhatsApp» qui sotto → Impostazioni → Chat → Trasferisci chat → Inizia e inquadra il Codice QR sul nuovo iPhone."
         )
         else -> listOf(
             "1" to "Sul vecchio Android apri WhatsApp → Impostazioni → Chat → Trasferisci chat → Inizia.",
@@ -95,7 +95,7 @@ fun WhatsAppNativeTransferCard(
 
     val primaryButtonTitle = when {
         isIphoneToThisAndroid -> "Apri WhatsApp (Numero + QR)"
-        isThisAndroidToIphone -> "Apri WhatsApp (Impostazioni Chat)"
+        isThisAndroidToIphone -> "Apri WhatsApp (Trasferisci chat)"
         else -> "Apri WhatsApp su questo Android"
     }
 
@@ -185,7 +185,35 @@ fun WhatsAppNativeTransferCard(
                     )
                     InfoCircleButton(
                         title = "Perché potrei dover reimpostare solo WhatsApp?",
-                        message = "WhatsApp su Android mostra il Codice QR per importare le chat dall'iPhone solo durante la prima verifica del numero su una installazione pulita. Se avevi già attivato WhatsApp vuoto su questo Android, «Spazio di archiviazione → Cancella dati» azzera solo WhatsApp (senza toccare il telefono o altri file) e ti permette di verificare subito il numero mostrando il QR."
+                        message = "WhatsApp su Android mostra il Codice QR per importare le chat solo durante la prima verifica del numero su una installazione pulita. Se avevi già attivato WhatsApp vuoto su questo Android, «Spazio di archiviazione → Cancella dati» azzera solo WhatsApp (senza toccare il telefono o altri file) e ti permette di verificare subito il numero mostrando il QR."
+                    )
+                }
+            } else if (isThisAndroidToIphone) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(DirectSwitchTheme.inputSurface)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = null,
+                        tint = DirectSwitchTheme.blue,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "WhatsApp su iPhone già aperto senza QR? Elimina e riscarica solo WhatsApp su iPhone",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.blue,
+                        modifier = Modifier.weight(1f)
+                    )
+                    InfoCircleButton(
+                        title = "Perché potrei dover reimpostare solo WhatsApp su iPhone?",
+                        message = "WhatsApp su iPhone mostra il Codice QR per ricevere le chat durante la verifica iniziale del numero. Se sul nuovo iPhone avevi già aperto WhatsApp vuoto saltando il QR, disinstalla e reinstalla solo WhatsApp da App Store (senza resettare l'iPhone) per far riapparire il QR."
                     )
                 }
             }

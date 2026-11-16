@@ -426,7 +426,7 @@ enum LicensePolicyEvaluator {
         var previewUsed = 0
         var gated = 0
         for item in items {
-            if item.category == .CONTACTS {
+            if item.category == .CONTACTS || item.category == .WHATSAPP_VAULT {
                 allowed.append(item)
             } else if (item.category == .PHOTOS || item.category == .VIDEOS) && previewUsed < crossOsPreviewMediaLimit {
                 allowed.append(item)

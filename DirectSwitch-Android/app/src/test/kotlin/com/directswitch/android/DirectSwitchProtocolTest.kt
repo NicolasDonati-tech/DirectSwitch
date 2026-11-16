@@ -497,5 +497,28 @@ class DirectSwitchProtocolTest {
         assertFalse(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PREVIEW))
         assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PRO_UNLOCKED))
         assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.INTRA_OS_FREE))
+
+        val previewItems = listOf(
+            ManifestItem(
+                id = "wa_free",
+                category = TransferCategory.WHATSAPP_VAULT,
+                fileName = "WhatsApp_Chat.zip",
+                sizeBytes = 2048L,
+                dedupKey = "wa_1"
+            ),
+            ManifestItem(
+                id = "doc_paid",
+                category = TransferCategory.DOCUMENTS,
+                fileName = "Contratto.pdf",
+                sizeBytes = 4096L,
+                dedupKey = "doc_1"
+            )
+        )
+        val (allowed, gated) = LicensePolicyEvaluator.filterItemsForTier(
+            previewItems,
+            SessionLicenseTier.CROSS_OS_PREVIEW
+        )
+        assertEquals(listOf("wa_free"), allowed.map { it.id })
+        assertEquals(1, gated)
     }
 }

@@ -303,8 +303,8 @@ object LicensePolicyEvaluator {
     const val CROSS_OS_PREVIEW_MEDIA_LIMIT = 25
 
     /**
-     * In modalità `CROSS_OS_PREVIEW` passano gratuitamente l'intera Rubrica Contatti e i primi 25 media;
-     * le categorie estese (Calendari, SMS, Documenti illimitati) richiedono `INTRA_OS_FREE` o `CROSS_OS_PRO_UNLOCKED`.
+     * In modalità `CROSS_OS_PREVIEW` passano sempre gratuitamente la Rubrica Contatti, le Chat WhatsApp e i primi 25 media;
+     * le categorie estese (Calendari, SMS, Documenti illimitati, App) richiedono `INTRA_OS_FREE` o `CROSS_OS_PRO_UNLOCKED`.
      */
     fun allowsFullCategories(tier: SessionLicenseTier): Boolean =
         tier != SessionLicenseTier.CROSS_OS_PREVIEW
@@ -342,7 +342,7 @@ object LicensePolicyEvaluator {
         var previewMediaUsed = 0
         var gatedCount = 0
         for (item in items) {
-            if (item.category == TransferCategory.CONTACTS) {
+            if (item.category == TransferCategory.CONTACTS || item.category == TransferCategory.WHATSAPP_VAULT) {
                 allowed.add(item)
             } else if (
                 (item.category == TransferCategory.PHOTOS || item.category == TransferCategory.VIDEOS) &&

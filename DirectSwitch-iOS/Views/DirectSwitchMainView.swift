@@ -1404,6 +1404,9 @@ private struct DirectSwitchTransferProgressView: View {
             if !isReceiverMode && !isToAndroid {
                 return "Inquadra il QR di WhatsApp del nuovo iPhone senza passare dalla Fotocamera di sistema"
             }
+            if isFromAndroid {
+                return "Gratuito dentro WhatsApp: trasferimento diretto via QR anche su iPhone già configurato"
+            }
             if isReceiverMode && !isFromAndroid {
                 return "Verifica il numero qui: il vecchio iPhone si scollegherà da solo e apparirà il codice QR"
             }
@@ -1487,8 +1490,9 @@ private struct DirectSwitchTransferProgressView: View {
             }
             if isFromAndroid {
                 return [
-                    "Tocca il pulsante verde qui sotto per aprire (o scaricare) WhatsApp Personale.",
-                    "Inserisci il tuo numero e il codice SMS per completare l'importazione delle chat."
+                    "Tocca il pulsante verde qui sotto per aprire (o scaricare da App Store) WhatsApp Personale su questo iPhone.",
+                    "Inserisci il tuo numero e il codice SMS fino alla schermata del Codice QR (funziona anche su iPhone già configurato, senza usare Passa a iOS).",
+                    "Sul vecchio Android apri WhatsApp → Impostazioni → Chat → Trasferisci chat → Inizia e inquadra il Codice QR mostrato qui."
                 ]
             }
             return [
@@ -1517,10 +1521,14 @@ private struct DirectSwitchTransferProgressView: View {
                 InfoCircleButton(
                     title: isToAndroid
                         ? "Come evitare la doppia scansione su Android"
-                        : "Come funziona dopo la disconnessione del vecchio iPhone",
+                        : (isFromAndroid
+                            ? "Trasferimento chat Android → iPhone senza Passa a iOS"
+                            : "Come funziona dopo la disconnessione del vecchio iPhone"),
                     message: isToAndroid
                         ? "Da iPhone a Android fa tutto WhatsApp gratis con una sola scansione dentro WhatsApp stesso (non serve aprire lo scanner QR di DirectSwitch né Android Switch).\n\nSe sullo schermo QR di Android vedi i 3 pallini (⋮) in alto a destra, seleziona subito «Mostra QR per iPhone» prima di scansionare: in questo modo il QR non va riavviato e WhatsApp lo legge al primo colpo."
-                        : "Quando inserisci numero e SMS sul nuovo iPhone, WhatsApp disconnette subito il vecchio telefono (quindi sul vecchio non puoi più entrare in Impostazioni → Chat).\n\nIl codice QR mostrato sul nuovo iPhone contiene il link diretto di sblocco della schermata «Trasferisci la cronologia chat»: inquadrandolo con il pulsante qui sotto dentro DirectSwitch salti completamente la Fotocamera di iPhone e il bottone giallo!"
+                        : (isFromAndroid
+                            ? "WhatsApp trasferisce gratuitamente tutta la cronologia chat direttamente tramite Codice QR in Wi-Fi locale anche su iPhone già configurati, senza formattare e senza usare Passa a iOS."
+                            : "Quando inserisci numero e SMS sul nuovo iPhone, WhatsApp disconnette subito il vecchio telefono (quindi sul vecchio non puoi più entrare in Impostazioni → Chat).\n\nIl codice QR mostrato sul nuovo iPhone contiene il link diretto di sblocco della schermata «Trasferisci la cronologia chat»: inquadrandolo con il pulsante qui sotto dentro DirectSwitch salti completamente la Fotocamera di iPhone e il bottone giallo!")
                 )
             }
 
@@ -1587,7 +1595,7 @@ private struct DirectSwitchTransferProgressView: View {
                 }
             }
 
-            if isToAndroid || (isReceiverMode && !isFromAndroid) {
+            if isToAndroid || isReceiverMode {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise.circle.fill")
                         .font(.system(size: 16))
@@ -1603,7 +1611,7 @@ private struct DirectSwitchTransferProgressView: View {
                         title: "Perché potrei dover reimpostare solo WhatsApp?",
                         message: isToAndroid
                             ? "WhatsApp su Android mostra il Codice QR per importare le chat dall'iPhone solo durante la prima verifica del numero su una installazione pulita. Se avevi già attivato WhatsApp vuoto sul nuovo Android, tocca «Reimposta solo WhatsApp» in DirectSwitch su Android (Spazio di archiviazione → Cancella dati) per azzerare solo WhatsApp senza toccare il telefono e far riapparire il QR."
-                            : "Su iPhone WhatsApp mostra il Codice QR «Trasferisci la cronologia chat» subito dopo il codice SMS su una installazione pulita. Se avevi già completato l'accesso vuoto su questo iPhone saltando il QR, elimina e riscarica solo l'app WhatsApp da App Store (senza toccare il resto dell'iPhone) e reinserisci il numero per far riapparire il QR."
+                            : "Su iPhone WhatsApp mostra il Codice QR per importare le chat subito dopo il codice SMS su una installazione pulita. Se avevi già completato l'accesso vuoto su questo iPhone saltando il QR, elimina e riscarica solo l'app WhatsApp da App Store (senza toccare il resto dell'iPhone) e reinserisci il numero per far riapparire il QR."
                     )
                 }
                 .padding(.horizontal, 12)
