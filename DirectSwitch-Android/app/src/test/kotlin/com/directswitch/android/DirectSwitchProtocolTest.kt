@@ -521,4 +521,152 @@ class DirectSwitchProtocolTest {
         assertEquals(listOf("wa_free"), allowed.map { it.id })
         assertEquals(1, gated)
     }
+
+    @Test
+    fun androidToIphoneMirrorFiltersSystemUtilitiesAndFallsBackToModifiedDate() {
+        val scanner = com.directswitch.android.migrators.InstalledAppsScanner
+        assertFalse(scanner.isMirrorableAndroidPackage("com.google.android.gms", isPureSystem = false))
+        assertFalse(scanner.isMirrorableAndroidPackage("com.android.settings", isPureSystem = false))
+        assertFalse(scanner.isMirrorableAndroidPackage("com.google.android.deskclock", isPureSystem = false))
+        assertFalse(scanner.isMirrorableAndroidPackage("com.sec.android.app.camera", isPureSystem = false))
+
+        assertTrue(scanner.isMirrorableAndroidPackage("com.google.android.apps.maps", isPureSystem = true))
+        assertTrue(scanner.isMirrorableAndroidPackage("com.android.chrome", isPureSystem = true))
+        assertTrue(scanner.isMirrorableAndroidPackage("com.whatsapp", isPureSystem = false))
+        assertTrue(scanner.isMirrorableAndroidPackage("com.instagram.android", isPureSystem = false))
+
+        val mediaScanner = com.directswitch.android.migrators.MediaExifScannerAndImporter
+        assertEquals(1_700_000_000_000L, mediaScanner.resolveEffectiveTimestampMillis(1_700_000_000_000L, 1_800_000_000L))
+        assertEquals(1_800_000_000_000L, mediaScanner.resolveEffectiveTimestampMillis(0L, 1_800_000_000L))
+        assertEquals(0L, mediaScanner.resolveEffectiveTimestampMillis(0L, 0L))
+    }
+
+    @Test
+    fun installedAppsCrossOsMirrorMappingAndSnapshotDetection() {
+        val scanner = com.directswitch.android.migrators.InstalledAppsScanner
+
+        assertEquals(
+            com.directswitch.android.migrators.InstalledAppsScanner.PlayStoreTarget.ExactPackage("com.instagram.android"),
+            scanner.resolvePlayStoreTarget(
+                InstalledAppRecord(packageName = "com.burbn.instagram", appName = "Instagram"),
+                DevicePlatform.IOS
+            )
+        )
+        assertEquals(
+            com.directswitch.android.migrators.InstalledAppsScanner.PlayStoreTarget.ExactPackage("com.whatsapp.w4b"),
+            scanner.resolvePlayStoreTarget(
+                InstalledAppRecord(packageName = "scan.ocr.01", appName = "WA Business"),
+                DevicePlatform.IOS
+            )
+        )
+        assertEquals(
+            com.directswitch.android.migrators.InstalledAppsScanner.PlayStoreTarget.SearchByName("BancaLocale"),
+            scanner.resolvePlayStoreTarget(
+                InstalledAppRecord(packageName = "scan.ocr.02", appName = "BancaLocale"),
+                DevicePlatform.IOS
+            )
+        )
+        assertEquals(
+            com.directswitch.android.migrators.InstalledAppsScanner.PlayStoreTarget.SearchByName("Custom iOS App"),
+            scanner.resolvePlayStoreTarget(
+                InstalledAppRecord(packageName = "it.custom.iosapp", appName = "Custom iOS App"),
+                DevicePlatform.IOS
+            )
+        )
+        assertEquals(
+            com.directswitch.android.migrators.InstalledAppsScanner.PlayStoreTarget.ExactPackage("org.example.androidapp"),
+            scanner.resolvePlayStoreTarget(
+                InstalledAppRecord(packageName = "org.example.androidapp", appName = "Android App"),
+                DevicePlatform.ANDROID
+            )
+        )
+
+        assertFalse(scanner.isMirrorableAndroidPackage("com.google.android.webview", isPureSystem = false))
+        assertFalse(scanner.isMirrorableAndroidPackage("com.miui.securitycenter", isPureSystem = false))
+        assertFalse(scanner.isMirrorableAndroidPackage("com.google.android.ext.services", isPureSystem = false))
+        assertTrue(scanner.isMirrorableAndroidPackage("com.google.android.apps.bard", isPureSystem = true))
+
+        val snapshot = com.directswitch.android.migrators.InstalledAppsScanner.InstalledAppsSnapshot(
+            packageNames = setOf("com.whatsapp"),
+            normalizedLabels = setOf(scanner.normalizeAppLabel("Poste ID"))
+        )
+        assertTrue(
+            scanner.isAppInstalled(
+                snapshot,
+                InstalledAppRecord(packageName = "net.whatsapp.WhatsApp", appName = "WhatsApp"),
+                DevicePlatform.IOS
+            )
+        )
+        assertTrue(
+            scanner.isAppInstalled(
+                snapshot,
+                InstalledAppRecord(packageName = "scan.ocr.03", appName = "PosteID"),
+                DevicePlatform.IOS
+            )
+        )
+        assertFalse(
+            scanner.isAppInstalled(
+                snapshot,
+                InstalledAppRecord(packageName = "com.spotify.client", appName = "Spotify"),
+                DevicePlatform.IOS
+            )
+        )
+    }
+
+    @Test
+    fun mediaRelativePathPreservesAlbumsAndCameraRoll() {
+        val mediaScanner = com.directswitch.android.migrators.MediaExifScannerAndImporter
+        assertEquals("DCIM/Camera", mediaScanner.resolveRelativeMediaPath("iPhone_Camera", isVideo = false))
+        assertEquals("DCIM/Camera", mediaScanner.resolveRelativeMediaPath("Camera", isVideo = true))
+        assertEquals("DCIM/Camera", mediaScanner.resolveRelativeMediaPath("Recenti", isVideo = false))
+        assertEquals("DCIM/Camera", mediaScanner.resolveRelativeMediaPath("DCIM/Camera", isVideo = false))
+        assertEquals(
+            "Pictures/Città & Mare/Sicilia '25",
+            mediaScanner.resolveRelativeMediaPath("Città & Mare/Sicilia '25", isVideo = false)
+        )
+        assertEquals("Movies/Vacanze", mediaScanner.resolveRelativeMediaPath("../Vacanze", isVideo = true))
+    }
+
+    @Test
+    fun richContactTransferRecordRoundTrip() {
+        val rich = com.directswitch.android.protocol.ContactTransferRecord(
+            id = "c1",
+            displayName = "Mario Rossi",
+            phones = listOf("+393331234567"),
+            emails = listOf("mario@example.com"),
+            organization = "Studio Rossi",
+            note = "Contatto principale",
+            givenName = "Mario",
+            familyName = "Rossi",
+            nickname = "SuperMario",
+            jobTitle = "Ingegnere",
+            birthdayYear = 1990,
+            birthdayMonth = 5,
+            birthdayDay = 14,
+            labeledPhones = listOf(com.directswitch.android.protocol.LabeledValueRecord("mobile", "+393331234567")),
+            labeledEmails = listOf(com.directswitch.android.protocol.LabeledValueRecord("work", "mario@example.com")),
+            urls = listOf("https://example.com"),
+            postalAddresses = listOf(
+                com.directswitch.android.protocol.PostalAddressTransferRecord(
+                    label = "home",
+                    street = "Via Roma 10",
+                    city = "Milano",
+                    state = "MI",
+                    postalCode = "20100",
+                    country = "Italia"
+                )
+            ),
+            avatarJpegBase64 = "ZmFrZUF2YXRhcg=="
+        )
+        val encoded = DirectSwitchJson.instance.encodeToString(rich)
+        val decoded = DirectSwitchJson.instance.decodeFromString<com.directswitch.android.protocol.ContactTransferRecord>(encoded)
+        assertEquals(rich, decoded)
+
+        val legacyJson = """{"id":"c2","displayName":"Luigi Verdi","phones":["+393409998877"],"emails":[],"organization":"","note":""}"""
+        val legacyDecoded = DirectSwitchJson.instance.decodeFromString<com.directswitch.android.protocol.ContactTransferRecord>(legacyJson)
+        assertEquals("Luigi Verdi", legacyDecoded.displayName)
+        assertEquals(null, legacyDecoded.birthdayMonth)
+        assertEquals(null, legacyDecoded.labeledPhones)
+        assertEquals(null, legacyDecoded.postalAddresses)
+    }
 }

@@ -1086,4 +1086,16 @@ final class DirectSwitchTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ActiveTransferScope.self, from: encoded)
         XCTAssertEqual(decoded, combined)
     }
+
+    func testAndroidToIosAppMappingAndCanonicalQuery() {
+        XCTAssertEqual(iOSAppStoreCatalogResolver.androidPackageToiOSBundleId["com.whatsapp"], "net.whatsapp.WhatsApp")
+        XCTAssertEqual(iOSAppStoreCatalogResolver.androidPackageToiOSBundleId["com.whatsapp.w4b"], "net.whatsapp.WhatsAppSMB")
+        XCTAssertEqual(iOSAppStoreCatalogResolver.androidPackageToiOSBundleId["com.instagram.android"], "com.burbn.instagram")
+        XCTAssertEqual(iOSAppStoreCatalogResolver.androidPackageToiOSBundleId["com.spotify.music"], "com.spotify.client")
+        XCTAssertEqual(iOSAppStoreCatalogResolver.androidPackageToiOSBundleId["org.telegram.messenger"], "ph.telegra.Telegraph")
+        XCTAssertEqual(iOSAppStoreCatalogResolver.androidPackageToiOSBundleId["com.openai.chatgpt"], "com.openai.chat")
+
+        XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "WA Business"), "WhatsApp Business")
+        XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "WhatsApp"), "WhatsApp Messenger")
+    }
 }

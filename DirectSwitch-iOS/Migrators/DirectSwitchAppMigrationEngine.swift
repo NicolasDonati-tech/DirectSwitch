@@ -1277,16 +1277,79 @@ enum iOSAppStoreCatalogResolver {
         return str
     }
 
+    static let androidPackageToiOSBundleId: [String: String] = [
+        "com.whatsapp": "net.whatsapp.WhatsApp",
+        "com.whatsapp.w4b": "net.whatsapp.WhatsAppSMB",
+        "com.instagram.android": "com.burbn.instagram",
+        "org.telegram.messenger": "ph.telegra.Telegraph",
+        "org.telegram.plus": "ph.telegra.Telegraph",
+        "com.facebook.katana": "com.facebook.Facebook",
+        "com.facebook.orca": "com.facebook.Messenger",
+        "com.zhiliaoapp.musically": "com.zhiliaoapp.musically",
+        "com.google.android.youtube": "com.google.ios.youtube",
+        "com.google.android.gm": "com.google.Gmail",
+        "com.google.android.apps.maps": "com.google.Maps",
+        "com.android.chrome": "com.google.chrome.ios",
+        "com.google.android.apps.docs": "com.google.Drive",
+        "com.google.android.apps.photos": "com.google.photos",
+        "com.google.android.googlequicksearchbox": "com.google.GoogleMobile",
+        "com.google.android.apps.authenticator2": "com.google.Authenticator",
+        "com.spotify.music": "com.spotify.client",
+        "com.netflix.mediaclient": "com.netflix.Netflix",
+        "com.amazon.avod.thirdpartyclient": "com.amazon.aiv.AIVApp",
+        "com.disney.disneyplus": "com.disney.disneyplus",
+        "com.dazn": "com.dazn.theApp",
+        "com.amazon.mshop.android.shopping": "com.amazon.AmazonIT",
+        "com.paypal.android.p2pmobile": "com.yourcompany.PPClient",
+        "com.revolut.revolut": "com.revolut.revolut",
+        "com.satispay.customer": "com.satispay.consumer",
+        "com.microsoft.office.outlook": "com.microsoft.Office.Outlook",
+        "com.microsoft.teams": "com.microsoft.skype.teams",
+        "us.zoom.videomeetings": "us.zoom.videomeetings",
+        "com.twitter.android": "com.atebits.Tweetie2",
+        "com.instagram.barcelona": "com.burbn.barcelona",
+        "com.linkedin.android": "com.linkedin.LinkedIn",
+        "com.snapchat.android": "com.toyopagroup.picaboo",
+        "com.pinterest": "pinterest",
+        "com.reddit.frontpage": "com.reddit.Reddit",
+        "com.discord": "com.hammerandchisel.discord",
+        "tv.twitch.android.app": "tv.twitch",
+        "com.waze": "com.waze.iphone",
+        "com.ubercab": "com.ubercab.UberClient",
+        "it.subito": "it.subito.iphone",
+        "fr.vinted": "fr.vinted",
+        "com.airbnb.android": "com.airbnb.app",
+        "com.openai.chatgpt": "com.openai.chat",
+        "com.shazam.android": "com.shazam.Shazam",
+        "com.canva.editor": "com.canva.canvaeditor",
+        "com.ebay.mobile": "com.ebay.iphone",
+        "it.pagopa.app.io": "it.pagopa.app.io",
+        "posteitaliane.posteapp.appposteid": "posteitaliane.posteapp.appposteid",
+        "com.einnovation.temu": "com.einnovation.temu",
+        "com.brave.browser": "com.brave.ios.browser",
+        "com.microsoft.emmx": "com.microsoft.msedge",
+        "ch.protonvpn.android": "ch.protonmail.vpn",
+        "com.google.android.calendar": "com.google.calendar",
+        "org.zwanoo.android.speedtest": "com.ookla.speedtest",
+        "com.teamviewer.teamviewer.market.mobile": "com.teamviewer.rc",
+        "com.lemon.lvoverseas": "com.lemon.lvoverseas"
+    ]
+
     /// Arricchisce un elenco di `InstalledAppRecord` (sia nativi iOS sia ricevuti da Android) con `appStoreId` e `iconUrl`.
     static func enrichAppsWithStoreMetadata(_ apps: [InstalledAppRecord]) async -> [InstalledAppRecord] {
         guard !apps.isEmpty else { return [] }
         var working = apps
 
-        // 1. Applica eventuali probe noti locali per avere subito `appStoreId` e `urlScheme`
+        // 1. Applica mappa Android -> iOS e eventuali probe noti locali per avere subito `appStoreId` e `urlScheme`
         for i in working.indices {
+            let pkgLower = working[i].packageName.lowercased()
+            let mappedBundle = androidPackageToiOSBundleId[pkgLower]
+            let canonicalName = iOSInstalledAppsScanner.canonicalAppQuery(for: working[i].appName)
             if let probe = iOSInstalledAppsScanner.knownProbes.first(where: {
-                $0.bundleId.caseInsensitiveCompare(working[i].packageName) == .orderedSame
+                (mappedBundle != nil && $0.bundleId.caseInsensitiveCompare(mappedBundle!) == .orderedSame)
+                    || $0.bundleId.caseInsensitiveCompare(working[i].packageName) == .orderedSame
                     || $0.appName.caseInsensitiveCompare(working[i].appName) == .orderedSame
+                    || $0.appName.caseInsensitiveCompare(canonicalName) == .orderedSame
             }) {
                 if working[i].appStoreId == nil {
                     working[i].appStoreId = probe.appStoreId
@@ -1295,7 +1358,7 @@ enum iOSAppStoreCatalogResolver {
                     working[i].urlScheme = probe.urlScheme
                 }
             }
-            if let cached = await AppStoreMetadataCache.shared.getByBundle(working[i].packageName) {
+            if let cached = await AppStoreMetadataCache.shared.getByBundle(mappedBundle ?? working[i].packageName) {
                 if working[i].appStoreId == nil { working[i].appStoreId = cached.trackId }
                 if working[i].iconUrl == nil { working[i].iconUrl = cached.iconUrl }
             }
@@ -1305,7 +1368,10 @@ enum iOSAppStoreCatalogResolver {
         let missingIconBundles = Array(Set(
             working
                 .filter { $0.iconUrl == nil && $0.packageName.contains(".") }
-                .map(\.packageName)
+                .compactMap { item -> String? in
+                    let pkgLower = item.packageName.lowercased()
+                    return androidPackageToiOSBundleId[pkgLower] ?? item.packageName
+                }
         ))
 
         let batchSize = 20
@@ -1326,9 +1392,12 @@ enum iOSAppStoreCatalogResolver {
                         let cleanIcon = sanitizeIconUrl(entry.artworkUrl100)
                         let name = entry.trackName ?? bId
                         await AppStoreMetadataCache.shared.setByBundle(bId, trackId: tId, iconUrl: cleanIcon, trackName: name)
-                        for idx in working.indices where working[idx].packageName.caseInsensitiveCompare(bId) == .orderedSame {
-                            working[idx].appStoreId = tId
-                            if let cleanIcon { working[idx].iconUrl = cleanIcon }
+                        for idx in working.indices {
+                            let targetBundle = androidPackageToiOSBundleId[working[idx].packageName.lowercased()] ?? working[idx].packageName
+                            if targetBundle.caseInsensitiveCompare(bId) == .orderedSame {
+                                working[idx].appStoreId = tId
+                                if let cleanIcon { working[idx].iconUrl = cleanIcon }
+                            }
                         }
                     }
                 }
@@ -1361,9 +1430,10 @@ enum iOSAppStoreCatalogResolver {
             }
         }
 
-        // 4. Per eventuali app senza `appStoreId` (es. provenienti da Android), risolve per nome su App Store Italia
+        // 4. Per eventuali app senza `appStoreId` (es. provenienti da Android), risolve con alias + verifica rigorosa su App Store Italia
         for idx in working.indices where working[idx].appStoreId == nil {
-            if let resolved = await searchBestMatch(appName: working[idx].appName, wasTruncated: false, strictTitleSimilarity: false) {
+            let query = iOSInstalledAppsScanner.canonicalAppQuery(for: working[idx].appName)
+            if let resolved = await searchBestMatch(appName: query, wasTruncated: false, strictTitleSimilarity: true) {
                 working[idx].appStoreId = resolved.appStoreId
                 if working[idx].iconUrl == nil {
                     working[idx].iconUrl = resolved.iconUrl

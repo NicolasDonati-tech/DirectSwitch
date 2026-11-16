@@ -643,10 +643,10 @@ struct SendCategoriesStepView: View {
                         InfoCircleButton(
                             title: "Stato collegamento",
                             message: !isCrossOs
-                                ? "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati."
+                                ? "Collegamento diretto attivo e pronto alla copia speculare dei dati selezionati."
                                 : (isSessionFullUnlocked
-                                   ? "Premium Direct attivo: trasferimento completo iPhone ↔ Android sbloccato senza limiti."
-                                   : "Con Premium Direct sblocchi il trasferimento illimitato di foto originali, video 4K, album, calendari e file verso Android senza formattare.")
+                                   ? "Copia Speculare iPhone ↔ Android attiva: clona app, foto, video, album, documenti e contatti senza formattare (WhatsApp sempre gratuito via QR)."
+                                   : "Con Premium Direct sblocchi la Copia Speculare completa tra iPhone e Android su telefoni già configurati: foto 4K, video, album, posizioni documenti identiche, app e calendari (WhatsApp resta sempre gratuito).")
                         )
 
                         Spacer()

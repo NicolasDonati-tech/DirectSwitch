@@ -30,16 +30,20 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.provider.Telephony
+import android.util.Base64
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.protocol.CalendarEventRecord
 import com.directswitch.android.protocol.ContactTransferRecord
+import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchJson
 import com.directswitch.android.protocol.InstalledAppRecord
+import com.directswitch.android.protocol.LabeledValueRecord
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.PhoneNormalizer
+import com.directswitch.android.protocol.PostalAddressTransferRecord
 import com.directswitch.android.protocol.SmsTransferRecord
 import com.directswitch.android.protocol.TransferCategory
 import kotlinx.serialization.encodeToString
@@ -304,7 +308,7 @@ object PublicDownloadsSaver {
         return true
     }
 
-    private fun mediaStoreFileExists(
+    internal fun mediaStoreFileExists(
         context: Context,
         collectionUri: Uri,
         relPath: String,
@@ -314,11 +318,21 @@ object PublicDownloadsSaver {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
         return try {
             val normalizedRel = if (relPath.endsWith("/")) relPath else "$relPath/"
+            val selection = if (expectedSizeBytes > 0L) {
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.SIZE} = ?"
+            } else {
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+            }
+            val args = if (expectedSizeBytes > 0L) {
+                arrayOf(displayName, normalizedRel, expectedSizeBytes.toString())
+            } else {
+                arrayOf(displayName, normalizedRel)
+            }
             context.contentResolver.query(
                 collectionUri,
                 arrayOf(MediaStore.MediaColumns._ID),
-                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.SIZE} = ?",
-                arrayOf(displayName, normalizedRel, expectedSizeBytes.toString()),
+                selection,
+                args,
                 null
             )?.use { c -> c.moveToFirst() } ?: false
         } catch (_: Throwable) {
@@ -353,12 +367,78 @@ object ContactsSmartMerger {
     fun hasWritePermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
+    private fun encodePhoneLabel(type: Int, customLabel: String?): String = when (type) {
+        ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE -> "mobile"
+        ContactsContract.CommonDataKinds.Phone.TYPE_HOME -> "home"
+        ContactsContract.CommonDataKinds.Phone.TYPE_WORK -> "work"
+        ContactsContract.CommonDataKinds.Phone.TYPE_MAIN -> "main"
+        ContactsContract.CommonDataKinds.Phone.TYPE_CUSTOM -> customLabel?.trim().takeIf { !it.isNullOrEmpty() } ?: "other"
+        else -> "other"
+    }
+
+    private fun decodePhoneType(tag: String): Pair<Int, String?> = when (tag.lowercase()) {
+        "mobile", "iphone" -> ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE to null
+        "home" -> ContactsContract.CommonDataKinds.Phone.TYPE_HOME to null
+        "work" -> ContactsContract.CommonDataKinds.Phone.TYPE_WORK to null
+        "main" -> ContactsContract.CommonDataKinds.Phone.TYPE_MAIN to null
+        "other", "" -> ContactsContract.CommonDataKinds.Phone.TYPE_OTHER to null
+        else -> ContactsContract.CommonDataKinds.Phone.TYPE_CUSTOM to tag
+    }
+
+    private fun encodeGenericLabel(type: Int, customLabel: String?): String = when (type) {
+        ContactsContract.CommonDataKinds.Email.TYPE_HOME -> "home"
+        ContactsContract.CommonDataKinds.Email.TYPE_WORK -> "work"
+        ContactsContract.CommonDataKinds.Email.TYPE_CUSTOM -> customLabel?.trim().takeIf { !it.isNullOrEmpty() } ?: "other"
+        else -> "other"
+    }
+
+    private fun decodeEmailType(tag: String): Pair<Int, String?> = when (tag.lowercase()) {
+        "home" -> ContactsContract.CommonDataKinds.Email.TYPE_HOME to null
+        "work" -> ContactsContract.CommonDataKinds.Email.TYPE_WORK to null
+        "other", "" -> ContactsContract.CommonDataKinds.Email.TYPE_OTHER to null
+        else -> ContactsContract.CommonDataKinds.Email.TYPE_CUSTOM to tag
+    }
+
+    private fun decodePostalType(tag: String): Pair<Int, String?> = when (tag.lowercase()) {
+        "home" -> ContactsContract.CommonDataKinds.StructuredPostal.TYPE_HOME to null
+        "work" -> ContactsContract.CommonDataKinds.StructuredPostal.TYPE_WORK to null
+        "other", "" -> ContactsContract.CommonDataKinds.StructuredPostal.TYPE_OTHER to null
+        else -> ContactsContract.CommonDataKinds.StructuredPostal.TYPE_CUSTOM to tag
+    }
+
+    private fun parseBirthday(raw: String): Triple<Int?, Int?, Int?>? {
+        val clean = raw.trim()
+        // Formati standard Android: YYYY-MM-DD oppure --MM-DD
+        val fullMatch = Regex("""^(\d{4})-(\d{1,2})-(\d{1,2})""").find(clean)
+        if (fullMatch != null) {
+            val y = fullMatch.groupValues[1].toIntOrNull()
+            val m = fullMatch.groupValues[2].toIntOrNull()
+            val d = fullMatch.groupValues[3].toIntOrNull()
+            if (m != null && d != null && m in 1..12 && d in 1..31) return Triple(y, m, d)
+        }
+        val noYearMatch = Regex("""^--(\d{1,2})-(\d{1,2})""").find(clean)
+        if (noYearMatch != null) {
+            val m = noYearMatch.groupValues[1].toIntOrNull()
+            val d = noYearMatch.groupValues[2].toIntOrNull()
+            if (m != null && d != null && m in 1..12 && d in 1..31) return Triple(null, m, d)
+        }
+        return null
+    }
+
     fun readAllContacts(context: Context): List<ContactTransferRecord> {
         if (!hasReadPermission(context)) return emptyList()
         val resolver = context.contentResolver
         val namesById = LinkedHashMap<String, String>()
-        val phonesById = HashMap<String, MutableList<String>>()
-        val emailsById = HashMap<String, MutableList<String>>()
+        val givenById = HashMap<String, String>()
+        val familyById = HashMap<String, String>()
+        val orgById = HashMap<String, Pair<String?, String?>>()
+        val nickById = HashMap<String, String>()
+        val birthdayById = HashMap<String, Triple<Int?, Int?, Int?>>()
+        val labeledPhonesById = HashMap<String, MutableList<LabeledValueRecord>>()
+        val labeledEmailsById = HashMap<String, MutableList<LabeledValueRecord>>()
+        val urlsById = HashMap<String, MutableList<String>>()
+        val addressesById = HashMap<String, MutableList<PostalAddressTransferRecord>>()
+        val avatarById = HashMap<String, String>()
 
         resolver.query(
             ContactsContract.Contacts.CONTENT_URI,
@@ -382,7 +462,9 @@ object ContactsSmartMerger {
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
             arrayOf(
                 ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
-                ContactsContract.CommonDataKinds.Phone.NUMBER
+                ContactsContract.CommonDataKinds.Phone.NUMBER,
+                ContactsContract.CommonDataKinds.Phone.TYPE,
+                ContactsContract.CommonDataKinds.Phone.LABEL
             ),
             null,
             null,
@@ -390,11 +472,14 @@ object ContactsSmartMerger {
         )?.use { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
             val numIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
+            val typeIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.TYPE)
+            val labelIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.LABEL)
             while (cursor.moveToNext()) {
                 val id = cursor.getString(idIdx) ?: continue
                 val num = cursor.getString(numIdx)?.trim().orEmpty()
                 if (num.isNotEmpty()) {
-                    phonesById.getOrPut(id) { mutableListOf() }.add(num)
+                    val tag = encodePhoneLabel(cursor.getInt(typeIdx), cursor.getString(labelIdx))
+                    labeledPhonesById.getOrPut(id) { mutableListOf() }.add(LabeledValueRecord(tag, num))
                 }
             }
         }
@@ -403,7 +488,9 @@ object ContactsSmartMerger {
             ContactsContract.CommonDataKinds.Email.CONTENT_URI,
             arrayOf(
                 ContactsContract.CommonDataKinds.Email.CONTACT_ID,
-                ContactsContract.CommonDataKinds.Email.ADDRESS
+                ContactsContract.CommonDataKinds.Email.ADDRESS,
+                ContactsContract.CommonDataKinds.Email.TYPE,
+                ContactsContract.CommonDataKinds.Email.LABEL
             ),
             null,
             null,
@@ -411,31 +498,157 @@ object ContactsSmartMerger {
         )?.use { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.CONTACT_ID)
             val emailIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.ADDRESS)
+            val typeIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.TYPE)
+            val labelIdx = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.LABEL)
             while (cursor.moveToNext()) {
                 val id = cursor.getString(idIdx) ?: continue
                 val mail = cursor.getString(emailIdx)?.trim().orEmpty()
                 if (mail.isNotEmpty()) {
-                    emailsById.getOrPut(id) { mutableListOf() }.add(mail)
+                    val tag = encodeGenericLabel(cursor.getInt(typeIdx), cursor.getString(labelIdx))
+                    labeledEmailsById.getOrPut(id) { mutableListOf() }.add(LabeledValueRecord(tag, mail))
+                }
+            }
+        }
+
+        // Lettura dettagli ricchi in una sola query su ContactsContract.Data (Nome/Cognome, Azienda, Compleanno, Indirizzi, Siti, Foto)
+        val wantedMimeTypes = arrayOf(
+            ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE,
+            ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE
+        )
+        val placeholders = wantedMimeTypes.joinToString(",") { "?" }
+        runCatching {
+            resolver.query(
+                ContactsContract.Data.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.Data.CONTACT_ID,
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.Data.DATA1,
+                    ContactsContract.Data.DATA2,
+                    ContactsContract.Data.DATA3,
+                    ContactsContract.Data.DATA4,
+                    ContactsContract.Data.DATA7,
+                    ContactsContract.Data.DATA8,
+                    ContactsContract.Data.DATA9,
+                    ContactsContract.Data.DATA10,
+                    ContactsContract.Data.DATA15
+                ),
+                "${ContactsContract.Data.MIMETYPE} IN ($placeholders)",
+                wantedMimeTypes,
+                null
+            )?.use { c ->
+                val cidIdx = c.getColumnIndexOrThrow(ContactsContract.Data.CONTACT_ID)
+                val mimeIdx = c.getColumnIndexOrThrow(ContactsContract.Data.MIMETYPE)
+                val d1Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA1)
+                val d2Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA2)
+                val d3Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA3)
+                val d4Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA4)
+                val d7Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA7)
+                val d8Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA8)
+                val d9Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA9)
+                val d10Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA10)
+                val d15Idx = c.getColumnIndexOrThrow(ContactsContract.Data.DATA15)
+
+                while (c.moveToNext()) {
+                    val cid = c.getString(cidIdx) ?: continue
+                    when (c.getString(mimeIdx)) {
+                        ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE -> {
+                            val g = c.getString(d2Idx)?.trim().orEmpty()
+                            val f = c.getString(d3Idx)?.trim().orEmpty()
+                            if (g.isNotEmpty() && !givenById.containsKey(cid)) givenById[cid] = g
+                            if (f.isNotEmpty() && !familyById.containsKey(cid)) familyById[cid] = f
+                        }
+                        ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE -> {
+                            val company = c.getString(d1Idx)?.trim()?.takeIf { it.isNotEmpty() }
+                            val title = c.getString(d4Idx)?.trim()?.takeIf { it.isNotEmpty() }
+                            if (company != null || title != null) orgById[cid] = company to title
+                        }
+                        ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE -> {
+                            val nick = c.getString(d1Idx)?.trim()?.takeIf { it.isNotEmpty() }
+                            if (nick != null) nickById[cid] = nick
+                        }
+                        ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE -> {
+                            val u = c.getString(d1Idx)?.trim()?.takeIf { it.isNotEmpty() }
+                            if (u != null) urlsById.getOrPut(cid) { mutableListOf() }.add(u)
+                        }
+                        ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE -> {
+                            val street = c.getString(d4Idx)?.trim().orEmpty()
+                            val city = c.getString(d7Idx)?.trim().orEmpty()
+                            val region = c.getString(d8Idx)?.trim().orEmpty()
+                            val postcode = c.getString(d9Idx)?.trim().orEmpty()
+                            val country = c.getString(d10Idx)?.trim().orEmpty()
+                            if (street.isNotEmpty() || city.isNotEmpty() || postcode.isNotEmpty() || country.isNotEmpty()) {
+                                val tag = encodeGenericLabel(c.getInt(d2Idx), c.getString(d3Idx))
+                                addressesById.getOrPut(cid) { mutableListOf() }.add(
+                                    PostalAddressTransferRecord(
+                                        label = tag,
+                                        street = street,
+                                        city = city,
+                                        state = region,
+                                        postalCode = postcode,
+                                        country = country
+                                    )
+                                )
+                            }
+                        }
+                        ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE -> {
+                            if (c.getInt(d2Idx) == ContactsContract.CommonDataKinds.Event.TYPE_BIRTHDAY) {
+                                val rawDate = c.getString(d1Idx).orEmpty()
+                                parseBirthday(rawDate)?.let { birthdayById[cid] = it }
+                            }
+                        }
+                        ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE -> {
+                            if (!avatarById.containsKey(cid)) {
+                                val blob = c.getBlob(d15Idx)
+                                if (blob != null && blob.isNotEmpty() && blob.size <= 65_536) {
+                                    avatarById[cid] = Base64.encodeToString(blob, Base64.NO_WRAP)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         return namesById.mapNotNull { (id, name) ->
-            val phones = phonesById[id]?.distinct().orEmpty()
-            val emails = emailsById[id]?.distinct().orEmpty()
-            if (phones.isEmpty() && emails.isEmpty()) null
+            val lPhones = labeledPhonesById[id]?.distinctBy { it.value }.orEmpty()
+            val phones = lPhones.map { it.value }
+            val lEmails = labeledEmailsById[id]?.distinctBy { it.value.lowercase() }.orEmpty()
+            val emails = lEmails.map { it.value }
+            val org = orgById[id]
+            val bday = birthdayById[id]
+            val urls = urlsById[id]?.distinct()
+            val addrs = addressesById[id]
+            if (phones.isEmpty() && emails.isEmpty() && org == null) null
             else ContactTransferRecord(
                 id = id,
                 displayName = name,
                 phones = phones,
-                emails = emails
+                emails = emails,
+                organization = org?.first,
+                givenName = givenById[id],
+                familyName = familyById[id],
+                nickname = nickById[id],
+                jobTitle = org?.second,
+                birthdayYear = bday?.first,
+                birthdayMonth = bday?.second,
+                birthdayDay = bday?.third,
+                labeledPhones = lPhones.ifEmpty { null },
+                labeledEmails = lEmails.ifEmpty { null },
+                urls = urls?.ifEmpty { null },
+                postalAddresses = addrs?.ifEmpty { null },
+                avatarJpegBase64 = avatarById[id]
             )
         }
     }
 
     /**
-     * Inserisce solo i contatti non ancora presenti (confronto per numero normalizzato E.164 o email).
-     * Restituisce `Pair(inseriti, duplicatiSaltati)`.
+     * Inserisce solo i contatti non ancora presenti (confronto per numero normalizzato E.164, email o nome).
+     * Preserva nome/cognome separati, azienda, ruolo, compleanno, indirizzi, siti, etichette e foto contatto.
      */
     fun mergeIncomingContacts(
         context: Context,
@@ -453,6 +666,10 @@ object ContactsSmartMerger {
             .flatMap { it.emails }
             .map { it.lowercase() }
             .toHashSet()
+        val existingNameOnly = existing
+            .filter { it.phones.isEmpty() && it.emails.isEmpty() }
+            .map { it.displayName.trim().lowercase() }
+            .toHashSet()
 
         var inserted = 0
         var skipped = 0
@@ -462,9 +679,13 @@ object ContactsSmartMerger {
                 .map { PhoneNormalizer.normalizeKey(it) }
                 .filter { it.isNotEmpty() }
             val normalizedEmails = contact.emails.map { it.lowercase() }
+            val normName = contact.displayName.trim().lowercase()
 
-            val alreadyExists = normalizedPhones.any { it in existingPhoneKeys } ||
-                normalizedEmails.any { it in existingEmails }
+            val alreadyExists = if (normalizedPhones.isNotEmpty() || normalizedEmails.isNotEmpty()) {
+                normalizedPhones.any { it in existingPhoneKeys } || normalizedEmails.any { it in existingEmails }
+            } else {
+                normName.isEmpty() || normName in existingNameOnly
+            }
 
             if (alreadyExists) {
                 skipped++
@@ -475,6 +696,9 @@ object ContactsSmartMerger {
                 inserted++
                 existingPhoneKeys.addAll(normalizedPhones)
                 existingEmails.addAll(normalizedEmails)
+                if (normalizedPhones.isEmpty() && normalizedEmails.isEmpty() && normName.isNotEmpty()) {
+                    existingNameOnly.add(normName)
+                }
             }
         }
         return inserted to skipped
@@ -489,48 +713,160 @@ object ContactsSmartMerger {
                     .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, null)
                     .build()
             )
-            ops.add(
-                ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+            val nameOp = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                .withValue(
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE
+                )
+                .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, record.displayName)
+            if (!record.givenName.isNullOrBlank()) {
+                nameOp.withValue(ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME, record.givenName)
+            }
+            if (!record.familyName.isNullOrBlank()) {
+                nameOp.withValue(ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME, record.familyName)
+            }
+            ops.add(nameOp.build())
+
+            val phonesToInsert = record.labeledPhones?.takeIf { it.isNotEmpty() }
+                ?: record.phones.map { LabeledValueRecord("mobile", it) }
+            for (lp in phonesToInsert) {
+                val (pType, customLbl) = decodePhoneType(lp.label)
+                val b = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                     .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
                     .withValue(
                         ContactsContract.Data.MIMETYPE,
-                        ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE
+                        ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE
                     )
-                    .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, record.displayName)
-                    .build()
-            )
-            for (phone in record.phones) {
+                    .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, lp.value)
+                    .withValue(ContactsContract.CommonDataKinds.Phone.TYPE, pType)
+                if (customLbl != null) b.withValue(ContactsContract.CommonDataKinds.Phone.LABEL, customLbl)
+                ops.add(b.build())
+            }
+
+            val emailsToInsert = record.labeledEmails?.takeIf { it.isNotEmpty() }
+                ?: record.emails.map { LabeledValueRecord("other", it) }
+            for (le in emailsToInsert) {
+                val (eType, customLbl) = decodeEmailType(le.label)
+                val b = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                    .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                    .withValue(
+                        ContactsContract.Data.MIMETYPE,
+                        ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE
+                    )
+                    .withValue(ContactsContract.CommonDataKinds.Email.ADDRESS, le.value)
+                    .withValue(ContactsContract.CommonDataKinds.Email.TYPE, eType)
+                if (customLbl != null) b.withValue(ContactsContract.CommonDataKinds.Email.LABEL, customLbl)
+                ops.add(b.build())
+            }
+
+            if (!record.organization.isNullOrBlank() || !record.jobTitle.isNullOrBlank()) {
+                val orgOp = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                    .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                    .withValue(
+                        ContactsContract.Data.MIMETYPE,
+                        ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE
+                    )
+                    .withValue(
+                        ContactsContract.CommonDataKinds.Organization.TYPE,
+                        ContactsContract.CommonDataKinds.Organization.TYPE_WORK
+                    )
+                if (!record.organization.isNullOrBlank()) {
+                    orgOp.withValue(ContactsContract.CommonDataKinds.Organization.COMPANY, record.organization)
+                }
+                if (!record.jobTitle.isNullOrBlank()) {
+                    orgOp.withValue(ContactsContract.CommonDataKinds.Organization.TITLE, record.jobTitle)
+                }
+                ops.add(orgOp.build())
+            }
+
+            if (!record.nickname.isNullOrBlank()) {
                 ops.add(
                     ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                         .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
                         .withValue(
                             ContactsContract.Data.MIMETYPE,
-                            ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE
+                            ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE
                         )
-                        .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phone)
-                        .withValue(
-                            ContactsContract.CommonDataKinds.Phone.TYPE,
-                            ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
-                        )
+                        .withValue(ContactsContract.CommonDataKinds.Nickname.NAME, record.nickname)
                         .build()
                 )
             }
-            for (email in record.emails) {
+
+            val bMonth = record.birthdayMonth
+            val bDay = record.birthdayDay
+            if (bMonth != null && bDay != null && bMonth in 1..12 && bDay in 1..31) {
+                val bYear = record.birthdayYear
+                val formattedDate = if (bYear != null && bYear > 1900) {
+                    String.format(java.util.Locale.US, "%04d-%02d-%02d", bYear, bMonth, bDay)
+                } else {
+                    String.format(java.util.Locale.US, "--%02d-%02d", bMonth, bDay)
+                }
                 ops.add(
                     ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                         .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
                         .withValue(
                             ContactsContract.Data.MIMETYPE,
-                            ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE
+                            ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE
                         )
-                        .withValue(ContactsContract.CommonDataKinds.Email.ADDRESS, email)
+                        .withValue(ContactsContract.CommonDataKinds.Event.START_DATE, formattedDate)
                         .withValue(
-                            ContactsContract.CommonDataKinds.Email.TYPE,
-                            ContactsContract.CommonDataKinds.Email.TYPE_OTHER
+                            ContactsContract.CommonDataKinds.Event.TYPE,
+                            ContactsContract.CommonDataKinds.Event.TYPE_BIRTHDAY
                         )
                         .build()
                 )
             }
+
+            record.urls?.forEach { url ->
+                if (url.isNotBlank()) {
+                    ops.add(
+                        ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                            .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                            .withValue(
+                                ContactsContract.Data.MIMETYPE,
+                                ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE
+                            )
+                            .withValue(ContactsContract.CommonDataKinds.Website.URL, url)
+                            .build()
+                    )
+                }
+            }
+
+            record.postalAddresses?.forEach { addr ->
+                val (aType, customLbl) = decodePostalType(addr.label ?: "home")
+                val ab = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                    .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                    .withValue(
+                        ContactsContract.Data.MIMETYPE,
+                        ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE
+                    )
+                    .withValue(ContactsContract.CommonDataKinds.StructuredPostal.STREET, addr.street)
+                    .withValue(ContactsContract.CommonDataKinds.StructuredPostal.CITY, addr.city)
+                    .withValue(ContactsContract.CommonDataKinds.StructuredPostal.REGION, addr.state)
+                    .withValue(ContactsContract.CommonDataKinds.StructuredPostal.POSTCODE, addr.postalCode)
+                    .withValue(ContactsContract.CommonDataKinds.StructuredPostal.COUNTRY, addr.country)
+                    .withValue(ContactsContract.CommonDataKinds.StructuredPostal.TYPE, aType)
+                if (customLbl != null) ab.withValue(ContactsContract.CommonDataKinds.StructuredPostal.LABEL, customLbl)
+                ops.add(ab.build())
+            }
+
+            if (!record.avatarJpegBase64.isNullOrBlank()) {
+                val imgBytes = runCatching { Base64.decode(record.avatarJpegBase64, Base64.DEFAULT) }.getOrNull()
+                if (imgBytes != null && imgBytes.isNotEmpty()) {
+                    ops.add(
+                        ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                            .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                            .withValue(
+                                ContactsContract.Data.MIMETYPE,
+                                ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE
+                            )
+                            .withValue(ContactsContract.CommonDataKinds.Photo.PHOTO, imgBytes)
+                            .build()
+                    )
+                }
+            }
+
             context.contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
             true
         } catch (t: Throwable) {
@@ -583,6 +919,15 @@ object MediaExifScannerAndImporter {
         return entries
     }
 
+    internal fun resolveEffectiveTimestampMillis(
+        dateTakenMillis: Long,
+        dateModifiedSeconds: Long
+    ): Long = when {
+        dateTakenMillis > 0L -> dateTakenMillis
+        dateModifiedSeconds > 0L -> dateModifiedSeconds * 1000L
+        else -> 0L
+    }
+
     private fun queryCollection(
         context: Context,
         collectionUri: Uri,
@@ -594,6 +939,7 @@ object MediaExifScannerAndImporter {
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE,
             MediaStore.MediaColumns.DATE_TAKEN,
+            MediaStore.MediaColumns.DATE_MODIFIED,
             MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
             MediaStore.MediaColumns.MIME_TYPE
         )
@@ -603,12 +949,13 @@ object MediaExifScannerAndImporter {
                 projection,
                 null,
                 null,
-                "${MediaStore.MediaColumns.DATE_TAKEN} DESC"
+                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
             )?.use { cursor ->
                 val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
                 val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
                 val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
                 val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN)
+                val modCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
                 val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
                 val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
 
@@ -617,7 +964,9 @@ object MediaExifScannerAndImporter {
                     val name = cursor.getString(nameCol) ?: "media_$id"
                     val size = cursor.getLong(sizeCol)
                     if (size <= 0L) continue
-                    val dateTaken = cursor.getLong(dateCol)
+                    val rawDateTaken = cursor.getLong(dateCol)
+                    val rawDateModifiedSec = cursor.getLong(modCol)
+                    val dateTaken = resolveEffectiveTimestampMillis(rawDateTaken, rawDateModifiedSec)
                     val album = cursor.getString(bucketCol) ?: "Camera"
                     val mime = cursor.getString(mimeCol)
                         ?: if (category == TransferCategory.VIDEOS) "video/mp4" else "image/jpeg"
@@ -653,6 +1002,40 @@ object MediaExifScannerAndImporter {
             .toHashSet()
     }
 
+    internal fun resolveRelativeMediaPath(
+        rawAlbum: String,
+        isVideo: Boolean,
+        dcimDir: String = "DCIM",
+        moviesDir: String = "Movies",
+        picturesDir: String = "Pictures"
+    ): String {
+        val segments = PublicDownloadsSaver.sanitizedRelativeSegments(rawAlbum)
+        if (segments.isEmpty()) {
+            val fallback = if (isVideo) "Video" else "Foto"
+            val root = if (isVideo) moviesDir else picturesDir
+            return "$root/$fallback"
+        }
+        val first = segments.first()
+        if (segments.size == 1 && (
+                first.equals("iPhone_Camera", ignoreCase = true) ||
+                    first.equals("Camera", ignoreCase = true) ||
+                    first.equals("Camera Roll", ignoreCase = true) ||
+                    first.equals("Recenti", ignoreCase = true) ||
+                    first.equals("Recent", ignoreCase = true) ||
+                    first.equals("Rullino", ignoreCase = true)
+            )
+        ) {
+            return "$dcimDir/Camera"
+        }
+        if (first.equals("DCIM", ignoreCase = true)) {
+            val rest = segments.drop(1).joinToString("/").ifEmpty { "Camera" }
+            return "$dcimDir/$rest"
+        }
+        val safeSubpath = segments.joinToString("/")
+        val root = if (isVideo) moviesDir else picturesDir
+        return "$root/$safeSubpath"
+    }
+
     fun importMediaStream(
         context: Context,
         item: ManifestItem,
@@ -661,21 +1044,29 @@ object MediaExifScannerAndImporter {
         return try {
             val resolver = context.contentResolver
             val isVideo = item.category == TransferCategory.VIDEOS
-            val safeAlbum = item.relativeAlbumOrFolder
-                .replace(Regex("[^a-zA-Z0-9 _-]"), "")
-                .trim()
-                .ifEmpty { if (isVideo) "Video" else "Foto" }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val baseRelPath = when {
-                    safeAlbum.equals("Camera", ignoreCase = true) -> "${Environment.DIRECTORY_DCIM}/Camera"
-                    isVideo -> "${Environment.DIRECTORY_MOVIES}/$safeAlbum"
-                    else -> "${Environment.DIRECTORY_PICTURES}/$safeAlbum"
-                }
+                val baseRelPath = resolveRelativeMediaPath(
+                    rawAlbum = item.relativeAlbumOrFolder,
+                    isVideo = isVideo,
+                    dcimDir = Environment.DIRECTORY_DCIM,
+                    moviesDir = Environment.DIRECTORY_MOVIES,
+                    picturesDir = Environment.DIRECTORY_PICTURES
+                )
                 val collection = if (isVideo) {
                     MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 } else {
                     MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                }
+                if (PublicDownloadsSaver.mediaStoreFileExists(
+                        context = context,
+                        collectionUri = collection,
+                        relPath = baseRelPath,
+                        displayName = item.fileName,
+                        expectedSizeBytes = item.sizeBytes
+                    )
+                ) {
+                    return true
                 }
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, item.fileName)
@@ -709,17 +1100,12 @@ object MediaExifScannerAndImporter {
                 resolver.update(targetUri, doneValues, null, null)
                 true
             } else {
-                @Suppress("DEPRECATION")
-                val publicRoot = Environment.getExternalStoragePublicDirectory(
-                    if (isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
+                val relPath = resolveRelativeMediaPath(
+                    rawAlbum = item.relativeAlbumOrFolder,
+                    isVideo = isVideo
                 )
-                val targetPublicRoot = if (safeAlbum.equals("Camera", ignoreCase = true)) {
-                    @Suppress("DEPRECATION")
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
-                } else {
-                    publicRoot
-                }
-                val albumDir = File(targetPublicRoot, safeAlbum)
+                @Suppress("DEPRECATION")
+                val albumDir = File(Environment.getExternalStorageDirectory(), relPath)
                 albumDir.mkdirs()
                 val destFile = File(albumDir, item.fileName)
                 destFile.outputStream().use { out ->
@@ -1891,6 +2277,346 @@ object DocumentsAndWhatsAppScanner {
  * (parità pratica con il catalogo app di Android Switch su telefoni già configurati).
  */
 object InstalledAppsScanner {
+    sealed class PlayStoreTarget {
+        data class ExactPackage(val packageName: String) : PlayStoreTarget()
+        data class SearchByName(val query: String) : PlayStoreTarget()
+    }
+
+    data class InstalledAppsSnapshot(
+        val packageNames: Set<String>,
+        val normalizedLabels: Set<String>
+    )
+
+    private val alwaysIncludeCrossPlatformGoogleApps = setOf(
+        "com.android.chrome",
+        "com.google.android.apps.maps",
+        "com.google.android.apps.photos",
+        "com.google.android.youtube",
+        "com.google.android.gm",
+        "com.google.android.apps.docs",
+        "com.google.android.apps.docs.editors.docs",
+        "com.google.android.apps.docs.editors.sheets",
+        "com.google.android.apps.docs.editors.slides",
+        "com.google.android.apps.meetings",
+        "com.google.android.apps.tachyon",
+        "com.google.android.apps.translate",
+        "com.google.android.keep",
+        "com.google.android.calendar",
+        "com.google.android.apps.youtube.music",
+        "com.google.android.apps.authenticator2",
+        "com.google.android.apps.bard"
+    )
+
+    private val excludedAndroidOsPackages = setOf(
+        "com.android.vending",
+        "com.google.android.gms",
+        "com.google.android.gsf",
+        "com.google.android.webview",
+        "com.android.webview",
+        "com.google.android.tts",
+        "com.google.android.as",
+        "com.google.android.projection.gearhead",
+        "com.google.android.apps.wellbeing",
+        "com.google.android.setupwizard",
+        "com.google.android.apps.restore",
+        "com.google.android.apps.turbo",
+        "com.google.android.marvin.talkback",
+        "com.google.android.gms.supervision",
+        "com.google.android.inputmethod.latin",
+        "com.google.android.dialer",
+        "com.android.dialer",
+        "com.google.android.contacts",
+        "com.android.contacts",
+        "com.google.android.apps.messaging",
+        "com.android.messaging",
+        "com.android.mms",
+        "com.google.android.calculator",
+        "com.android.calculator2",
+        "com.google.android.deskclock",
+        "com.android.deskclock",
+        "com.android.settings",
+        "com.android.systemui",
+        "com.android.stk",
+        "com.android.camera2",
+        "com.google.android.googlecamera",
+        "com.android.gallery3d",
+        "com.google.android.apps.nbu.files",
+        "com.android.documentsui",
+        "com.google.android.documentsui",
+        "com.google.android.apps.nexuslauncher",
+        "com.google.android.apps.pixelmigrate",
+        "com.sec.android.app.camera",
+        "com.sec.android.gallery3d",
+        "com.sec.android.app.launcher",
+        "com.samsung.android.dialer",
+        "com.samsung.android.messaging",
+        "com.samsung.android.app.contacts",
+        "com.samsung.android.calendar",
+        "com.samsung.android.honeyboard",
+        "com.samsung.android.scloud",
+        "com.samsung.android.smartswitchassistant",
+        "com.samsung.android.spay",
+        "com.xiaomi.mipicks"
+    )
+
+    private val excludedSystemPrefixes = listOf(
+        "com.sec.android.",
+        "com.samsung.android.bixby",
+        "com.samsung.android.app.routines",
+        "com.samsung.android.mdx",
+        "com.samsung.android.oneconnect.onboarding",
+        "com.samsung.android.game.",
+        "com.samsung.android.arzone",
+        "com.google.android.ext.",
+        "com.google.android.overlay.",
+        "com.android.providers.",
+        "com.miui.",
+        "com.coloros.",
+        "com.oppo.launcher",
+        "com.qualcomm.",
+        "com.heytap."
+    )
+
+    private val iosBundleToAndroidPackage: Map<String, String> = mapOf(
+        "net.whatsapp.whatsapp" to "com.whatsapp",
+        "net.whatsapp.whatsappsmb" to "com.whatsapp.w4b",
+        "com.burbn.instagram" to "com.instagram.android",
+        "ph.telegra.telegraph" to "org.telegram.messenger",
+        "com.facebook.facebook" to "com.facebook.katana",
+        "com.facebook.messenger" to "com.facebook.orca",
+        "com.zhiliaoapp.musically" to "com.zhiliaoapp.musically",
+        "com.google.ios.youtube" to "com.google.android.youtube",
+        "com.google.ios.youtubemusic" to "com.google.android.apps.youtube.music",
+        "com.google.gmail" to "com.google.android.gm",
+        "com.google.maps" to "com.google.android.apps.maps",
+        "com.google.chrome.ios" to "com.android.chrome",
+        "com.google.drive" to "com.google.android.apps.docs",
+        "com.google.photos" to "com.google.android.apps.photos",
+        "com.google.googlemobile" to "com.google.android.googlequicksearchbox",
+        "com.google.authenticator" to "com.google.android.apps.authenticator2",
+        "com.google.calendar" to "com.google.android.calendar",
+        "com.google.gemini" to "com.google.android.apps.bard",
+        "com.spotify.client" to "com.spotify.music",
+        "com.netflix.netflix" to "com.netflix.mediaclient",
+        "com.amazon.aiv.aivapp" to "com.amazon.avod.thirdpartyclient",
+        "com.disney.disneyplus" to "com.disney.disneyplus",
+        "com.dazn.theapp" to "com.dazn",
+        "com.amazon.amazon" to "com.amazon.mShop.android.shopping",
+        "com.paypal.ppclient" to "com.paypal.android.p2pmobile",
+        "com.revolut.revolut" to "com.revolut.revolut",
+        "com.satispay.satispay" to "com.satispay.customer",
+        "com.microsoft.office.outlook" to "com.microsoft.office.outlook",
+        "com.microsoft.skype.teams" to "com.microsoft.teams",
+        "us.zoom.videomeetings" to "us.zoom.videomeetings",
+        "com.atebits.tweetie2" to "com.twitter.android",
+        "com.burbn.barcelona" to "com.instagram.barcelona",
+        "com.linkedin.linkedin" to "com.linkedin.android",
+        "com.toyopagroup.picaboo" to "com.snapchat.android",
+        "pinterest" to "com.pinterest",
+        "com.reddit.reddit" to "com.reddit.frontpage",
+        "com.hammerandchisel.discord" to "com.discord",
+        "tv.twitch" to "tv.twitch.android.app",
+        "com.waze.iphone" to "com.waze",
+        "com.ubercab.uberclient" to "com.ubercab",
+        "it.subito.app" to "it.subito",
+        "fr.vinted" to "fr.vinted",
+        "com.airbnb.app" to "com.airbnb.android",
+        "com.openai.chat" to "com.openai.chatgpt",
+        "com.shazam.shazam" to "com.shazam.android",
+        "com.canva.canvaeditor" to "com.canva.editor",
+        "com.ebay.iphone" to "com.ebay.mobile",
+        "it.pagopa.app.io" to "it.pagopa.app.io",
+        "it.ipzs.cieid" to "it.ipzs.cieid",
+        "posteitaliane.posteapp.appposteid" to "posteitaliane.posteapp.appposteid",
+        "com.einnovation.temu" to "com.einnovation.temu",
+        "com.brave.ios.browser" to "com.brave.browser",
+        "com.microsoft.msedge" to "com.microsoft.emmx",
+        "ch.protonmail.protonmail" to "ch.protonmail.android",
+        "ch.protonvpn.vpn" to "ch.protonvpn.android",
+        "com.nordvpn.nordvpnapp" to "com.nordvpn.android",
+        "com.ookla.speedtest" to "org.zwanoo.android.speedtest",
+        "com.teamviewer.rc" to "com.teamviewer.teamviewer.market.mobile",
+        "com.lemon.lvoverseas" to "com.lemon.lvoverseas",
+        "com.booking.bookingapp" to "com.booking",
+        "com.duolingo.duolingomobile" to "com.duolingo",
+        "com.getdropbox.dropbox" to "com.dropbox.android",
+        "com.microsoft.skydrive" to "com.microsoft.skydrive",
+        "com.microsoft.copilot" to "com.microsoft.copilot",
+        "com.anthropic.claude" to "com.anthropic.claude"
+    )
+
+    private val normalizedNameToAndroidPackage: Map<String, String> = mapOf(
+        "whatsapp" to "com.whatsapp",
+        "whatsappmessenger" to "com.whatsapp",
+        "wabusiness" to "com.whatsapp.w4b",
+        "whatsappbusiness" to "com.whatsapp.w4b",
+        "instagram" to "com.instagram.android",
+        "telegram" to "org.telegram.messenger",
+        "telegrammessenger" to "org.telegram.messenger",
+        "facebook" to "com.facebook.katana",
+        "messenger" to "com.facebook.orca",
+        "tiktok" to "com.zhiliaoapp.musically",
+        "youtube" to "com.google.android.youtube",
+        "ytmusic" to "com.google.android.apps.youtube.music",
+        "youtubemusic" to "com.google.android.apps.youtube.music",
+        "gmail" to "com.google.android.gm",
+        "googlemaps" to "com.google.android.apps.maps",
+        "maps" to "com.google.android.apps.maps",
+        "chrome" to "com.android.chrome",
+        "googlechrome" to "com.android.chrome",
+        "googledrive" to "com.google.android.apps.docs",
+        "drive" to "com.google.android.apps.docs",
+        "googlefoto" to "com.google.android.apps.photos",
+        "googlephotos" to "com.google.android.apps.photos",
+        "google" to "com.google.android.googlequicksearchbox",
+        "authenticator" to "com.google.android.apps.authenticator2",
+        "googleauthenticator" to "com.google.android.apps.authenticator2",
+        "googlecalendar" to "com.google.android.calendar",
+        "gemini" to "com.google.android.apps.bard",
+        "googlegemini" to "com.google.android.apps.bard",
+        "spotify" to "com.spotify.music",
+        "netflix" to "com.netflix.mediaclient",
+        "primevideo" to "com.amazon.avod.thirdpartyclient",
+        "amazonprimevideo" to "com.amazon.avod.thirdpartyclient",
+        "disney" to "com.disney.disneyplus",
+        "disneyplus" to "com.disney.disneyplus",
+        "dazn" to "com.dazn",
+        "amazon" to "com.amazon.mShop.android.shopping",
+        "amazonshopping" to "com.amazon.mShop.android.shopping",
+        "paypal" to "com.paypal.android.p2pmobile",
+        "revolut" to "com.revolut.revolut",
+        "satispay" to "com.satispay.customer",
+        "outlook" to "com.microsoft.office.outlook",
+        "microsoftoutlook" to "com.microsoft.office.outlook",
+        "teams" to "com.microsoft.teams",
+        "microsoftteams" to "com.microsoft.teams",
+        "zoom" to "us.zoom.videomeetings",
+        "x" to "com.twitter.android",
+        "twitter" to "com.twitter.android",
+        "threads" to "com.instagram.barcelona",
+        "linkedin" to "com.linkedin.android",
+        "snapchat" to "com.snapchat.android",
+        "pinterest" to "com.pinterest",
+        "reddit" to "com.reddit.frontpage",
+        "discord" to "com.discord",
+        "twitch" to "tv.twitch.android.app",
+        "waze" to "com.waze",
+        "uber" to "com.ubercab",
+        "subito" to "it.subito",
+        "subitoit" to "it.subito",
+        "vinted" to "fr.vinted",
+        "airbnb" to "com.airbnb.android",
+        "chatgpt" to "com.openai.chatgpt",
+        "claude" to "com.anthropic.claude",
+        "copilot" to "com.microsoft.copilot",
+        "microsoftcopilot" to "com.microsoft.copilot",
+        "shazam" to "com.shazam.android",
+        "canva" to "com.canva.editor",
+        "ebay" to "com.ebay.mobile",
+        "io" to "it.pagopa.app.io",
+        "appio" to "it.pagopa.app.io",
+        "cieid" to "it.ipzs.cieid",
+        "posteid" to "posteitaliane.posteapp.appposteid",
+        "temu" to "com.einnovation.temu",
+        "brave" to "com.brave.browser",
+        "edge" to "com.microsoft.emmx",
+        "microsoftedge" to "com.microsoft.emmx",
+        "protonmail" to "ch.protonmail.android",
+        "protonvpn" to "ch.protonvpn.android",
+        "nordvpn" to "com.nordvpn.android",
+        "speedtest" to "org.zwanoo.android.speedtest",
+        "teamviewer" to "com.teamviewer.teamviewer.market.mobile",
+        "capcut" to "com.lemon.lvoverseas",
+        "booking" to "com.booking",
+        "bookingcom" to "com.booking",
+        "duolingo" to "com.duolingo",
+        "dropbox" to "com.dropbox.android",
+        "onedrive" to "com.microsoft.skydrive",
+        "microsoftonedrive" to "com.microsoft.skydrive"
+    )
+
+    internal fun normalizeAppLabel(label: String): String =
+        java.text.Normalizer.normalize(label, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+            .lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}]"), "")
+
+    internal fun isMirrorableAndroidPackage(packageName: String, isPureSystem: Boolean): Boolean {
+        val pkgLower = packageName.trim().lowercase()
+        if (pkgLower.isEmpty()) return false
+        if (pkgLower in alwaysIncludeCrossPlatformGoogleApps) return true
+        if (isPureSystem) return false
+        if (pkgLower in excludedAndroidOsPackages) return false
+        if (excludedSystemPrefixes.any { pkgLower.startsWith(it) }) return false
+        if (pkgLower.startsWith("com.android.") && pkgLower != "com.android.chrome") return false
+        return true
+    }
+
+    fun resolvePlayStoreTarget(
+        record: InstalledAppRecord,
+        peerPlatform: DevicePlatform? = null
+    ): PlayStoreTarget {
+        val rawPkg = record.packageName.trim()
+        val pkgLower = rawPkg.lowercase()
+        val normLabel = normalizeAppLabel(record.appName)
+        val mapped = iosBundleToAndroidPackage[pkgLower] ?: normalizedNameToAndroidPackage[normLabel]
+        if (mapped != null) {
+            return PlayStoreTarget.ExactPackage(mapped)
+        }
+        val query = record.appName.trim().ifEmpty { rawPkg }
+        val isFromIosOrScan = peerPlatform == DevicePlatform.IOS ||
+            pkgLower.startsWith("scan.") ||
+            record.appStoreId != null ||
+            rawPkg.isEmpty()
+        return if (isFromIosOrScan) {
+            PlayStoreTarget.SearchByName(query)
+        } else {
+            PlayStoreTarget.ExactPackage(rawPkg)
+        }
+    }
+
+    fun readInstalledAppsSnapshot(context: Context): InstalledAppsSnapshot {
+        return try {
+            val pm = context.packageManager
+            val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
+            val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(mainIntent, PackageManager.ResolveInfoFlags.of(0L))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(mainIntent, 0)
+            }
+            val pkgs = HashSet<String>()
+            val labels = HashSet<String>()
+            for (info in resolved) {
+                val ai = info.activityInfo?.applicationInfo ?: continue
+                val pkg = ai.packageName?.trim()?.lowercase()
+                if (!pkg.isNullOrEmpty()) pkgs.add(pkg)
+                val label = ai.loadLabel(pm)?.toString()?.let(::normalizeAppLabel)
+                if (!label.isNullOrEmpty()) labels.add(label)
+            }
+            InstalledAppsSnapshot(packageNames = pkgs, normalizedLabels = labels)
+        } catch (_: Throwable) {
+            InstalledAppsSnapshot(emptySet(), emptySet())
+        }
+    }
+
+    fun isAppInstalled(
+        snapshot: InstalledAppsSnapshot,
+        record: InstalledAppRecord,
+        peerPlatform: DevicePlatform? = null
+    ): Boolean {
+        val target = resolvePlayStoreTarget(record, peerPlatform)
+        if (target is PlayStoreTarget.ExactPackage &&
+            snapshot.packageNames.contains(target.packageName.lowercase())
+        ) {
+            return true
+        }
+        val normName = normalizeAppLabel(record.appName)
+        return normName.isNotEmpty() && snapshot.normalizedLabels.contains(normName)
+    }
+
     fun scanUserInstalledApps(context: Context): List<InstalledAppRecord> {
         return try {
             val pm = context.packageManager
@@ -1911,7 +2637,7 @@ object InstalledAppsScanner {
                 if (pkg == context.packageName || !seen.add(pkg)) continue
                 val isPureSystem = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
                     (ai.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
-                if (isPureSystem) continue
+                if (!isMirrorableAndroidPackage(pkg, isPureSystem)) continue
                 val label = ai.loadLabel(pm)?.toString()?.trim().orEmpty()
                 if (label.isNotEmpty()) {
                     out.add(InstalledAppRecord(packageName = pkg, appName = label))
@@ -1924,15 +2650,25 @@ object InstalledAppsScanner {
         }
     }
 
-    fun openAppOnPlayStore(context: Context, record: InstalledAppRecord) {
-        val marketIntent = Intent(
-            Intent.ACTION_VIEW,
-            Uri.parse("market://details?id=${Uri.encode(record.packageName)}")
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val webIntent = Intent(
-            Intent.ACTION_VIEW,
-            Uri.parse("https://play.google.com/store/apps/details?id=${Uri.encode(record.packageName)}")
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    fun openAppOnPlayStore(
+        context: Context,
+        record: InstalledAppRecord,
+        peerPlatform: DevicePlatform? = null
+    ) {
+        val (marketUri, webUri) = when (val target = resolvePlayStoreTarget(record, peerPlatform)) {
+            is PlayStoreTarget.ExactPackage -> {
+                val enc = Uri.encode(target.packageName)
+                Uri.parse("market://details?id=$enc") to
+                    Uri.parse("https://play.google.com/store/apps/details?id=$enc")
+            }
+            is PlayStoreTarget.SearchByName -> {
+                val enc = Uri.encode(target.query)
+                Uri.parse("market://search?q=$enc&c=apps") to
+                    Uri.parse("https://play.google.com/store/search?q=$enc&c=apps")
+            }
+        }
+        val marketIntent = Intent(Intent.ACTION_VIEW, marketUri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val webIntent = Intent(Intent.ACTION_VIEW, webUri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (runCatching { context.startActivity(marketIntent) }.isFailure) {
             runCatching { context.startActivity(webIntent) }
         }

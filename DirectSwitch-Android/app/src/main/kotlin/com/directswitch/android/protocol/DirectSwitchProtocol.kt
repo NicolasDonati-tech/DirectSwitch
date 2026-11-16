@@ -203,13 +203,41 @@ data class HandshakeResponse(
 )
 
 @Serializable
+data class LabeledValueRecord(
+    val label: String,
+    val value: String
+)
+
+@Serializable
+data class PostalAddressTransferRecord(
+    val label: String? = null,
+    val street: String = "",
+    val city: String = "",
+    val state: String = "",
+    val postalCode: String = "",
+    val country: String = ""
+)
+
+@Serializable
 data class ContactTransferRecord(
     val id: String,
     val displayName: String,
     val phones: List<String>,
     val emails: List<String> = emptyList(),
     val organization: String? = null,
-    val note: String? = null
+    val note: String? = null,
+    val givenName: String? = null,
+    val familyName: String? = null,
+    val nickname: String? = null,
+    val jobTitle: String? = null,
+    val birthdayYear: Int? = null,
+    val birthdayMonth: Int? = null,
+    val birthdayDay: Int? = null,
+    val labeledPhones: List<LabeledValueRecord>? = null,
+    val labeledEmails: List<LabeledValueRecord>? = null,
+    val urls: List<String>? = null,
+    val postalAddresses: List<PostalAddressTransferRecord>? = null,
+    val avatarJpegBase64: String? = null
 )
 
 @Serializable
@@ -237,7 +265,10 @@ data class SmsTransferRecord(
 @Serializable
 data class InstalledAppRecord(
     val packageName: String,
-    val appName: String
+    val appName: String,
+    val appStoreId: Long? = null,
+    val iconUrl: String? = null,
+    val urlScheme: String? = null
 )
 
 @Serializable

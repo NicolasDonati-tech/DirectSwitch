@@ -1178,6 +1178,10 @@ private struct DirectSwitchTransferProgressView: View {
     /// l'intera schermata cambia e mostra ESCLUSIVAMENTE la guida/scanner dedicata a WhatsApp senza 100% fuorvianti o voci non selezionate.
     private var isStandaloneWhatsAppScreen: Bool {
         guard transport.errorMessage == nil else { return false }
+        // Da Android -> iPhone DirectSwitch esegue la copia speculare diretta lasciando fuori WhatsApp
+        if isReceiverMode && transport.peerPlatform == .ANDROID {
+            return false
+        }
         if scope.isWhatsAppOnly {
             return true
         }
@@ -2141,12 +2145,12 @@ private struct DirectSwitchProPassSheet: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            // Pill superiore che chiarisce subito iPhone <-> Android
+            // Pill superiore che chiarisce subito Copia Speculare iPhone <-> Android
             HStack(spacing: 5) {
                 Image(systemName: "crown.fill")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(AppleTheme.premiumAmber)
-                Text("PASSAGGIO DIRETTO iPHONE ↔ ANDROID")
+                Text("COPIA SPECULARE iPHONE ↔ ANDROID")
                     .font(.system(size: 11, weight: .bold))
                     .tracking(0.4)
                     .foregroundColor(AppleTheme.premiumGold)
@@ -2169,12 +2173,12 @@ private struct DirectSwitchProPassSheet: View {
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
                     InfoCircleButton(
-                        title: "Perché scegliere Premium Direct",
-                        message: "Le app tradizionali ti costringono a formattare il telefono ai dati di fabbrica o a comprare costosi abbonamenti Cloud mensili per spostare i tuoi GB tra iPhone e Android.\n\nCon Premium Direct sposti tutto in Wi-Fi o Hotspot 5GHz diretto tra telefoni già configurati, alla massima velocità e senza perdere nessun dato già presente."
+                        title: "Perché scegliere Copia Speculare",
+                        message: "Passa a iOS ti obbliga a resettare il telefono, mentre le app generiche ti costringono a selezionare chat, foto, video e file uno per uno.\n\nCon DirectSwitch cloni in blocco app, foto, video 4K, album, posizioni documenti identiche e contatti su telefoni già configurati — lasciando WhatsApp gratis con guida QR nativa."
                     )
                 }
 
-                Text("Trasferisci tutto tra iPhone e Android senza resettare")
+                Text("Clona app, foto, video, documenti e contatti senza resettare")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(AppleTheme.premiumGold)
                     .multilineTextAlignment(.center)
@@ -2182,24 +2186,24 @@ private struct DirectSwitchProPassSheet: View {
 
             VStack(alignment: .leading, spacing: 11) {
                 featureLine(
-                    icon: "bolt.fill",
-                    color: AppleTheme.premiumAmber,
-                    text: "Da iPhone ad Android (e viceversa) senza cavi"
-                )
-                featureLine(
                     icon: "iphone",
                     color: AppleTheme.blue,
-                    text: "Zero formattazione: funziona su telefoni già in uso"
+                    text: "Copia speculare su telefoni già configurati (zero reset)"
                 )
                 featureLine(
                     icon: "photo.stack.fill",
                     color: AppleTheme.orange,
-                    text: "Foto originali, Video 4K, Documenti e Cartelle"
+                    text: "Foto originali, Video 4K e Album copiati in blocco"
+                )
+                featureLine(
+                    icon: "folder.fill",
+                    color: AppleTheme.teal,
+                    text: "Documenti nelle posizioni originali e tutte le App pronte"
                 )
                 featureLine(
                     icon: "checkmark.seal.fill",
-                    color: AppleTheme.teal,
-                    text: "Un solo acquisto sblocca entrambi i telefoni"
+                    color: AppleTheme.green,
+                    text: "Un solo acquisto per entrambi • Chat WhatsApp sempre gratis"
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)

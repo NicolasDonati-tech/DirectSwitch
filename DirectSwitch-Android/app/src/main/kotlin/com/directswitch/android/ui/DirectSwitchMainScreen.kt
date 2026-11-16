@@ -125,6 +125,7 @@ import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.findHostActivity
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
+import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.QrPairingPayload
 import com.directswitch.android.protocol.SessionLicenseTier
 import com.directswitch.android.transport.DirectSwitchAutoDiscovery
@@ -424,7 +425,7 @@ fun DirectSwitchMainScreen(
                 includeCalendars = categories.calendars,
                 includeSms = categories.sms,
                 includeDocuments = categories.documents,
-                includeWhatsAppVault = categories.whatsAppVault,
+                includeWhatsAppVault = if (targetPayload.receiverPlatform == DevicePlatform.IOS) false else categories.whatsAppVault,
                 includeInstalledApps = categories.installedApps
             )
         }
@@ -1460,15 +1461,14 @@ private fun SenderCategoriesWizardView(
     onChangeDevice: () -> Unit,
     onStartTransfer: () -> Unit
 ) {
-    val allSelected = categories.contacts && categories.photos && categories.videos &&
-        categories.calendars && categories.sms && categories.documents &&
-        categories.whatsAppVault && categories.installedApps
-    val anySelected = categories.contacts || categories.photos || categories.videos ||
-        categories.calendars || categories.sms || categories.documents ||
-        categories.whatsAppVault || categories.installedApps
-
     val isCrossOs = pairedPayload.receiverPlatform == DevicePlatform.IOS
     val isFullUnlocked = !isCrossOs || isLocalPro || pairedPayload.receiverHasPro
+    val allSelected = categories.contacts && categories.photos && categories.videos &&
+        categories.calendars && categories.sms && categories.documents &&
+        (isCrossOs || categories.whatsAppVault) && categories.installedApps
+    val anySelected = categories.contacts || categories.photos || categories.videos ||
+        categories.calendars || categories.sms || categories.documents ||
+        (!isCrossOs && categories.whatsAppVault) || categories.installedApps
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1491,7 +1491,7 @@ private fun SenderCategoriesWizardView(
                         calendars = next,
                         sms = next,
                         documents = next,
-                        whatsAppVault = next,
+                        whatsAppVault = if (isCrossOs) false else next,
                         installedApps = next
                     )
                 )
@@ -1526,9 +1526,9 @@ private fun SenderCategoriesWizardView(
                         message = if (!isCrossOs) {
                             "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati."
                         } else if (isFullUnlocked) {
-                            "Premium Direct attivo: trasferimento completo Android ↔ iPhone sbloccato senza limiti."
+                            "Copia Speculare attiva: clona app, foto, video, documenti e contatti Android ↔ iPhone senza resettare. WhatsApp resta gratuito via QR."
                         } else {
-                            "Con Premium Direct sblocchi il trasferimento illimitato di foto originali, video 4K, calendari, messaggi, documenti e app verso iPhone senza formattare."
+                            "Con Copia Speculare sblocchi il clone completo di app, foto originali, video 4K, documenti e contatti tra Android e iPhone già configurati. Le chat WhatsApp restano sempre gratuite tramite procedura guidata QR."
                         }
                     )
                 }
@@ -1626,16 +1626,18 @@ private fun SenderCategoriesWizardView(
             checked = categories.documents,
             onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
         )
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+        if (!isCrossOs) {
+            HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
 
-        CleanCategoryToggleRow(
-            icon = Icons.AutoMirrored.Filled.Chat,
-            iconColor = DirectSwitchTheme.green,
-            title = "Chat WhatsApp",
-            subtitle = "Gratuito • Cronologia chat via QR",
-            checked = categories.whatsAppVault,
-            onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
-        )
+            CleanCategoryToggleRow(
+                icon = Icons.AutoMirrored.Filled.Chat,
+                iconColor = DirectSwitchTheme.green,
+                title = "Chat WhatsApp",
+                subtitle = "Gratuito • Cronologia chat via QR",
+                checked = categories.whatsAppVault,
+                onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
+            )
+        }
         HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
 
         CleanCategoryToggleRow(
@@ -1921,7 +1923,7 @@ private fun SenderCategoriesWizardView(
             }
         }
     }
-    val isOnlyWhatsAppSelected = categories.whatsAppVault &&
+    val isOnlyWhatsAppSelected = !isCrossOs && categories.whatsAppVault &&
         !categories.contacts && !categories.photos && !categories.videos &&
         !categories.calendars && !categories.sms && !categories.documents &&
         !categories.installedApps
@@ -2141,54 +2143,10 @@ private fun TransferProgressWizardView(
     }
 
     if (isReceiver && progress.isCompleted && progress.receivedInstalledApps.isNotEmpty()) {
-        DirectSwitchCard {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    AppleSettingsIcon(icon = Icons.Filled.Apps, color = DirectSwitchTheme.blue)
-                    Text(
-                        text = "App dal vecchio telefono (${progress.receivedInstalledApps.size})",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = DirectSwitchTheme.textPrimary
-                    )
-                }
-                InfoCircleButton(
-                    title = "Reinstallazione rapida App",
-                    message = "Tocca 'Play Store' accanto a ciascuna app trasferita per scaricare subito la versione ufficiale compatibile con questo Android."
-                )
-            }
-            for (app in progress.receivedInstalledApps.take(15)) {
-                HorizontalDivider(color = DirectSwitchTheme.hairline)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = app.appName,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = DirectSwitchTheme.textPrimary,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(
-                        onClick = {
-                            InstalledAppsScanner.openAppOnPlayStore(context, app)
-                        }
-                    ) {
-                        Text("Play Store", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
-                    }
-                }
-            }
-        }
+        ReceiverAppsMirrorCard(
+            apps = progress.receivedInstalledApps,
+            peerPlatform = progress.peerPlatform
+        )
     }
 
     if (isReceiver && progress.isCompleted) {
@@ -2419,6 +2377,212 @@ private fun QuickPortalWizardView(
     DirectSwitchPrimaryButton(text = "Chiudi", onClick = onClose)
 }
 
+@Composable
+private fun ReceiverAppsMirrorCard(
+    apps: List<InstalledAppRecord>,
+    peerPlatform: DevicePlatform?
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var refreshTick by remember { mutableStateOf(0) }
+    var showAlreadyInstalled by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshTick++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val snapshot = remember(refreshTick, apps.size) {
+        InstalledAppsScanner.readInstalledAppsSnapshot(context)
+    }
+    val pendingApps = remember(apps, snapshot, peerPlatform) {
+        apps.filter { !InstalledAppsScanner.isAppInstalled(snapshot, it, peerPlatform) }
+    }
+    val installedApps = remember(apps, snapshot, peerPlatform) {
+        apps.filter { InstalledAppsScanner.isAppInstalled(snapshot, it, peerPlatform) }
+    }
+
+    DirectSwitchCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.Apps, color = DirectSwitchTheme.blue, size = 30.dp)
+                Column {
+                    Text(
+                        text = "App da reinstallare (${installedApps.size}/${apps.size})",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                    Text(
+                        text = if (pendingApps.isEmpty()) {
+                            "Tutte le app ricevute risultano già installate"
+                        } else {
+                            "${pendingApps.size} da installare dal Play Store (aggiornamento automatico al rientro)"
+                        },
+                        fontSize = 12.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                }
+            }
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = DirectSwitchTheme.blue.copy(alpha = 0.10f),
+                modifier = Modifier.clickable { refreshTick++ }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Aggiorna stato app",
+                        tint = DirectSwitchTheme.blue,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+
+        pendingApps.firstOrNull()?.let { nextApp ->
+            DirectSwitchPrimaryButton(
+                text = "Installa prossima app (1/${pendingApps.size}): ${nextApp.appName}",
+                onClick = { InstalledAppsScanner.openAppOnPlayStore(context, nextApp, peerPlatform) }
+            )
+        }
+
+        if (pendingApps.isNotEmpty()) {
+            HorizontalDivider()
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                pendingApps.forEach { app ->
+                    val target = InstalledAppsScanner.resolvePlayStoreTarget(app, peerPlatform)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { InstalledAppsScanner.openAppOnPlayStore(context, app, peerPlatform) }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = app.appName,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = DirectSwitchTheme.textPrimary
+                            )
+                            Text(
+                                text = when (target) {
+                                    is InstalledAppsScanner.PlayStoreTarget.ExactPackage -> target.packageName
+                                    is InstalledAppsScanner.PlayStoreTarget.SearchByName -> "Ricerca guidata su Play Store"
+                                },
+                                fontSize = 11.sp,
+                                color = DirectSwitchTheme.textMuted
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = DirectSwitchTheme.blue.copy(alpha = 0.12f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Play Store",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = DirectSwitchTheme.blue
+                                )
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = DirectSwitchTheme.blue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (installedApps.isNotEmpty()) {
+            HorizontalDivider()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showAlreadyInstalled = !showAlreadyInstalled }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        tint = DirectSwitchTheme.green,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "${installedApps.size} app già installate",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.green
+                    )
+                }
+                Text(
+                    text = if (showAlreadyInstalled) "Nascondi" else "Mostra tutte",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = DirectSwitchTheme.blue
+                )
+            }
+            if (showAlreadyInstalled) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    installedApps.forEach { app ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = app.appName,
+                                fontSize = 13.sp,
+                                color = DirectSwitchTheme.textSecondary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "Installata",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = DirectSwitchTheme.green
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Bottom Sheet Premium Direct (Passaggio completo iPhone <-> Android)
 
 @Composable
@@ -2445,7 +2609,7 @@ private fun CrossOsProPassSheetContent(
             border = androidx.compose.foundation.BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
         ) {
             Text(
-                text = "PASSAGGIO DIRETTO iPHONE ↔ ANDROID",
+                text = "COPIA SPECULARE iPHONE ↔ ANDROID",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.premiumGold,
@@ -2463,11 +2627,11 @@ private fun CrossOsProPassSheetContent(
                 Text("Premium Direct", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
                 InfoCircleButton(
                     title = "Perché scegliere Premium Direct",
-                    message = "Le app tradizionali ti costringono a formattare il telefono ai dati di fabbrica o a comprare abbonamenti Cloud mensili per spostare i tuoi GB tra iPhone e Android.\n\nCon Premium Direct sposti tutto in Wi-Fi o Hotspot 5GHz diretto tra telefoni già in uso, senza perdere alcun dato già presente."
+                    message = "Le app tradizionali ti costringono a formattare il telefono ai dati di fabbrica o a selezionare a mano singole cartelle e file perdendo ore.\n\nCon la Copia Speculare cloni app, foto, video, documenti e contatti tra telefoni già configurati, lasciando sempre gratuita la procedura guidata QR di WhatsApp."
                 )
             }
             Text(
-                "Trasferisci tutto tra iPhone e Android senza resettare",
+                "Clona app, foto, video, documenti e contatti senza resettare • Chat WhatsApp sempre gratis",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.premiumGold,
@@ -2478,19 +2642,19 @@ private fun CrossOsProPassSheetContent(
         DirectSwitchCard {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.premiumAmber, size = 28.dp)
-                Text("Da iPhone ad Android (e viceversa) senza cavi", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                Text("Copia speculare bidirezionale iPhone ↔ Android senza cavi", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppleSettingsIcon(icon = Icons.Filled.PhoneIphone, color = DirectSwitchTheme.blue, size = 28.dp)
-                Text("Zero formattazione: funziona su telefoni già in uso", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                Text("Zero reset: perfetto su telefoni già configurati e in uso", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppleSettingsIcon(icon = Icons.Filled.Image, color = DirectSwitchTheme.orange, size = 28.dp)
-                Text("Foto originali, Video 4K, Documenti e Cartelle", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                Text("App, Foto originali, Video 4K, Documenti e Rubrica completa", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppleSettingsIcon(icon = Icons.Filled.CheckCircle, color = DirectSwitchTheme.teal, size = 28.dp)
-                Text("Un solo acquisto sblocca entrambi i telefoni", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                Text("Chat WhatsApp sempre gratis tramite QR • 1 acquisto = 2 telefoni", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             }
         }
 
