@@ -31,6 +31,8 @@ import com.directswitch.android.migrators.MediaExifScannerAndImporter
 import com.directswitch.android.migrators.PublicDownloadsSaver
 import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.StorageCapacityChecker
+import com.directswitch.android.migrators.WhatsAppVaultReader
+import com.directswitch.android.protocol.ActiveTransferScope
 import com.directswitch.android.protocol.ContactTransferRecord
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchCrypto
@@ -100,8 +102,11 @@ data class LiveTransferProgress(
     val failedItemsCount: Int = 0,
     val receivedInstalledApps: List<InstalledAppRecord> = emptyList(),
     val receivedDocumentFolders: Map<String, Int> = emptyMap(),
+    val activeTransferScope: ActiveTransferScope = ActiveTransferScope(),
     val isCompleted: Boolean = false,
     val pendingNativeWhatsAppMigration: Boolean = false,
+    val whatsAppGatedByPreview: Boolean = false,
+    val gatedPreviewCount: Int = 0,
     val errorMessage: String? = null
 )
 
@@ -240,6 +245,7 @@ class DirectSwitchTransferServer(
     private var activeTier: SessionLicenseTier = SessionLicenseTier.INTRA_OS_FREE
     private val handshakeCompleted = AtomicBoolean(false)
     private val requestedWhatsAppMigration = AtomicBoolean(false)
+    private val gatedWhatsAppByPreview = AtomicBoolean(false)
     private val pinPairingConsumed = AtomicBoolean(false)
     private val pinFailedAttempts = AtomicInteger(0)
     private val manifestMap = ConcurrentHashMap<String, ManifestItem>()
@@ -265,6 +271,7 @@ class DirectSwitchTransferServer(
         sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(sessionKeyHex)
         handshakeCompleted.set(false)
         requestedWhatsAppMigration.set(false)
+        gatedWhatsAppByPreview.set(false)
         manifestMap.clear()
         completedIds.clear()
         docFolderCounts.clear()
@@ -533,7 +540,8 @@ class DirectSwitchTransferServer(
                         phaseLabel = "Connesso in modo sicuro a ${req.senderName}!",
                         peerDeviceName = req.senderName,
                         peerPlatform = req.senderPlatform,
-                        licenseTier = activeTier
+                        licenseTier = activeTier,
+                        activeTransferScope = req.transferScope ?: _progress.value.activeTransferScope
                     )
 
                     val resp = HandshakeResponse(
@@ -569,9 +577,10 @@ class DirectSwitchTransferServer(
                         writeJsonResponse(output, 401, """{"error":"SessionId manifesto non valido"}""")
                         return
                     }
-                    requestedWhatsAppMigration.set(
-                        manifest.requestNativeWhatsAppMigration && LicensePolicyEvaluator.allowsFullCategories(activeTier)
-                    )
+                    val effectiveScope = manifest.transferScope ?: ActiveTransferScope.inferred(manifest)
+                    val wantsWa = manifest.requestNativeWhatsAppMigration || effectiveScope.whatsApp
+                    requestedWhatsAppMigration.set(wantsWa)
+                    gatedWhatsAppByPreview.set(false)
 
                     // 1. Smart Merge Contatti (sempre abilitato), Calendari & SMS (se consentito dal tier)
                     val (mergedContacts, skippedContacts) = ContactsSmartMerger.mergeIncomingContacts(
@@ -629,7 +638,10 @@ class DirectSwitchTransferServer(
                         importedCalendars = importedCalendars,
                         importedSms = importedSms,
                         skippedDuplicates = skippedContacts + skippedMediaDups,
-                        receivedInstalledApps = receivedApps
+                        receivedInstalledApps = receivedApps,
+                        activeTransferScope = effectiveScope,
+                        gatedPreviewCount = gatedCount,
+                        whatsAppGatedByPreview = gatedWhatsAppByPreview.get()
                     )
 
                     val resp = ManifestResponse(
@@ -684,11 +696,24 @@ class DirectSwitchTransferServer(
                         val safeItem = item.copy(fileName = sanitizedFileName)
 
                         val subFolder = if (safeItem.category == TransferCategory.WHATSAPP_VAULT) {
-                            "WhatsApp_Vault"
+                            val cleanWaRel = PublicDownloadsSaver.sanitizedRelativeSegments(safeItem.relativeAlbumOrFolder)
+                                .joinToString("/")
+                            if (cleanWaRel.startsWith("Android/media/com.whatsapp", ignoreCase = true)) {
+                                cleanWaRel
+                            } else {
+                                "WhatsApp_Vault"
+                            }
                         } else {
                             PublicDownloadsSaver.sanitizedRelativeSegments(safeItem.relativeAlbumOrFolder)
                                 .joinToString("/")
                                 .ifBlank { Environment.DIRECTORY_DOCUMENTS }
+                        }
+
+                        if (safeItem.category == TransferCategory.WHATSAPP_VAULT &&
+                            (sanitizedFileName.endsWith(".zip", ignoreCase = true) ||
+                                sanitizedFileName.endsWith(".txt", ignoreCase = true))
+                        ) {
+                            WhatsAppVaultReader.ingestReceivedArchive(context, sanitizedFileName, tempDecrypted)
                         }
 
                         val importedOk = if (safeItem.category == TransferCategory.PHOTOS || safeItem.category == TransferCategory.VIDEOS) {
@@ -754,7 +779,8 @@ class DirectSwitchTransferServer(
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Trasferimento completato con successo!",
                         isCompleted = true,
-                        pendingNativeWhatsAppMigration = requestedWhatsAppMigration.get()
+                        pendingNativeWhatsAppMigration = requestedWhatsAppMigration.get(),
+                        whatsAppGatedByPreview = gatedWhatsAppByPreview.get()
                     )
                     val report = TransferCompletionReport(
                         sessionId = activeSessionId,
@@ -1068,6 +1094,15 @@ class DirectSwitchTransferClient(private val context: Context) {
             val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
 
             // 1. Raccolta dati locali selezionati
+            val senderScope = ActiveTransferScope(
+                contacts = includeContacts,
+                photos = includePhotos,
+                videos = includeVideos,
+                calendars = includeCalendars,
+                documents = includeDocuments,
+                apps = includeInstalledApps,
+                whatsApp = includeWhatsAppVault
+            )
             val contacts = if (includeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
             val calendars = if (includeCalendars) CalendarMigrator.readEvents(context) else emptyList()
             val smsList = if (includeSms) SmsSystemScanner.readAllSms(context) else emptyList()
@@ -1079,7 +1114,7 @@ class DirectSwitchTransferClient(private val context: Context) {
             ) + DocumentsAndWhatsAppScanner.scanDocumentAndWhatsAppEntries(
                 context = context,
                 includeDocuments = includeDocuments,
-                includeWhatsAppVault = includeWhatsAppVault
+                includeWhatsAppVault = false
             )
             val estimatedBytes = mediaEntries.sumOf { it.manifestItem.sizeBytes }
 
@@ -1090,7 +1125,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                 senderPlatform = DevicePlatform.ANDROID,
                 senderHasPro = CloudSaveEntitlementDetector.isLocalProUnlocked(context),
                 senderHasCloudSavePro = CloudSaveEntitlementDetector.hasVerifiedCloudSaveProEntitlement(context),
-                totalEstimatedBytes = estimatedBytes
+                totalEstimatedBytes = estimatedBytes,
+                transferScope = senderScope
             )
             val handshakeJson = postEncryptedJson(
                 client = activeClient,
@@ -1111,12 +1147,14 @@ class DirectSwitchTransferClient(private val context: Context) {
                 phaseLabel = "Sincronizzazione Smart Merge (Zero Duplicati)...",
                 peerDeviceName = handshakeResp.receiverName,
                 peerPlatform = handshakeResp.receiverPlatform,
-                licenseTier = handshakeResp.licenseTier
+                licenseTier = handshakeResp.licenseTier,
+                activeTransferScope = senderScope
             )
 
             // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS / Catalogo App
             val allowFull = LicensePolicyEvaluator.allowsFullCategories(handshakeResp.licenseTier)
-            val wantNativeWa = includeWhatsAppVault && allowFull
+            val wantNativeWa = includeWhatsAppVault
+            val gatedWa = false
             val manifest = TransferManifest(
                 sessionId = qrPayload.sessionId,
                 senderPlatform = DevicePlatform.ANDROID,
@@ -1125,7 +1163,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                 calendarsPayload = calendars,
                 smsPayload = smsList,
                 requestNativeWhatsAppMigration = wantNativeWa,
-                installedAppsPayload = if (allowFull) installedApps else emptyList()
+                installedAppsPayload = if (allowFull) installedApps else emptyList(),
+                transferScope = senderScope
             )
             val manifestRespJson = postEncryptedJson(
                 client = activeClient,
@@ -1150,7 +1189,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                 contactsAlreadyPresent = manifestResp.contactsSkippedDuplicates,
                 importedCalendars = manifestResp.calendarsImportedCount,
                 importedSms = manifestResp.smsImportedCount,
-                skippedDuplicates = manifestResp.skippedDuplicateCount
+                skippedDuplicates = manifestResp.skippedDuplicateCount,
+                gatedPreviewCount = manifestResp.gatedByCrossOsPreviewCount,
+                whatsAppGatedByPreview = gatedWa
             )
 
             // 4. Upload Streaming CSGCM1 elemento per elemento con retry e continue-on-error
@@ -1268,7 +1309,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                 phaseLabel = doneLabel,
                 isCompleted = true,
                 failedItemsCount = failedCount,
-                pendingNativeWhatsAppMigration = wantNativeWa
+                pendingNativeWhatsAppMigration = wantNativeWa,
+                whatsAppGatedByPreview = gatedWa
             )
             Result.success(report)
         } catch (t: Throwable) {

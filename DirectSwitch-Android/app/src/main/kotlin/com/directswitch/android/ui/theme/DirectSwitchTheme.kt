@@ -142,9 +142,9 @@ fun DirectSwitchAppleEmblem(size: Dp = 88.dp) {
             .background(
                 Brush.linearGradient(
                     colors = listOf(
-                        Color(0xFF1284FF),
-                        Color(0xFF0058D6),
-                        Color(0xFF008AA8)
+                        Color(0xFF1072DC),
+                        Color(0xFF014EBC),
+                        Color(0xFF007993)
                     )
                 )
             )
@@ -459,7 +459,8 @@ fun DirectSwitchPrimaryButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    containerColor: Color = DirectSwitchTheme.blue
+    containerColor: Color = DirectSwitchTheme.blue,
+    icon: ImageVector? = null
 ) {
     Button(
         onClick = onClick,
@@ -476,6 +477,14 @@ fun DirectSwitchPrimaryButton(
         ),
         contentPadding = PaddingValues(horizontal = 16.dp)
     ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
         Text(
             text = text,
             fontSize = 16.sp,
@@ -552,6 +561,7 @@ fun CleanCategoryToggleRow(
     iconColor: Color,
     title: String,
     subtitle: String? = null,
+    premiumBadge: Boolean = false,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
@@ -570,12 +580,33 @@ fun CleanCategoryToggleRow(
         ) {
             AppleSettingsIcon(icon = icon, color = iconColor)
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = title,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = DirectSwitchTheme.textPrimary
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = title,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                    if (premiumBadge) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(DirectSwitchTheme.premiumSurface)
+                                .border(0.8.dp, DirectSwitchTheme.premiumBorder, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = "PREMIUM",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = DirectSwitchTheme.premiumGold
+                            )
+                        }
+                    }
+                }
                 if (!subtitle.isNullOrBlank()) {
                     Text(
                         text = subtitle,

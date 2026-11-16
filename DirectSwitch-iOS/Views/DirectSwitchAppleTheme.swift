@@ -65,9 +65,9 @@ struct DirectSwitchAppleEmblem: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.071, green: 0.518, blue: 1.000), // #1284FF
-                            Color(red: 0.000, green: 0.345, blue: 0.839), // #0058D6
-                            Color(red: 0.000, green: 0.541, blue: 0.659)  // #008AA8
+                            Color(red: 0.063, green: 0.447, blue: 0.863), // #1072DC
+                            Color(red: 0.004, green: 0.306, blue: 0.737), // #014EBC
+                            Color(red: 0.000, green: 0.475, blue: 0.576)  // #007993
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -413,6 +413,7 @@ struct CleanCategoryToggleRow: View {
     let title: String
     var countBadge: String? = nil
     var infoMessage: String = ""
+    var premiumBadge: Bool = false
     @Binding var isOn: Bool
 
     private var fullInfoText: String {
@@ -426,9 +427,25 @@ struct CleanCategoryToggleRow: View {
         HStack(spacing: 12) {
             AppleSettingsIcon(systemName: icon, color: iconColor)
 
-            Text(title)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(AppleTheme.textPrimary)
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(AppleTheme.textPrimary)
+
+                if premiumBadge {
+                    Text("PREMIUM")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(AppleTheme.premiumGold)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(AppleTheme.premiumSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(AppleTheme.premiumBorder, lineWidth: 0.8)
+                        )
+                }
+            }
 
             InfoCircleButton(
                 title: title,

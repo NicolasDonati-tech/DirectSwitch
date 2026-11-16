@@ -1,6 +1,7 @@
 package com.directswitch.android
 
 import com.directswitch.android.migrators.PublicDownloadsSaver
+import com.directswitch.android.protocol.ActiveTransferScope
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchCrypto
 import com.directswitch.android.protocol.DirectSwitchJson
@@ -481,5 +482,20 @@ class DirectSwitchProtocolTest {
         val deselected = primary.copy(isSelected = false)
         assertFalse(deselected.isSelected)
         assertEquals("vol:primary", deselected.locationId)
+    }
+
+    @Test
+    fun activeTransferScopeWhatsAppOnlyAndCrossOsPremiumGate() {
+        val waOnly = ActiveTransferScope(whatsApp = true)
+        assertTrue(waOnly.isWhatsAppOnly)
+        assertFalse(waOnly.hasAnyStandardDataCategory)
+
+        val mixed = ActiveTransferScope(contacts = true, whatsApp = true)
+        assertFalse(mixed.isWhatsAppOnly)
+        assertTrue(mixed.hasAnyStandardDataCategory)
+
+        assertFalse(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PREVIEW))
+        assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PRO_UNLOCKED))
+        assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.INTRA_OS_FREE))
     }
 }

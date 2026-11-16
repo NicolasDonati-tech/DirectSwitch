@@ -1564,8 +1564,10 @@ object DocumentsAndWhatsAppScanner {
         }
 
         fun normalizeFolderOrFallback(rawFolder: String?, cat: TransferCategory): String {
-            if (cat == TransferCategory.WHATSAPP_VAULT) return "WhatsApp_Vault"
             val clean = PublicDownloadsSaver.sanitizedRelativeSegments(rawFolder.orEmpty()).joinToString("/")
+            if (cat == TransferCategory.WHATSAPP_VAULT) {
+                return if (clean.startsWith("Android/media/com.whatsapp", ignoreCase = true)) clean else "WhatsApp_Vault"
+            }
             return clean.ifEmpty { Environment.DIRECTORY_DOCUMENTS }
         }
 
@@ -1720,6 +1722,48 @@ object DocumentsAndWhatsAppScanner {
                     }
                 }
                 walkStorageDir(vol.rootDir, 0)
+            }
+
+            // 3B. Su Android -> Android con Accesso completo ai file, include anche la cartella locale WhatsApp
+            // (`/Android/media/com.whatsapp/WhatsApp`) per consentire il ripristino locale di `msgstore` + Media senza Android Switch né Drive
+            if (includeWhatsAppVault) {
+                @Suppress("DEPRECATION")
+                val primaryRoot = Environment.getExternalStorageDirectory()
+                val waRoots = listOfNotNull(
+                    primaryRoot?.let { File(it, "Android/media/com.whatsapp/WhatsApp") },
+                    primaryRoot?.let { File(it, "Android/media/com.whatsapp.w4b/WhatsApp Business") }
+                )
+                val primaryPrefix = primaryRoot?.absolutePath?.trimEnd('/')?.plus("/") ?: ""
+                for (waBase in waRoots) {
+                    if (!waBase.exists() || !waBase.isDirectory || !waBase.canRead()) continue
+                    waBase.walkTopDown().maxDepth(8).forEach { waFile ->
+                        if (!waFile.isFile || waFile.length() <= 0L || waFile.name.startsWith(".")) return@forEach
+                        val parentAbs = waFile.parentFile?.absolutePath ?: return@forEach
+                        if (!parentAbs.startsWith(primaryPrefix)) return@forEach
+                        val relFolder = PublicDownloadsSaver.sanitizedRelativeSegments(parentAbs.removePrefix(primaryPrefix)).joinToString("/")
+                        val ext = waFile.extension.lowercase()
+                        idxCounter++
+                        out.add(
+                            ScannedLocationEntry(
+                                entry = LocalMediaEntry(
+                                    manifestItem = ManifestItem(
+                                        id = "whatsapp_vault_media_$idxCounter",
+                                        category = TransferCategory.WHATSAPP_VAULT,
+                                        fileName = waFile.name,
+                                        relativeAlbumOrFolder = relFolder,
+                                        sizeBytes = waFile.length(),
+                                        capturedEpochMillis = waFile.lastModified(),
+                                        dedupKey = "${relFolder.lowercase()}/${waFile.name.lowercase()}_${waFile.length()}_${waFile.lastModified()}",
+                                        mimeType = mimeForExtension(ext)
+                                    ),
+                                    contentUri = Uri.fromFile(waFile)
+                                ),
+                                locationId = "vault:whatsapp_native",
+                                locationName = "WhatsApp Locale"
+                            )
+                        )
+                    }
+                }
             }
         } else {
             // 4. Fallback Scoped Storage (senza MANAGE_EXTERNAL_STORAGE): legge MediaStore.Files mantenendo RELATIVE_PATH reale!

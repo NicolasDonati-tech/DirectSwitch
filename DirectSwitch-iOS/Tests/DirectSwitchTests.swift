@@ -1062,4 +1062,18 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertTrue(rootDest.isContainerRoot)
         XCTAssertEqual(rootDest.displayRoot, "Su iPhone")
     }
+
+    func testWhatsAppOnlyVsCombinedTransferScopeParityWithAndroid() throws {
+        let waOnly = ActiveTransferScope(whatsApp: true)
+        XCTAssertTrue(waOnly.isWhatsAppOnly)
+        XCTAssertFalse(waOnly.hasAnyStandardDataCategory)
+
+        let combined = ActiveTransferScope(contacts: true, apps: true, whatsApp: true)
+        XCTAssertFalse(combined.isWhatsAppOnly)
+        XCTAssertTrue(combined.hasAnyStandardDataCategory)
+
+        let encoded = try JSONEncoder().encode(combined)
+        let decoded = try JSONDecoder().decode(ActiveTransferScope.self, from: encoded)
+        XCTAssertEqual(decoded, combined)
+    }
 }

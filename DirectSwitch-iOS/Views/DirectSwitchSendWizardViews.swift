@@ -771,6 +771,7 @@ struct SendCategoriesStepView: View {
                         title: "Calendari",
                         countBadge: badgeForCount(scanSummary?.calendarEventsCount, unit: "eventi"),
                         infoMessage: "Importa lo storico completo degli appuntamenti (-10/+10 anni) con ricorrenze annuali/settimanali e avvisi.",
+                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
                         isOn: $includeCalendars
                     )
 
@@ -782,6 +783,7 @@ struct SendCategoriesStepView: View {
                         title: "Promemoria",
                         countBadge: badgeForCount(scanSummary?.remindersCount, unit: "promemoria"),
                         infoMessage: "Trasferisce le tue liste di Promemoria Apple con scadenze, note, priorità e stato di completamento senza usare iCloud.",
+                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
                         isOn: $includeReminders
                     )
 
@@ -793,6 +795,7 @@ struct SendCategoriesStepView: View {
                         title: "Documenti e Posizioni File",
                         countBadge: docsCount > 0 ? "\(docsCount) file • \(max(1, docFoldersCount)) cartelle" : "Posizioni intere",
                         infoMessage: "Copia intere posizioni (Su iPhone, iCloud Drive, Drive/USB) e tutti i file di DirectSwitch mantenendo esattamente ogni cartella e sottocartella sul nuovo telefono.",
+                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
                         isOn: $includeDocuments
                     )
 
@@ -806,6 +809,7 @@ struct SendCategoriesStepView: View {
                             ? (selectedAppsCount > 0 ? "\(selectedAppsCount) selezionate" : "Tocca per scegliere")
                             : (totalDetectedAppsCount > 0 ? "\(totalDetectedAppsCount) sul telefono" : nil),
                         infoMessage: "Quando «App scaricate» è spuntata in blu, seleziona automaticamente tutte le app presenti su questo iPhone per installarle una dopo l'altra sul nuovo telefono!",
+                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
                         isOn: $includeApps
                     )
 
@@ -815,12 +819,10 @@ struct SendCategoriesStepView: View {
                         icon: "bubble.left.and.bubble.right.fill",
                         iconColor: AppleTheme.green,
                         title: "Chat WhatsApp",
-                        countBadge: whatsAppCount > 0
-                            ? "Cronologia QR + \(whatsAppCount) .zip"
-                            : (isCrossOs ? "Senza cavo via QR (Android Switch)" : "Passaggio diretto via QR"),
+                        countBadge: "Gratuito • Cronologia via QR",
                         infoMessage: isCrossOs
-                            ? "Apre una schermata dedicata al passaggio delle chat verso Android con codice QR diretto senza cavo."
-                            : "Apre una schermata dedicata esclusivamente a WhatsApp con scanner QR integrato per andare direttamente su «Trasferisci la cronologia chat» senza passare dalla Fotocamera di iPhone.",
+                            ? "Guida gratuita al passaggio delle chat dentro WhatsApp sul nuovo Android tramite una sola scansione QR (senza Android Switch e senza formattare)."
+                            : "Apre una schermata dedicata gratuita per trasferire la cronologia chat dentro WhatsApp tramite Codice QR.",
                         isOn: $includeWhatsApp
                     )
                 }
@@ -1286,15 +1288,6 @@ struct SendCategoriesStepView: View {
                             action: onAddFolders
                         )
 
-                        if includeWhatsApp {
-                            AppleSecondaryButton(
-                                title: "Aggiungi archivio .zip WhatsApp",
-                                icon: "archivebox.fill",
-                                tint: AppleTheme.green,
-                                action: onAddFilesOrWhatsApp
-                            )
-                        }
-
                         if hasAuthorizedAnyPositions {
                             HStack {
                                 Spacer()
@@ -1310,13 +1303,13 @@ struct SendCategoriesStepView: View {
                 }
 
                 ApplePrimaryButton(
-                    title: (isOnlyWhatsAppSelected && whatsAppCount == 0)
+                    title: isOnlyWhatsAppSelected
                         ? "Vai al passaggio Chat WhatsApp"
                         : "Copia le voci selezionate",
-                    icon: (isOnlyWhatsAppSelected && whatsAppCount == 0)
+                    icon: isOnlyWhatsAppSelected
                         ? "bubble.left.and.bubble.right.fill"
                         : "arrow.right",
-                    color: (isOnlyWhatsAppSelected && whatsAppCount == 0)
+                    color: isOnlyWhatsAppSelected
                         ? AppleTheme.green
                         : AppleTheme.blue,
                     isDisabled: !anySelected,

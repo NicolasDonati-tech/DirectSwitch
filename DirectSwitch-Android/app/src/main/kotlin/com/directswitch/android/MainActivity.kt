@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
+import com.directswitch.android.migrators.WhatsAppVaultReader
 import com.directswitch.android.ui.DirectSwitchMainScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -85,11 +86,18 @@ class MainActivity : ComponentActivity() {
         if (uris.isEmpty()) return
 
         lifecycleScope.launch {
-            val added = withContext(Dispatchers.IO) {
-                DocumentsAndWhatsAppScanner.importSharedUrisIntoVault(applicationContext, uris.distinct())
+            val (added, waParsed) = withContext(Dispatchers.IO) {
+                val distinctUris = uris.distinct()
+                val vaultAdded = DocumentsAndWhatsAppScanner.importSharedUrisIntoVault(applicationContext, distinctUris)
+                val waImported = WhatsAppVaultReader.importFromContentUris(applicationContext, distinctUris)
+                vaultAdded to waImported
             }
-            if (added > 0) {
-                sharedImportBanner = "$added file/chat WhatsApp aggiunti al Vault DirectSwitch e pronti al trasferimento!"
+            if (added > 0 || waParsed > 0) {
+                sharedImportBanner = if (waParsed > 0) {
+                    "Chat WhatsApp importata e pronta sia per la lettura immediata in DirectSwitch sia per il trasferimento!"
+                } else {
+                    "$added file aggiunti a DirectSwitch e pronti al trasferimento!"
+                }
                 sharedImportVersion++
             }
         }

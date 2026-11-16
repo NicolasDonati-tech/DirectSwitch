@@ -1143,7 +1143,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let (insContacts, skipContacts) = iOSContactsSmartMerger.mergeIncomingContacts(manifest.contactsPayload)
             let currentTier = licenseTier ?? .INTRA_OS_FREE
             let fullAllowed = LicensePolicyEvaluator.allowsFullCategories(currentTier)
-            requestedWhatsAppMigration = (manifest.requestNativeWhatsAppMigration == true) && fullAllowed
+            requestedWhatsAppMigration = (manifest.requestNativeWhatsAppMigration == true)
 
             if fullAllowed && !manifest.calendarsPayload.isEmpty {
                 _ = await iOSCalendarMigrator.requestAccessIfNeeded()
@@ -1848,7 +1848,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             let fullCategoriesAllowed = LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
-            let wantNativeWa = includeWhatsAppVault && fullCategoriesAllowed
+            let wantNativeWa = includeWhatsAppVault
             let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && includeApps && !installedApps.isEmpty) ? installedApps : nil
             sentInstalledAppsCount = appsToSend?.count ?? 0
             let manifest = TransferManifest(

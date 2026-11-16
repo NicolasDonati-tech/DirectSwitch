@@ -87,10 +87,11 @@ struct DirectSwitchMainView: View {
 
     private var isDedicatedWhatsAppScreenActive: Bool {
         guard activeStep == .transferProgress, transport.errorMessage == nil else { return false }
-        if transport.activeTransferScope.isWhatsAppOnly && transport.totalItems == 0 {
+        let scope = transport.activeTransferScope
+        if scope.isWhatsAppOnly {
             return true
         }
-        return transport.isCompleted && transport.pendingNativeWhatsAppMigration
+        return !scope.hasAnyStandardDataCategory && transport.isCompleted && transport.pendingNativeWhatsAppMigration
     }
 
     private var topBarTitle: String {
@@ -1177,10 +1178,10 @@ private struct DirectSwitchTransferProgressView: View {
     /// l'intera schermata cambia e mostra ESCLUSIVAMENTE la guida/scanner dedicata a WhatsApp senza 100% fuorvianti o voci non selezionate.
     private var isStandaloneWhatsAppScreen: Bool {
         guard transport.errorMessage == nil else { return false }
-        if scope.isWhatsAppOnly && transport.totalItems == 0 {
+        if scope.isWhatsAppOnly {
             return true
         }
-        return transport.isCompleted && transport.pendingNativeWhatsAppMigration
+        return !scope.hasAnyStandardDataCategory && transport.isCompleted && transport.pendingNativeWhatsAppMigration
     }
 
     private var isReceiverAppsPhase: Bool {
@@ -1388,8 +1389,6 @@ private struct DirectSwitchTransferProgressView: View {
     private var whatsAppDedicatedScreen: some View {
         let isToAndroid = !isReceiverMode && transport.peerPlatform == .ANDROID
         let isFromAndroid = isReceiverMode && transport.peerPlatform == .ANDROID
-        let isPersonalInstalled = iOSInstalledAppsScanner.isPersonalWhatsAppInstalled()
-        let isBusinessAlsoInstalled = iOSInstalledAppsScanner.isWhatsAppBusinessInstalled()
 
         let screenTitle: String = {
             if isToAndroid { return "Passaggio Chat su Android" }
@@ -1399,6 +1398,9 @@ private struct DirectSwitchTransferProgressView: View {
         }()
 
         let screenSubtitle: String = {
+            if isToAndroid {
+                return "Gratuito dentro WhatsApp: una sola scansione QR, senza Android Switch"
+            }
             if !isReceiverMode && !isToAndroid {
                 return "Inquadra il QR di WhatsApp del nuovo iPhone senza passare dalla Fotocamera di sistema"
             }
@@ -1408,11 +1410,73 @@ private struct DirectSwitchTransferProgressView: View {
             return "Trasferimento diretto della cronologia chat senza cloud"
         }()
 
+        ScrollView {
+            VStack(spacing: 18) {
+                VStack(spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(AppleTheme.green.opacity(0.16))
+                            .frame(width: 72, height: 72)
+                        Image(systemName: (!isReceiverMode && !isToAndroid) ? "qrcode.viewfinder" : "bubble.left.and.bubble.right.fill")
+                            .font(.system(size: 34, weight: .semibold))
+                            .foregroundColor(AppleTheme.green)
+                    }
+                    .padding(.top, 16)
+
+                    Text(screenTitle)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .multilineTextAlignment(.center)
+
+                    Text(screenSubtitle)
+                        .font(.system(size: 14))
+                        .foregroundColor(AppleTheme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                }
+
+                whatsAppNativeTransferCard(embeddedInSummary: false)
+
+                if canSendAnotherCategory {
+                    AppleSecondaryButton(
+                        title: "Trasferisci un'altra voce a questo telefono",
+                        icon: "arrow.uturn.backward.circle.fill",
+                        tint: AppleTheme.blue,
+                        action: onTransferAnotherCategory
+                    )
+                }
+
+                AppleSecondaryButton(
+                    title: "Fine",
+                    icon: "checkmark",
+                    tint: AppleTheme.slate,
+                    action: onFinish
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, appInstaller.showsFloatingBottomBar ? (appInstaller.overlaySafeBottomPadding + 165) : 28)
+        }
+    }
+
+    @ViewBuilder
+    private func whatsAppNativeTransferCard(embeddedInSummary: Bool) -> some View {
+        let isToAndroid = !isReceiverMode && transport.peerPlatform == .ANDROID
+        let isFromAndroid = isReceiverMode && transport.peerPlatform == .ANDROID
+        let isPersonalInstalled = iOSInstalledAppsScanner.isPersonalWhatsAppInstalled()
+        let isBusinessAlsoInstalled = iOSInstalledAppsScanner.isWhatsAppBusinessInstalled()
+
+        let cardTitle: String = {
+            if !embeddedInSummary { return "Come procedere adesso" }
+            if isToAndroid { return "Trasferisci cronologia WhatsApp su Android" }
+            if isFromAndroid { return "Importa Chat WhatsApp" }
+            return "Trasferisci cronologia WhatsApp via QR"
+        }()
+
         let stepsList: [String] = {
             if isToAndroid {
                 return [
-                    "Sul telefono Android prosegui nella schermata aperta fino a visualizzare il codice QR.",
-                    "Su questo iPhone tocca «Inquadra QR di WhatsApp» qui sotto (oppure apri WhatsApp Personale → Impostazioni ⚙️ → Chat → Trasferisci chat su Android) per avviare il passaggio."
+                    "Sul nuovo Android apri WhatsApp e verifica lo stesso numero fino al Codice QR. Se vedi i 3 pallini (⋮) in alto a destra, tocca subito ⋮ → «Mostra QR per iPhone» prima di inquadrare (eviti pop-up e riavvii).",
+                    "Su questo iPhone tocca «Apri WhatsApp» qui sotto → Impostazioni ⚙️ → Chat → Trasferisci chat su Android → Inizia e inquadra il QR una sola volta dentro WhatsApp."
                 ]
             }
             if !isReceiverMode {
@@ -1434,154 +1498,144 @@ private struct DirectSwitchTransferProgressView: View {
             ]
         }()
 
-        ScrollView {
-            VStack(spacing: 18) {
-                if scope.hasAnyStandardDataCategory && transport.isCompleted {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(AppleTheme.green)
-                        Text("Altre voci selezionate già copiate • Ora passa le Chat WhatsApp")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(AppleTheme.green)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(AppleTheme.green.opacity(0.12))
-                    .clipShape(Capsule())
-                    .padding(.top, 8)
-                }
-
-                VStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(AppleTheme.green.opacity(0.16))
-                            .frame(width: 72, height: 72)
-                        Image(systemName: !isReceiverMode ? "qrcode.viewfinder" : "bubble.left.and.bubble.right.fill")
-                            .font(.system(size: 34, weight: .semibold))
-                            .foregroundColor(AppleTheme.green)
-                    }
-                    .padding(.top, scope.hasAnyStandardDataCategory ? 4 : 16)
-
-                    Text(screenTitle)
-                        .font(.system(size: 24, weight: .bold))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "bubble.left.and.bubble.right.fill", color: AppleTheme.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cardTitle)
+                        .font(.system(size: 16, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                        .multilineTextAlignment(.center)
-
-                    Text(screenSubtitle)
-                        .font(.system(size: 14))
-                        .foregroundColor(AppleTheme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12)
-                }
-
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 10) {
-                        AppleSettingsIcon(systemName: "bubble.left.and.bubble.right.fill", color: AppleTheme.green)
-                        Text("Come procedere adesso")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                        Spacer()
-                        InfoCircleButton(
-                            title: "Come funziona dopo la disconnessione del vecchio iPhone",
-                            message: "Quando inserisci numero e SMS sul nuovo iPhone, WhatsApp disconnette subito il vecchio telefono (quindi sul vecchio non puoi più entrare in Impostazioni → Chat).\n\nIl codice QR mostrato sul nuovo iPhone contiene il link diretto di sblocco della schermata «Trasferisci la cronologia chat»: inquadrandolo con il pulsante qui sotto dentro DirectSwitch salti completamente la Fotocamera di iPhone e il bottone giallo!"
-                        )
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(Array(stepsList.enumerated()), id: \.offset) { idx, stepText in
-                            HStack(alignment: .top, spacing: 10) {
-                                Text("\(idx + 1)")
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                                    .foregroundColor(.white)
-                                    .frame(width: 22, height: 22)
-                                    .background(AppleTheme.green)
-                                    .clipShape(Circle())
-                                    .padding(.top, 1)
-
-                                Text(stepText)
-                                    .font(.system(size: 14))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-
-                    if !isReceiverMode {
-                        // Vecchio iPhone (Mittente): Scanner diretto del QR WhatsApp che salta la Fotocamera di iPhone e il bottone giallo
-                        ApplePrimaryButton(
-                            title: "Inquadra QR di WhatsApp e avvia passaggio",
-                            icon: "qrcode.viewfinder",
-                            color: AppleTheme.green
-                        ) {
-                            showWhatsAppQrScanner = true
-                        }
-
-                        AppleSecondaryButton(
-                            title: isPersonalInstalled
-                                ? "Oppure apri WhatsApp Personale"
-                                : "Scarica WhatsApp Personale",
-                            icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
-                            tint: AppleTheme.green
-                        ) {
-                            DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
-                        }
-                    } else {
-                        // Nuovo iPhone (Ricevente): Apre direttamente WhatsApp Personale per inserire numero + codice SMS e mostrare il QR
-                        ApplePrimaryButton(
-                            title: isPersonalInstalled
-                                ? "Apri WhatsApp Personale"
-                                : "Scarica WhatsApp Personale",
-                            icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
-                            color: AppleTheme.green
-                        ) {
-                            DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
-                        }
-                    }
-
-                    if isBusinessAlsoInstalled {
-                        Button(action: {
-                            DirectSwitchTransportViewModel.openWhatsAppBusiness()
-                        }) {
-                            HStack(spacing: 5) {
-                                Image(systemName: "briefcase.fill")
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text("Devi trasferire invece l'account aziendale? Apri WhatsApp Business")
-                                    .font(.system(size: 12, weight: .semibold))
-                            }
+                    if embeddedInSummary {
+                        Text(isToAndroid
+                            ? "Gratuito dentro WhatsApp: una sola scansione QR, senza Android Switch"
+                            : "Passaggio gratuito della cronologia chat via Codice QR")
+                            .font(.system(size: 12))
                             .foregroundColor(AppleTheme.textSecondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 2)
-                        }
-                        .buttonStyle(.plain)
                     }
                 }
-                .padding(16)
-                .background(AppleTheme.cardSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(AppleTheme.green.opacity(0.48), lineWidth: 1.2)
-                )
-
-                if canSendAnotherCategory {
-                    AppleSecondaryButton(
-                        title: "Trasferisci un'altra voce a questo telefono",
-                        icon: "arrow.uturn.backward.circle.fill",
-                        tint: AppleTheme.blue,
-                        action: onTransferAnotherCategory
-                    )
-                }
-
-                AppleSecondaryButton(
-                    title: "Fine",
-                    icon: "checkmark",
-                    tint: AppleTheme.slate,
-                    action: onFinish
+                Spacer()
+                InfoCircleButton(
+                    title: isToAndroid
+                        ? "Come evitare la doppia scansione su Android"
+                        : "Come funziona dopo la disconnessione del vecchio iPhone",
+                    message: isToAndroid
+                        ? "Da iPhone a Android fa tutto WhatsApp gratis con una sola scansione dentro WhatsApp stesso (non serve aprire lo scanner QR di DirectSwitch né Android Switch).\n\nSe sullo schermo QR di Android vedi i 3 pallini (⋮) in alto a destra, seleziona subito «Mostra QR per iPhone» prima di scansionare: in questo modo il QR non va riavviato e WhatsApp lo legge al primo colpo."
+                        : "Quando inserisci numero e SMS sul nuovo iPhone, WhatsApp disconnette subito il vecchio telefono (quindi sul vecchio non puoi più entrare in Impostazioni → Chat).\n\nIl codice QR mostrato sul nuovo iPhone contiene il link diretto di sblocco della schermata «Trasferisci la cronologia chat»: inquadrandolo con il pulsante qui sotto dentro DirectSwitch salti completamente la Fotocamera di iPhone e il bottone giallo!"
                 )
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, appInstaller.showsFloatingBottomBar ? (appInstaller.overlaySafeBottomPadding + 165) : 28)
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(stepsList.enumerated()), id: \.offset) { idx, stepText in
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("\(idx + 1)")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .frame(width: 22, height: 22)
+                            .background(AppleTheme.green)
+                            .clipShape(Circle())
+                            .padding(.top, 1)
+
+                        Text(stepText)
+                            .font(.system(size: 14))
+                            .foregroundColor(AppleTheme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            if !isReceiverMode {
+                if isToAndroid {
+                    ApplePrimaryButton(
+                        title: isPersonalInstalled
+                            ? "Apri WhatsApp (Trasferisci chat su Android)"
+                            : "Scarica WhatsApp Personale",
+                        icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
+                        color: AppleTheme.green
+                    ) {
+                        DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
+                    }
+                } else {
+                    // Vecchio iPhone -> Nuovo iPhone: Scanner diretto del QR WhatsApp
+                    ApplePrimaryButton(
+                        title: "Inquadra QR di WhatsApp e avvia passaggio",
+                        icon: "qrcode.viewfinder",
+                        color: AppleTheme.green
+                    ) {
+                        showWhatsAppQrScanner = true
+                    }
+
+                    AppleSecondaryButton(
+                        title: isPersonalInstalled
+                            ? "Oppure apri WhatsApp Personale"
+                            : "Scarica WhatsApp Personale",
+                        icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
+                        tint: AppleTheme.green
+                    ) {
+                        DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
+                    }
+                }
+            } else {
+                // Nuovo iPhone (Ricevente): Apre direttamente WhatsApp Personale per inserire numero + codice SMS e mostrare il QR
+                ApplePrimaryButton(
+                    title: isPersonalInstalled
+                        ? "Apri WhatsApp Personale"
+                        : "Scarica WhatsApp Personale",
+                    icon: isPersonalInstalled ? "bubble.left.and.bubble.right.fill" : "arrow.down.app.fill",
+                    color: AppleTheme.green
+                ) {
+                    DirectSwitchTransportViewModel.openPersonalWhatsAppOrStore()
+                }
+            }
+
+            if isToAndroid || (isReceiverMode && !isFromAndroid) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(AppleTheme.blue)
+                    Text(isToAndroid
+                        ? "WhatsApp su Android già aperto senza QR? Usa «Reimposta solo WhatsApp» su Android"
+                        : "WhatsApp già aperto senza schermata QR? Reinstalla solo WhatsApp")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(AppleTheme.blue)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    InfoCircleButton(
+                        title: "Perché potrei dover reimpostare solo WhatsApp?",
+                        message: isToAndroid
+                            ? "WhatsApp su Android mostra il Codice QR per importare le chat dall'iPhone solo durante la prima verifica del numero su una installazione pulita. Se avevi già attivato WhatsApp vuoto sul nuovo Android, tocca «Reimposta solo WhatsApp» in DirectSwitch su Android (Spazio di archiviazione → Cancella dati) per azzerare solo WhatsApp senza toccare il telefono e far riapparire il QR."
+                            : "Su iPhone WhatsApp mostra il Codice QR «Trasferisci la cronologia chat» subito dopo il codice SMS su una installazione pulita. Se avevi già completato l'accesso vuoto su questo iPhone saltando il QR, elimina e riscarica solo l'app WhatsApp da App Store (senza toccare il resto dell'iPhone) e reinserisci il numero per far riapparire il QR."
+                    )
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(AppleTheme.inputSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            if isBusinessAlsoInstalled {
+                Button(action: {
+                    DirectSwitchTransportViewModel.openWhatsAppBusiness()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "briefcase.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Devi trasferire invece l'account aziendale? Apri WhatsApp Business")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(AppleTheme.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 2)
+                }
+                .buttonStyle(.plain)
+            }
         }
+        .padding(16)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(AppleTheme.green.opacity(0.48), lineWidth: 1.2)
+        )
     }
 
     // MARK: - Schermata Avanzamento Dati Selezionati (sempre da 0% -> 100%, mostra SOLO le voci scelte in questo trasferimento)
@@ -1852,6 +1906,10 @@ private struct DirectSwitchTransferProgressView: View {
 
                 if isReceiverMode && transport.isCompleted && ((scope.documents && transport.completedItems > 0) || !transport.receivedDocumentFolders.isEmpty || transport.importedSms > 0) {
                     receivedDocumentFoldersCard
+                }
+
+                if transport.isCompleted && transport.pendingNativeWhatsAppMigration {
+                    whatsAppNativeTransferCard(embeddedInSummary: true)
                 }
 
                 if transport.gatedPreviewCount > 0 && !isProUnlocked {
@@ -2128,7 +2186,7 @@ private struct DirectSwitchProPassSheet: View {
                 featureLine(
                     icon: "photo.stack.fill",
                     color: AppleTheme.orange,
-                    text: "Foto originali, Video 4K, Contatti e Chat WhatsApp"
+                    text: "Foto originali, Video 4K, Documenti e Cartelle"
                 )
                 featureLine(
                     icon: "checkmark.seal.fill",

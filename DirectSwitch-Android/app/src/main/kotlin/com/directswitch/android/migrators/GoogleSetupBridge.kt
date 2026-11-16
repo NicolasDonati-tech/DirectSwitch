@@ -20,7 +20,7 @@ import com.directswitch.android.DirectSwitchLog
 
 /**
  * Motore di sblocco e richiamo per "Configura dispositivo" / "Android Switch" nativo di Google
- * (`com.google.android.gms.smartdevice.d2d` e `com.google.android.apps.restore`).
+ * e per il collegamento diretto di WhatsApp su telefoni già configurati (senza errore post-setup).
  */
 object GoogleSetupBridge {
 
@@ -29,8 +29,29 @@ object GoogleSetupBridge {
         val hasAndroidSwitchRestoreTool: Boolean,
         val hasSamsungSmartSwitch: Boolean,
         val isUsbCableDeviceAttached: Boolean,
-        val attachedUsbProductName: String?
+        val attachedUsbProductName: String?,
+        val isAlreadyConfiguredPostSetup: Boolean
     )
+
+    /**
+     * Restituisce `true` se lo smartphone Android ha già completato la configurazione iniziale (`USER_SETUP_COMPLETE == 1`).
+     * Quando è `true`, Google blocca il trasferimento di WhatsApp dentro `Android Switch` (`com.google.android.apps.restore`)
+     * mostrando l'errore "Android Switch non può essere utilizzata dopo la configurazione su questo dispositivo":
+     * in questo stato DirectSwitch guida l'utente al trasferimento diretto della cronologia chat
+     * tramite Codice QR sullo stesso numero di telefono dentro WhatsApp (senza dispositivo complementare e senza formattare il telefono).
+     */
+    fun isDeviceAlreadySetup(context: Context): Boolean {
+        return try {
+            Settings.Secure.getInt(context.contentResolver, "user_setup_complete", 1) == 1
+        } catch (_: Throwable) {
+            true
+        }
+    }
+
+    fun isWhatsAppInstalled(context: Context): Boolean {
+        val pm = context.packageManager
+        return isPackageInstalled(pm, "com.whatsapp") || isPackageInstalled(pm, "com.whatsapp.w4b")
+    }
 
     fun inspectDeviceCapabilities(context: Context): BridgeAvailability {
         val pm = context.packageManager
@@ -47,7 +68,8 @@ object GoogleSetupBridge {
             hasAndroidSwitchRestoreTool = hasRestore,
             hasSamsungSmartSwitch = hasSamsung,
             isUsbCableDeviceAttached = usbDevices.isNotEmpty(),
-            attachedUsbProductName = firstUsb?.productName ?: firstUsb?.manufacturerName
+            attachedUsbProductName = firstUsb?.productName ?: firstUsb?.manufacturerName,
+            isAlreadyConfiguredPostSetup = isDeviceAlreadySetup(context)
         )
     }
 
@@ -104,11 +126,11 @@ object GoogleSetupBridge {
             }
         }
 
-        return false to "Modulo Google Play Services D2D non trovato su questo dispositivo: usa 'Invia con DirectSwitch' qui sotto."
+        return false to "Modulo Google Play Services D2D non trovato su questo dispositivo: usa 'Invia' nella schermata principale."
     }
 
     /**
-     * SCENARIO 2 (NUOVO ANDROID GIÀ CONFIGURATO):
+     * SCENARIO 2 (NUOVO ANDROID GIÀ CONFIGURATO — SOLO CONTATTI/APP DI SISTEMA, NON WHATSAPP):
      * Riapre sul NUOVO telefono Android già avviato il ricevitore nativo "Android Switch / Copia dati".
      */
     fun launchNewPhonePostSetupRestore(context: Context): Pair<Boolean, String> {
@@ -148,7 +170,7 @@ object GoogleSetupBridge {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
                 context.startActivity(intent)
-                return true to "Ricevitore nativo 'Configura / Android Switch' avviato sul telefono già configurato."
+                return true to "Modulo Google 'Copia dati' avviato (Nota: per WhatsApp a telefono già configurato usa invece il pulsante diretto WhatsApp in DirectSwitch)."
             } catch (t: Throwable) {
                 DirectSwitchLog.warn("Avvio Configura (ricevitore) fallito", t)
             }
@@ -160,22 +182,33 @@ object GoogleSetupBridge {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(searchIntent)
-            return false to "Wizard diretto bloccato dalla ROM: seleziona 'Copia dati / Android Switch' nella ricerca aperta, oppure usa 'Ricevi con DirectSwitch'."
+            return false to "Wizard diretto bloccato dalla ROM: usa 'Ricevi' nella Home di DirectSwitch."
         } catch (_: Throwable) {
         }
 
-        return false to "Il produttore blocca il wizard Google post-setup: usa il trasferimento diretto DirectSwitch qui sotto."
+        return false to "Il produttore blocca il wizard Google post-setup: usa 'Ricevi' nella Home di DirectSwitch."
     }
 
     /**
-     * SCENARIO 3 (DA IPHONE -> A QUESTO ANDROID TRAMITE ANDROID SWITCH NATIVO DI GOOGLE):
-     * Apre il flusso nativo di Google "Android Switch" (`com.google.android.apps.restore`) per importare
-     * da iPhone ad Android, inclusa la modalità wireless con codice QR per il passaggio nativo delle Chat WhatsApp senza cavo.
+     * SCENARIO 3 (DA IPHONE -> A QUESTO ANDROID):
+     * Se il telefono Android è GIÀ CONFIGURATO (`isDeviceAlreadySetup == true`), Google blocca WhatsApp dentro
+     * `Android Switch` ("non può essere utilizzata dopo la configurazione su questo dispositivo").
+     * Pertanto su telefoni già configurati NON lanciamo `Android Switch` per WhatsApp, ma apriamo direttamente
+     * WhatsApp ufficiale per verificare il numero associato e mostrare il Codice QR di importazione (senza formattare Android).
      */
     fun launchIphoneToAndroidGoogleRestore(
         context: Context,
         preferWirelessQr: Boolean = false
     ): Pair<Boolean, String> {
+        if (isDeviceAlreadySetup(context)) {
+            val (openedWa, _) = launchWhatsAppOrPlayStore(context)
+            return if (openedWa) {
+                true to "WhatsApp aperto su questo Android: verifica lo stesso numero di telefono associato all'iPhone fino alla schermata del Codice QR di trasferimento, poi inquadralo dall'iPhone (Impostazioni → Chat → Trasferisci chat su Android)."
+            } else {
+                false to "Installa WhatsApp dal Play Store, aprilo e verifica lo stesso numero di telefono fino alla schermata del Codice QR per importare le chat dall'iPhone."
+            }
+        }
+
         val pm = context.packageManager
         val capabilities = inspectDeviceCapabilities(context)
         val candidates = mutableListOf<Intent>()
@@ -206,41 +239,29 @@ object GoogleSetupBridge {
                 setPackage("com.google.android.apps.restore")
             }.applyIosExtras()
         )
-        candidates.add(
-            Intent("com.google.android.setupwizard.DEFERRED_SUW").apply {
-                setPackage("com.google.android.setupwizard")
-            }.applyIosExtras()
-        )
         pm.getLaunchIntentForPackage("com.sec.android.easyMover")?.let { candidates.add(it) }
 
-        val hint = when {
-            preferWirelessQr ->
-                "Scegli 'Senza cavo / Wi-Fi' fino al codice QR, poi su iPhone apri WhatsApp → Impostazioni → Chat → Trasferisci chat su Android e inquadra il QR."
-            capabilities.isUsbCableDeviceAttached ->
-                "Cavo USB rilevato (${capabilities.attachedUsbProductName ?: "iPhone"}): premi 'Autorizza' sull'iPhone."
-            else ->
-                "Puoi proseguire senza cavo con codice QR Wi-Fi oppure collegare un cavo USB-C."
+        val hint = if (capabilities.isUsbCableDeviceAttached) {
+            "Cavo USB rilevato (${capabilities.attachedUsbProductName ?: "iPhone"}): premi 'Autorizza' sull'iPhone."
+        } else {
+            "Segui le istruzioni a schermo fino al codice QR."
         }
 
         for (intent in candidates) {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
                 context.startActivity(intent)
-                return true to "Modulo Google 'Android Switch' avviato! $hint"
+                return true to "Modulo Android Switch avviato! $hint"
             } catch (t: Throwable) {
                 DirectSwitchLog.warn("Avvio flusso iPhone-Android fallito", t)
             }
         }
 
-        if (preferWirelessQr) {
-            return false to "Android Switch non è preinstallato su questo modello: scarica 'Android Switch' dal Play Store o apri direttamente WhatsApp qui sotto."
-        }
-        return false to "Android Switch nativo non accessibile su questa ROM: usa 'Ricevi con DirectSwitch' qui sotto."
+        return launchWhatsAppOrPlayStore(context)
     }
 
     /**
-     * Apre direttamente WhatsApp (o WhatsApp Business) su Android per completare la verifica del numero e
-     * finalizzare l'importazione della cronologia chat ricevuta da Android Switch (o apre il Play Store se non installato).
+     * Apre direttamente WhatsApp (o WhatsApp Business) su Android — oppure il Google Play Store se non è ancora installato.
      */
     fun launchWhatsAppOrPlayStore(context: Context): Pair<Boolean, String> {
         val pm = context.packageManager
@@ -250,7 +271,7 @@ object GoogleSetupBridge {
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 try {
                     context.startActivity(launch)
-                    return true to "WhatsApp avviato: inserisci il tuo numero per completare il ripristino della cronologia chat."
+                    return true to "WhatsApp avviato: verifica lo stesso numero di telefono dell'iPhone finché WhatsApp mostra il Codice QR «Trasferisci cronologia chat», quindi inquadralo dal vecchio iPhone."
                 } catch (t: Throwable) {
                     DirectSwitchLog.warn("Avvio WhatsApp fallito", t)
                 }
@@ -269,6 +290,30 @@ object GoogleSetupBridge {
             }
         }
         return false to "Impossibile aprire WhatsApp o Google Play Store su questo dispositivo."
+    }
+
+    /**
+     * Apre la schermata di sistema di WhatsApp ("Informazioni app") nel caso in cui l'utente avesse già effettuato
+     * un accesso vuoto su Android e voglia far ricomparire la schermata iniziale con i 3 puntini `⋮`
+     * ("Spazio di archiviazione → Cancella dati", che svuota solo WhatsApp senza toccare il telefono).
+     */
+    fun openWhatsAppAppInfoSettings(context: Context): Pair<Boolean, String> {
+        val pm = context.packageManager
+        val targetPkg = listOf("com.whatsapp", "com.whatsapp.w4b")
+            .firstOrNull { isPackageInstalled(pm, it) }
+            ?: return launchWhatsAppOrPlayStore(context)
+
+        return try {
+            val intent = Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", targetPkg, null)
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            true to "Tocca «Spazio di archiviazione → Cancella dati» per riportare solo WhatsApp alla prima verifica del numero (senza formattare il telefono) e mostrare il Codice QR di importazione."
+        } catch (t: Throwable) {
+            DirectSwitchLog.warn("Apertura impostazioni WhatsApp fallita", t)
+            false to "Impossibile aprire le impostazioni di WhatsApp."
+        }
     }
 
     private fun isPackageInstalled(pm: PackageManager, pkg: String): Boolean {

@@ -139,6 +139,46 @@ data class PinPairingRequest(
     val senderName: String
 )
 
+/**
+ * Scope delle categorie effettivamente incluse in questo singolo trasferimento
+ * (compatibile al 100% con `ActiveTransferScope` su iOS).
+ */
+@Serializable
+data class ActiveTransferScope(
+    val contacts: Boolean = false,
+    val photos: Boolean = false,
+    val videos: Boolean = false,
+    val calendars: Boolean = false,
+    val reminders: Boolean = false,
+    val documents: Boolean = false,
+    val apps: Boolean = false,
+    val whatsApp: Boolean = false
+) {
+    val hasAnyStandardDataCategory: Boolean
+        get() = contacts || photos || videos || calendars || reminders || documents || apps
+
+    val isWhatsAppOnly: Boolean
+        get() = whatsApp && !hasAnyStandardDataCategory
+
+    companion object {
+        fun inferred(manifest: TransferManifest): ActiveTransferScope {
+            val hasPhotos = manifest.items.any { it.category == TransferCategory.PHOTOS }
+            val hasVideos = manifest.items.any { it.category == TransferCategory.VIDEOS }
+            val hasDocs = manifest.items.any { it.category == TransferCategory.DOCUMENTS }
+            val hasWaVault = manifest.items.any { it.category == TransferCategory.WHATSAPP_VAULT }
+            return ActiveTransferScope(
+                contacts = manifest.contactsPayload.isNotEmpty(),
+                photos = hasPhotos,
+                videos = hasVideos,
+                calendars = manifest.calendarsPayload.isNotEmpty(),
+                documents = hasDocs,
+                apps = manifest.installedAppsPayload.isNotEmpty(),
+                whatsApp = manifest.requestNativeWhatsAppMigration || hasWaVault
+            )
+        }
+    }
+}
+
 @Serializable
 data class HandshakeRequest(
     val sessionId: String,
@@ -146,7 +186,9 @@ data class HandshakeRequest(
     val senderPlatform: DevicePlatform,
     val senderHasPro: Boolean,
     val senderHasCloudSavePro: Boolean = false,
-    val totalEstimatedBytes: Long = 0L
+    val totalEstimatedBytes: Long = 0L,
+    val isResume: Boolean? = null,
+    val transferScope: ActiveTransferScope? = null
 )
 
 @Serializable
@@ -219,7 +261,8 @@ data class TransferManifest(
     val calendarsPayload: List<CalendarEventRecord> = emptyList(),
     val smsPayload: List<SmsTransferRecord> = emptyList(),
     val installedAppsPayload: List<InstalledAppRecord> = emptyList(),
-    val requestNativeWhatsAppMigration: Boolean = false
+    val requestNativeWhatsAppMigration: Boolean = false,
+    val transferScope: ActiveTransferScope? = null
 )
 
 @Serializable
