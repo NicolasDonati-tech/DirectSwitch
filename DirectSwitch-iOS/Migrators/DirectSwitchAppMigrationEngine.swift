@@ -3364,7 +3364,7 @@ enum iOSPhotoMetadataAppDetector {
                 return sw
             }
             if let png = props[kCGImagePropertyPNGDictionary as String] as? [String: Any],
-               let sw = (png["Software"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let sw = (png[kCGImagePropertyPNGSoftware as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !sw.isEmpty {
                 return sw
             }

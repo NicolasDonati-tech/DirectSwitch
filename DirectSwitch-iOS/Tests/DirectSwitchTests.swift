@@ -1313,32 +1313,29 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(exifDetected?.appStoreId, 439438619)
         XCTAssertEqual(exifDetected?.detectionSource, "da Metadati Foto • 5g fa")
 
-        // Verifica anche XMP tiff:Software (usato da Lightroom / Canva / editor moderni su JPEG/HEIC)
-        let tmpXmpJpg = FileManager.default.temporaryDirectory.appendingPathComponent("ds_xmp_\(UUID().uuidString).jpg")
-        defer { try? FileManager.default.removeItem(at: tmpXmpJpg) }
-        if let xmpDest = CGImageDestinationCreateWithURL(tmpXmpJpg as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
-            let mutableMeta = CGImageMetadataCreateMutable()
-            let registered = CGImageMetadataSetValueWithPath(
-                mutableMeta,
-                nil,
-                "xmp:CreatorTool" as CFString,
-                "Adobe Lightroom Mobile" as CFString
-            )
-            XCTAssertTrue(registered)
-            let mergeOpts: [String: Any] = [
-                kCGImageDestinationMergeMetadata as String: true
+        // Verifica anche PNG tEXt Software (usato da Canva / editor grafici su PNG esportati)
+        let tmpPng = FileManager.default.temporaryDirectory.appendingPathComponent("ds_png_\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: tmpPng) }
+        if let pngDest = CGImageDestinationCreateWithURL(tmpPng as CFURL, UTType.png.identifier as CFString, 1, nil) {
+            let pngProps: [String: Any] = [
+                kCGImagePropertyPNGDictionary as String: [
+                    kCGImagePropertyPNGSoftware as String: "Canva"
+                ]
             ]
-            CGImageDestinationAddImageAndMetadata(xmpDest, cgImg, mutableMeta, mergeOpts as CFDictionary)
-            XCTAssertTrue(CGImageDestinationFinalize(xmpDest))
-            let xmpDetected = await iOSPhotoMetadataAppDetector.detectAppFromExportedMediaFile(
-                at: tmpXmpJpg,
-                originalFilename: "IMG_8888.JPG",
+            CGImageDestinationAddImage(pngDest, cgImg, pngProps as CFDictionary)
+            XCTAssertTrue(CGImageDestinationFinalize(pngDest))
+            let pngDetected = await iOSPhotoMetadataAppDetector.detectAppFromExportedMediaFile(
+                at: tmpPng,
+                originalFilename: "IMG_8888.PNG",
                 isVideo: false,
                 creationDate: fiveDaysAgo,
                 now: now
             )
-            XCTAssertEqual(xmpDetected?.packageName, "com.adobe.lrmobilephone")
-            XCTAssertEqual(xmpDetected?.appStoreId, 878783582)
+            XCTAssertEqual(pngDetected?.packageName, "com.canva.canvaeditor")
+            XCTAssertEqual(pngDetected?.appStoreId, 897446215)
+            XCTAssertEqual(pngDetected?.detectionSource, "da Metadati Foto • 5g fa")
+        } else {
+            XCTFail("Impossibile creare CGImageDestination PNG")
         }
 
         // 5. Categorie curate + filtro Google Android
