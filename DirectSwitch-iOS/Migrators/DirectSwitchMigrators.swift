@@ -1070,14 +1070,7 @@ enum iOSPhotoKitMigrator {
     private final class AsyncExportResumeGuard: @unchecked Sendable {
         private let lock = NSLock()
         private var resumed = false
-        private var dataRequestId: PHAssetResourceDataRequestID? = nil
         private var imageRequestId: PHImageRequestID? = nil
-
-        func setDataRequestId(_ id: PHAssetResourceDataRequestID) {
-            lock.lock()
-            dataRequestId = id
-            lock.unlock()
-        }
 
         func setImageRequestId(_ id: PHImageRequestID) {
             lock.lock()
@@ -1089,16 +1082,10 @@ enum iOSPhotoKitMigrator {
             lock.lock()
             let shouldResume = !resumed
             resumed = true
-            let dId = dataRequestId
             let iId = imageRequestId
             lock.unlock()
-            if shouldResume && cancelPending {
-                if let dId {
-                    PHAssetResourceManager.default().cancelDataRequest(dId)
-                }
-                if let iId {
-                    PHImageManager.default().cancelImageRequest(iId)
-                }
+            if shouldResume && cancelPending, let iId {
+                PHImageManager.default().cancelImageRequest(iId)
             }
             return shouldResume
         }
@@ -1210,7 +1197,7 @@ enum iOSPhotoKitMigrator {
                     continuation.resume(returning: nil)
                 }
             }
-            let reqId = PHAssetResourceManager.default().writeData(
+            PHAssetResourceManager.default().writeData(
                 for: resource,
                 toFile: destURL,
                 options: opts
@@ -1226,7 +1213,6 @@ enum iOSPhotoKitMigrator {
                     continuation.resume(returning: destURL)
                 }
             }
-            guardBox.setDataRequestId(reqId)
         }
     }
 
