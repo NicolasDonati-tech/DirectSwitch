@@ -1325,7 +1325,10 @@ final class DirectSwitchTests: XCTestCase {
                 "Adobe Lightroom Mobile" as CFString
             )
             XCTAssertTrue(registered)
-            CGImageDestinationAddImageAndMetadata(xmpDest, cgImg, mutableMeta, nil)
+            let mergeOpts: [String: Any] = [
+                kCGImageDestinationMergeMetadata as String: true
+            ]
+            CGImageDestinationAddImageAndMetadata(xmpDest, cgImg, mutableMeta, mergeOpts as CFDictionary)
             XCTAssertTrue(CGImageDestinationFinalize(xmpDest))
             let xmpDetected = await iOSPhotoMetadataAppDetector.detectAppFromExportedMediaFile(
                 at: tmpXmpJpg,
