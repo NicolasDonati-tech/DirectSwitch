@@ -2150,10 +2150,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         self.statusLabel = "Invio \(entry.item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
                     }
                     guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(entry.asset) else {
+                        let initialLiveEst = heldLiveEstimate
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(
                                 estimatedPrimaryBytes: entry.item.sizeBytes,
-                                estimatedLiveBytes: heldLiveEstimate
+                                estimatedLiveBytes: initialLiveEst
                             )
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
                             if let acc = self.senderProgressAccounting {

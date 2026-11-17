@@ -1146,7 +1146,7 @@ enum iOSPhotoKitMigrator {
         deliveryMode: PHImageRequestOptionsDeliveryMode = .highQualityFormat,
         timeoutSeconds: TimeInterval = 12.0
     ) async -> URL? {
-        await withCheckedContinuation { continuation in
+        await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = allowNetwork
             opts.deliveryMode = deliveryMode
@@ -1200,7 +1200,7 @@ enum iOSPhotoKitMigrator {
             .appendingPathComponent("\(prefix)_\(UUID().uuidString)_\(safeName.isEmpty ? "asset.bin" : safeName)")
         try? FileManager.default.removeItem(at: destURL)
 
-        return await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
             let opts = PHAssetResourceRequestOptions()
             opts.isNetworkAccessAllowed = allowNetwork
             let guardBox = AsyncExportResumeGuard()

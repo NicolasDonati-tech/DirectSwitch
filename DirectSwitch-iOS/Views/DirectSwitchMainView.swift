@@ -165,7 +165,6 @@ struct DirectSwitchMainView: View {
                                     isLocalNetworkDenied: transport.isLocalNetworkDenied,
                                     deniedPermissionsNote: receiverDeniedSummary,
                                     errorMessage: transport.errorMessage,
-                                    preScannedAppsCount: transport.remoteScannedApps.count,
                                     authorizedDestinations: receiverAuthorizedDestinations,
                                     fallbackDestinationRoot: receiverFallbackRootLabel,
                                     onAuthorizeDestinations: {
