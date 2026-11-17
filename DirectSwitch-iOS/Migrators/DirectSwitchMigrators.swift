@@ -51,6 +51,45 @@ struct iOSDocumentLocationSummary: Sendable, Equatable, Identifiable {
     }
 }
 
+enum iOSDocumentPresetKind: String, CaseIterable, Identifiable, Sendable {
+    case iCloudDrive
+    case onMyIPhone
+    case chrome
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .iCloudDrive: return "iCloud Drive"
+        case .onMyIPhone: return "Su iPhone"
+        case .chrome: return "Chrome"
+        }
+    }
+
+    var systemIcon: String {
+        switch self {
+        case .iCloudDrive: return "icloud.fill"
+        case .onMyIPhone: return "iphone"
+        case .chrome: return "globe"
+        }
+    }
+
+    static func match(for summary: iOSDocumentLocationSummary) -> iOSDocumentPresetKind? {
+        let lowerName = summary.locationName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let lowerId = summary.locationId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lowerName == "icloud drive" {
+            return .iCloudDrive
+        }
+        if lowerName == "chrome" || lowerName == "su iphone • chrome" || lowerId.hasSuffix("/chrome") {
+            return .chrome
+        }
+        if lowerName == "su iphone" {
+            return .onMyIPhone
+        }
+        return nil
+    }
+}
+
 struct iOSDocumentsPrecheckReport: Sendable, Equatable {
     let totalFiles: Int
     let totalBytes: Int64
@@ -83,6 +122,39 @@ struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     var photosDenied: Bool = false
     var calendarsDenied: Bool = false
     var remindersDenied: Bool = false
+    var photoAlbumsCount: Int = 0
+}
+
+struct ContactsPreloadState: Equatable, Sendable {
+    var loadedCount: Int = 0
+    var totalCount: Int = 0
+    var isLoading: Bool = false
+    var isCompleted: Bool = false
+}
+
+struct PhotosPreloadState: Equatable, Sendable {
+    var loadedCount: Int = 0
+    var totalCount: Int = 0
+    var livePhotosCount: Int = 0
+    var albumsCount: Int = 0
+    var estimatedBytes: Int64 = 0
+    var isLoading: Bool = false
+    var isCompleted: Bool = false
+}
+
+struct VideosPreloadState: Equatable, Sendable {
+    var loadedCount: Int = 0
+    var totalCount: Int = 0
+    var estimatedBytes: Int64 = 0
+    var isLoading: Bool = false
+    var isCompleted: Bool = false
+}
+
+struct DateSyncPreloadState: Equatable, Sendable {
+    var totalAllCount: Int = 0
+    var totalUpToTodayCount: Int = 0
+    var lastUpdatedAt: Date? = nil
+    var isLoading: Bool = false
 }
 
 enum iOSPermissionsHelper {
@@ -233,6 +305,9 @@ enum iOSDeviceDataAnalyzer {
         var photosBytes: Int64 = 0
         var videosCount = 0
         var videosBytes: Int64 = 0
+        let photoAlbumsCount = photosAuth
+            ? PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil).count
+            : 0
 
         if photosAuth {
             let fetched = PHAsset.fetchAssets(with: nil)
@@ -286,7 +361,8 @@ enum iOSDeviceDataAnalyzer {
             contactsDenied: contactsDenied,
             photosDenied: photosDenied,
             calendarsDenied: calendarsDenied,
-            remindersDenied: remindersDenied
+            remindersDenied: remindersDenied,
+            photoAlbumsCount: photoAlbumsCount
         )
     }
 
@@ -527,6 +603,75 @@ enum iOSContactsSmartMerger {
         return out
     }
 
+    /// Precaricamento progressivo dei contatti fino al totale effettivo presente in rubrica per la tendina UI.
+    static func preloadContactsCountWithProgress(
+        onProgress: @Sendable @escaping (_ loaded: Int, _ total: Int) -> Void
+    ) async -> Int {
+        guard isAuthorized() else {
+            onProgress(0, 0)
+            return 0
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let store = CNContactStore()
+            let countKeys: [CNKeyDescriptor] = [
+                CNContactIdentifierKey as CNKeyDescriptor,
+                CNContactGivenNameKey as CNKeyDescriptor,
+                CNContactFamilyNameKey as CNKeyDescriptor,
+                CNContactOrganizationNameKey as CNKeyDescriptor,
+                CNContactNicknameKey as CNKeyDescriptor,
+                CNContactPhoneNumbersKey as CNKeyDescriptor,
+                CNContactEmailAddressesKey as CNKeyDescriptor
+            ]
+            var identifiers: [String] = []
+            try? store.enumerateContacts(with: CNContactFetchRequest(keysToFetch: countKeys)) { contact, _ in
+                let given = contact.givenName.trimmingCharacters(in: .whitespaces)
+                let family = contact.familyName.trimmingCharacters(in: .whitespaces)
+                let name = [given, family].filter { !$0.isEmpty }.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+                let org = contact.organizationName.trimmingCharacters(in: .whitespaces)
+                let nick = contact.nickname.trimmingCharacters(in: .whitespaces)
+                let firstPhone = contact.phoneNumbers.first?.value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let firstEmail = (contact.emailAddresses.first?.value as String?)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !name.isEmpty || !org.isEmpty || !nick.isEmpty || !firstPhone.isEmpty || !firstEmail.isEmpty {
+                    identifiers.append(contact.identifier)
+                }
+            }
+            let total = identifiers.count
+            guard total > 0 else {
+                onProgress(0, 0)
+                return 0
+            }
+            let identifierSet = Set(identifiers)
+            let fullKeys: [CNKeyDescriptor] = [
+                CNContactIdentifierKey as CNKeyDescriptor,
+                CNContactGivenNameKey as CNKeyDescriptor,
+                CNContactFamilyNameKey as CNKeyDescriptor,
+                CNContactNicknameKey as CNKeyDescriptor,
+                CNContactOrganizationNameKey as CNKeyDescriptor,
+                CNContactJobTitleKey as CNKeyDescriptor,
+                CNContactBirthdayKey as CNKeyDescriptor,
+                CNContactPhoneNumbersKey as CNKeyDescriptor,
+                CNContactEmailAddressesKey as CNKeyDescriptor,
+                CNContactUrlAddressesKey as CNKeyDescriptor,
+                CNContactPostalAddressesKey as CNKeyDescriptor,
+                CNContactThumbnailImageDataKey as CNKeyDescriptor
+            ]
+            let step = max(1, total / 24)
+            var loaded = 0
+            onProgress(0, total)
+            let req = CNContactFetchRequest(keysToFetch: fullKeys)
+            try? store.enumerateContacts(with: req) { contact, _ in
+                if identifierSet.contains(contact.identifier) {
+                    loaded += 1
+                    if loaded % step == 0 || loaded == total {
+                        onProgress(min(loaded, total), total)
+                    }
+                }
+            }
+            onProgress(total, total)
+            return total
+        }.value
+    }
+
     static func mergeIncomingContacts(_ incoming: [ContactTransferRecord]) -> (inserted: Int, skipped: Int) {
         guard isAuthorized(), !incoming.isEmpty else { return (0, 0) }
         let store = CNContactStore()
@@ -692,6 +837,64 @@ enum iOSContactsSmartMerger {
 /// Importatore ed esportatore nativo Rullino iOS (`PhotoKit`) con streaming su disco anti-OOM per video 4K,
 /// deduplicazione automatica, preservazione reale degli Album utente e MIME type accurati (HEIC/MOV/MP4/PNG).
 enum iOSPhotoKitMigrator {
+    static func isAuthorized() -> Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        return status == .authorized || status == .limited
+    }
+
+    static func requestAccessIfNeeded() async -> PHAuthorizationStatus {
+        let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if current == .authorized || current == .limited || current == .denied || current == .restricted {
+            return current
+        }
+        return await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+    }
+
+    /// Precaricamento progressivo di foto/Live Photos/album o video fino al totale effettivo sul Rullino iOS.
+    static func preloadMediaStatsWithProgress(
+        for mediaType: PHAssetMediaType,
+        onProgress: @Sendable @escaping (_ loaded: Int, _ total: Int, _ liveCount: Int, _ albumsCount: Int, _ estimatedBytes: Int64) -> Void
+    ) async -> (total: Int, liveCount: Int, albumsCount: Int, estimatedBytes: Int64) {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else {
+            onProgress(0, 0, 0, 0, 0)
+            return (0, 0, 0, 0)
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let albumsCount = mediaType == .image
+                ? PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil).count
+                : 0
+            let fetched = PHAsset.fetchAssets(with: mediaType, options: nil)
+            let total = fetched.count
+            guard total > 0 else {
+                onProgress(0, 0, 0, albumsCount, 0)
+                return (0, 0, albumsCount, 0)
+            }
+            onProgress(0, total, 0, albumsCount, 0)
+            let step = max(1, total / 24)
+            var loaded = 0
+            var liveCount = 0
+            var bytes: Int64 = 0
+            fetched.enumerateObjects { asset, _, _ in
+                loaded += 1
+                if mediaType == .image {
+                    if asset.mediaSubtypes.contains(.photoLive) {
+                        liveCount += 1
+                        bytes += 4_800_000
+                    } else {
+                        bytes += 2_800_000
+                    }
+                } else {
+                    bytes += Int64(max(1.0, asset.duration) * 2_200_000.0)
+                }
+                if loaded % step == 0 || loaded == total {
+                    onProgress(loaded, total, liveCount, albumsCount, bytes)
+                }
+            }
+            onProgress(total, total, liveCount, albumsCount, bytes)
+            return (total, liveCount, albumsCount, bytes)
+        }.value
+    }
     static func mimeTypeForFileName(_ fileName: String, isVideo: Bool) -> String {
         let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
         switch ext {
@@ -2203,6 +2406,9 @@ enum iOSDocumentsSandboxBridge {
             if baseFolder.isEmpty || baseFolder == "Su_iPhone" {
                 return "Su iPhone"
             }
+            if baseFolder.caseInsensitiveCompare("Chrome") == .orderedSame {
+                return "Chrome"
+            }
             return "Su iPhone • \(baseFolder)"
         }
         if locLabel.hasPrefix("iCloud Drive") {
@@ -2985,12 +3191,17 @@ enum iOSCalendarMigrator {
         }
     }
 
-    static func readEvents() -> [CalendarEventRecord] {
+    static func readEvents(upToDate: Date? = nil) -> [CalendarEventRecord] {
         guard isAuthorized() else { return [] }
         let store = EKEventStore()
-        // Finestra ampia (-10 anni .. +10 anni) per non perdere appuntamenti storici o ricorrenze annuali
+        // Finestra ampia (-10 anni .. +10 anni) oppure fino al termine della data odierna se richiesto dall'utente
         let start = Date().addingTimeInterval(-365 * 86400 * 10)
-        let end = Date().addingTimeInterval(365 * 86400 * 10)
+        let defaultEnd = Date().addingTimeInterval(365 * 86400 * 10)
+        let end: Date = {
+            guard let cutoff = upToDate else { return defaultEnd }
+            let endOfCutoffDay = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: cutoff) ?? cutoff
+            return max(start, min(defaultEnd, endOfCutoffDay))
+        }()
         let pred = store.predicateForEvents(withStart: start, end: end, calendars: nil)
         return store.events(matching: pred).map { ev in
             let rule = ev.recurrenceRules?.first
@@ -3092,7 +3303,7 @@ enum iOSRemindersMigrator {
         }
     }
 
-    static func readReminders() async -> [ReminderTransferRecord] {
+    static func readReminders(upToDate: Date? = nil) async -> [ReminderTransferRecord] {
         guard isAuthorized() else { return [] }
         let store = EKEventStore()
         let pred = store.predicateForReminders(in: nil)
@@ -3100,6 +3311,10 @@ enum iOSRemindersMigrator {
             store.fetchReminders(matching: pred) { list in
                 cont.resume(returning: list ?? [])
             }
+        }
+        let cutoffMs: Int64? = upToDate.map { date in
+            let endOfDay = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: date) ?? date
+            return Int64(endOfDay.timeIntervalSince1970 * 1000.0)
         }
         return fetched.compactMap { rem in
             let cleanTitle = (rem.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3109,6 +3324,9 @@ enum iOSRemindersMigrator {
                       let date = Calendar.current.date(from: comps) else { return nil }
                 return Int64(date.timeIntervalSince1970 * 1000.0)
             }()
+            if let cutoffMs, let dueMs, dueMs > cutoffMs {
+                return nil
+            }
             return ReminderTransferRecord(
                 id: rem.calendarItemIdentifier,
                 title: cleanTitle,

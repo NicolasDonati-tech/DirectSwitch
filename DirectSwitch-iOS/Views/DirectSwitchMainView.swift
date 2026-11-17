@@ -18,6 +18,25 @@ private enum DirectSwitchWizardStep: Equatable {
     case transferProgress
 }
 
+@MainActor
+private final class SerializedCategoryTaskQueue {
+    private var pending: Task<Void, Never>?
+
+    func enqueue(_ operation: @escaping @MainActor () async -> Void) {
+        let previous = pending
+        pending = Task { @MainActor in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+    }
+
+    func cancelAll() {
+        pending?.cancel()
+        pending = nil
+    }
+}
+
 struct DirectSwitchMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var transport = DirectSwitchTransportViewModel()
@@ -38,22 +57,32 @@ struct DirectSwitchMainView: View {
     @State private var isPairingBusy: Bool = false
     @State private var pairingErrorNote: String? = nil
 
-    // Categorie di trasferimento (stile Passa a iOS / Passa a Android)
-    @State private var includeContacts: Bool = true
-    @State private var includePhotos: Bool = true
-    @State private var includeVideos: Bool = true
-    @State private var includeCalendars: Bool = true
-    @State private var includeReminders: Bool = true
-    @State private var includeDocuments: Bool = true
-    @State private var includeApps: Bool = true
-    @State private var includeWhatsApp: Bool = true
+    // Categorie di trasferimento (tutto da spuntare all'avvio)
+    @State private var includeContacts: Bool = false
+    @State private var includePhotos: Bool = false
+    @State private var includeVideos: Bool = false
+    @State private var includeCalendars: Bool = false
+    @State private var includeReminders: Bool = false
+    @State private var includeDocuments: Bool = false
+    @State private var includeApps: Bool = false
+    @State private var includeWhatsApp: Bool = false
 
-    // Catalogo App rilevate su questo iPhone (schemi verificati + Foto/Album + Categorie rapide)
+    @State private var calendarsUpToTodayOnly: Bool = false
+    @State private var remindersUpToTodayOnly: Bool = false
+    @State private var contactsPreload: ContactsPreloadState = ContactsPreloadState()
+    @State private var photosPreload: PhotosPreloadState = PhotosPreloadState()
+    @State private var videosPreload: VideosPreloadState = VideosPreloadState()
+    @State private var calendarsSync: DateSyncPreloadState = DateSyncPreloadState()
+    @State private var remindersSync: DateSyncPreloadState = DateSyncPreloadState()
+    @State private var categoryTaskQueue = SerializedCategoryTaskQueue()
+
+    // Catalogo App rilevate su questo iPhone (schemi verificati + Foto/Album + Categorie estese)
     @State private var senderAppsCatalog: [InstalledAppRecord] = []
     @State private var verifiedLocalAppsCount: Int = 0
     @State private var photoDetectedAppsCount: Int = 0
     @State private var deselectedSenderAppIds: Set<String> = []
-    @State private var showSenderAppsSheet: Bool = false
+    @State private var isLoadingAppsCatalog: Bool = false
+    @State private var categoryIconOverrides: [String: String] = [:]
     @State private var appImportStatusNote: String? = nil
 
     private var selectedSenderApps: [InstalledAppRecord] {
@@ -62,6 +91,10 @@ struct DirectSwitchMainView: View {
 
     private var selectedSenderBundleIdsSet: Set<String> {
         Set(selectedSenderApps.map { $0.packageName.lowercased() })
+    }
+
+    private var selectedSenderStoreIdsSet: Set<Int> {
+        Set(selectedSenderApps.compactMap(\.appStoreId))
     }
 
     // File e archivi WhatsApp allegati + pre-controllo posizioni su iPhone
@@ -75,7 +108,6 @@ struct DirectSwitchMainView: View {
 
     // Scansione locale e StoreKit Pass iPhone <-> Android
     @State private var scanSummary: iOSLocalDeviceScanSummary? = nil
-    @State private var isScanningDevice: Bool = false
     @State private var isProUnlocked: Bool = iOSLicenseStore.isLocalProUnlocked
     @State private var showProSheet: Bool = false
     @State private var billingNote: String? = nil
@@ -220,32 +252,54 @@ struct DirectSwitchMainView: View {
                                 SendCategoriesStepView(
                                     pairedPayload: paired,
                                     scanSummary: scanSummary,
-                                    isScanningDevice: isScanningDevice,
                                     isLocalProUnlocked: isProUnlocked,
                                     pickedDocuments: pickedDocuments,
                                     documentPrecheck: documentPrecheckReport,
                                     isLoadingPositions: isLoadingDocumentPositions,
-                                    selectedAppsCount: selectedSenderApps.count,
-                                    totalDetectedAppsCount: senderAppsCatalog.count,
-                                    selectedAppsPreview: selectedSenderApps,
+                                    contactsPreload: contactsPreload,
+                                    photosPreload: photosPreload,
+                                    videosPreload: videosPreload,
+                                    calendarsSync: calendarsSync,
+                                    remindersSync: remindersSync,
+                                    senderAppsCatalog: senderAppsCatalog,
+                                    deselectedSenderAppIds: deselectedSenderAppIds,
                                     verifiedLocalAppsCount: verifiedLocalAppsCount,
                                     photoDetectedAppsCount: photoDetectedAppsCount,
                                     selectedBundleIdsSet: selectedSenderBundleIdsSet,
+                                    selectedStoreIdsSet: selectedSenderStoreIdsSet,
+                                    categoryIconOverrides: categoryIconOverrides,
+                                    isLoadingAppsCatalog: isLoadingAppsCatalog,
                                     appImportStatusNote: appImportStatusNote,
                                     includeContacts: $includeContacts,
                                     includePhotos: $includePhotos,
                                     includeVideos: $includeVideos,
                                     includeCalendars: $includeCalendars,
+                                    calendarsUpToTodayOnly: $calendarsUpToTodayOnly,
                                     includeReminders: $includeReminders,
+                                    remindersUpToTodayOnly: $remindersUpToTodayOnly,
                                     includeDocuments: $includeDocuments,
                                     includeApps: $includeApps,
                                     includeWhatsApp: $includeWhatsApp,
-                                    onScanExactCounts: scanExactDeviceCounts,
-                                    onToggleQuickCategory: toggleQuickCategoryOnSender,
-                                    onResetAppsToZero: resetSenderAppsToVerifiedOnly,
-                                    onManageApps: { showSenderAppsSheet = true },
+                                    onPreloadContacts: { enqueuePreloadContacts() },
+                                    onPreloadPhotos: { enqueuePreloadPhotos() },
+                                    onPreloadVideos: { enqueuePreloadVideos() },
+                                    onRefreshCalendars: { enqueueRefreshCalendars() },
+                                    onRefreshReminders: { enqueueRefreshReminders() },
+                                    onToggleCatalogApp: { app in toggleCatalogAppSelection(app) },
+                                    onToggleCategoryAllApps: { category, allSelected in
+                                        toggleCategoryAllApps(category, currentlyAllSelected: allSelected)
+                                    },
+                                    onToggleCategorySingleApp: { app, selected in
+                                        toggleCategorySingleApp(app, isCurrentlySelected: selected)
+                                    },
+                                    onAddSearchApp: { app in addAppsToSenderCatalog([app]) },
+                                    onRescanAutomaticApps: {
+                                        refreshSenderAppsCatalog()
+                                        preloadCategoryIcons()
+                                    },
+                                    onRequestPhotoScanForApps: { requestPhotoLibraryAndRescanApps() },
+                                    onResetAppsToDetectedOnly: resetSenderAppsToVerifiedOnly,
                                     onAddFolders: { presentDocumentPicker(mode: .positions) },
-                                    onAddFilesOrWhatsApp: { presentDocumentPicker(mode: .files) },
                                     onTogglePositionSelection: { locId, selected in
                                         iOSDocumentsSandboxBridge.setPositionSelected(locationId: locId, isSelected: selected)
                                         refreshAuthorizedSummary()
@@ -334,16 +388,49 @@ struct DirectSwitchMainView: View {
                 }
             }
         }
+        .onChange(of: includeContacts) { enabled in
+            if enabled {
+                enqueuePreloadContacts()
+            }
+        }
+        .onChange(of: includePhotos) { enabled in
+            if enabled {
+                enqueuePreloadPhotos()
+            }
+        }
+        .onChange(of: includeVideos) { enabled in
+            if enabled {
+                enqueuePreloadVideos()
+            }
+        }
+        .onChange(of: includeCalendars) { enabled in
+            if enabled {
+                enqueueRefreshCalendars()
+            }
+        }
+        .onChange(of: includeReminders) { enabled in
+            if enabled {
+                enqueueRefreshReminders()
+            }
+        }
+        .onChange(of: includeDocuments) { enabled in
+            if enabled {
+                refreshAuthorizedSummary()
+            }
+        }
         .onChange(of: includeApps) { enabled in
             if enabled {
                 deselectedSenderAppIds.removeAll()
                 refreshSenderAppsCatalog()
+                preloadCategoryIcons()
             }
         }
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .active {
                 refreshAuthorizedSummary()
-                refreshSenderAppsCatalog()
+                if includeApps {
+                    refreshSenderAppsCatalog()
+                }
                 appInstaller.handleSceneBecameActive()
                 receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
                 if activeStep == .sendConnect {
@@ -394,22 +481,6 @@ struct DirectSwitchMainView: View {
             guard !clues.isEmpty else { return }
             mergeDetectedAppsIntoCatalog(clues)
         }
-        .sheet(isPresented: $showSenderAppsSheet) {
-            SenderAppsSelectionSheet(
-                appsCatalog: $senderAppsCatalog,
-                deselectedAppIds: $deselectedSenderAppIds,
-                verifiedLocalAppsCount: verifiedLocalAppsCount,
-                photoDiscoveredAppsCount: photoDetectedAppsCount,
-                isAndroidTarget: pairedTargetPayload?.receiverPlatform == .ANDROID,
-                appImportStatusNote: appImportStatusNote,
-                onRescanAutomaticApps: {
-                    refreshSenderAppsCatalog()
-                },
-                onResetAllCustomApps: {
-                    appImportStatusNote = nil
-                }
-            )
-        }
         .sheet(isPresented: $showProSheet) {
             DirectSwitchProPassSheet(
                 isProUnlocked: $isProUnlocked,
@@ -448,6 +519,7 @@ struct DirectSwitchMainView: View {
         manualCodeInput = ""
         showCameraScanner = false
         pairingErrorNote = nil
+        resetCategorySelectionsAndPreloads()
         transport.startUdpAutoDiscovery()
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .sendConnect
@@ -621,7 +693,13 @@ struct DirectSwitchMainView: View {
             activeStep = .transferProgress
         }
         let docsSnapshot = pickedDocuments
-        let appsSnapshot = includeApps ? selectedSenderApps : []
+        let appsSnapshot: [InstalledAppRecord] = includeApps
+            ? selectedSenderApps.filter {
+                paired.receiverPlatform != .ANDROID || !iOSInstalledAppsScanner.isGoogleAppPreinstalledOnAndroid($0)
+            }
+            : []
+        let calCutoff = calendarsUpToTodayOnly
+        let remCutoff = remindersUpToTodayOnly
         Task {
             await transport.executeSenderTransfer(
                 qrPayload: paired,
@@ -629,7 +707,9 @@ struct DirectSwitchMainView: View {
                 includePhotos: includePhotos,
                 includeVideos: includeVideos,
                 includeCalendars: includeCalendars,
+                calendarsUpToTodayOnly: calCutoff,
                 includeReminders: includeReminders,
+                remindersUpToTodayOnly: remCutoff,
                 includeDocuments: includeDocuments,
                 includeApps: includeApps,
                 includeWhatsAppVault: includeWhatsApp,
@@ -659,7 +739,185 @@ struct DirectSwitchMainView: View {
         }
     }
 
+    private func resetCategorySelectionsAndPreloads() {
+        categoryTaskQueue.cancelAll()
+        includeContacts = false
+        includePhotos = false
+        includeVideos = false
+        includeCalendars = false
+        includeReminders = false
+        includeDocuments = false
+        includeApps = false
+        includeWhatsApp = false
+        calendarsUpToTodayOnly = false
+        remindersUpToTodayOnly = false
+        contactsPreload = ContactsPreloadState()
+        photosPreload = PhotosPreloadState()
+        videosPreload = VideosPreloadState()
+        calendarsSync = DateSyncPreloadState()
+        remindersSync = DateSyncPreloadState()
+        appImportStatusNote = nil
+    }
+
+    private func enqueuePreloadContacts() {
+        contactsPreload.isLoading = true
+        contactsPreload.isCompleted = false
+        categoryTaskQueue.enqueue {
+            _ = await iOSContactsSmartMerger.requestAccessIfNeeded()
+            refreshAuthorizedSummary()
+            let total = await iOSContactsSmartMerger.preloadContactsCountWithProgress { loaded, tot in
+                Task { @MainActor in
+                    contactsPreload = ContactsPreloadState(
+                        loadedCount: loaded,
+                        totalCount: tot,
+                        isLoading: true,
+                        isCompleted: false
+                    )
+                }
+            }
+            contactsPreload = ContactsPreloadState(
+                loadedCount: total,
+                totalCount: total,
+                isLoading: false,
+                isCompleted: true
+            )
+            refreshAuthorizedSummary()
+        }
+    }
+
+    private func enqueuePreloadPhotos() {
+        photosPreload.isLoading = true
+        photosPreload.isCompleted = false
+        categoryTaskQueue.enqueue {
+            _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
+            refreshAuthorizedSummary()
+            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .image) { loaded, tot, live, albums, bytes in
+                Task { @MainActor in
+                    photosPreload = PhotosPreloadState(
+                        loadedCount: loaded,
+                        totalCount: tot,
+                        livePhotosCount: live,
+                        albumsCount: albums,
+                        estimatedBytes: bytes,
+                        isLoading: true,
+                        isCompleted: false
+                    )
+                }
+            }
+            photosPreload = PhotosPreloadState(
+                loadedCount: res.total,
+                totalCount: res.total,
+                livePhotosCount: res.liveCount,
+                albumsCount: res.albumsCount,
+                estimatedBytes: res.estimatedBytes,
+                isLoading: false,
+                isCompleted: true
+            )
+            refreshAuthorizedSummary()
+            if includeApps {
+                refreshSenderAppsCatalog()
+            }
+        }
+    }
+
+    private func enqueuePreloadVideos() {
+        videosPreload.isLoading = true
+        videosPreload.isCompleted = false
+        categoryTaskQueue.enqueue {
+            _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
+            refreshAuthorizedSummary()
+            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .video) { loaded, tot, _, _, bytes in
+                Task { @MainActor in
+                    videosPreload = VideosPreloadState(
+                        loadedCount: loaded,
+                        totalCount: tot,
+                        estimatedBytes: bytes,
+                        isLoading: true,
+                        isCompleted: false
+                    )
+                }
+            }
+            videosPreload = VideosPreloadState(
+                loadedCount: res.total,
+                totalCount: res.total,
+                estimatedBytes: res.estimatedBytes,
+                isLoading: false,
+                isCompleted: true
+            )
+            refreshAuthorizedSummary()
+        }
+    }
+
+    private func enqueueRefreshCalendars() {
+        calendarsSync.isLoading = true
+        categoryTaskQueue.enqueue {
+            _ = await iOSCalendarMigrator.requestAccessIfNeeded()
+            let now = Date()
+            let (allCount, upToTodayCount) = await Task.detached(priority: .userInitiated) {
+                (
+                    iOSCalendarMigrator.readEvents(upToDate: nil).count,
+                    iOSCalendarMigrator.readEvents(upToDate: now).count
+                )
+            }.value
+            calendarsSync = DateSyncPreloadState(
+                totalAllCount: allCount,
+                totalUpToTodayCount: upToTodayCount,
+                lastUpdatedAt: Date(),
+                isLoading: false
+            )
+            refreshAuthorizedSummary()
+        }
+    }
+
+    private func enqueueRefreshReminders() {
+        remindersSync.isLoading = true
+        categoryTaskQueue.enqueue {
+            _ = await iOSRemindersMigrator.requestAccessIfNeeded()
+            let now = Date()
+            let allList = await iOSRemindersMigrator.readReminders(upToDate: nil)
+            let upToTodayList = await iOSRemindersMigrator.readReminders(upToDate: now)
+            remindersSync = DateSyncPreloadState(
+                totalAllCount: allList.count,
+                totalUpToTodayCount: upToTodayList.count,
+                lastUpdatedAt: Date(),
+                isLoading: false
+            )
+            let staged = pickedDocuments.map(\.0)
+            let remCount = allList.count
+            let (summary, precheck) = await Task.detached(priority: .utility) {
+                (
+                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged, knownRemindersCount: remCount),
+                    iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
+                )
+            }.value
+            scanSummary = summary
+            documentPrecheckReport = precheck
+        }
+    }
+
+    private func requestPhotoLibraryAndRescanApps() {
+        categoryTaskQueue.enqueue {
+            _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
+            refreshAuthorizedSummary()
+            refreshSenderAppsCatalog()
+        }
+    }
+
+    private func preloadCategoryIcons() {
+        let isAndroid = pairedTargetPayload?.receiverPlatform == .ANDROID
+        let categories = iOSInstalledAppsScanner.curatedCategories.filter {
+            !isAndroid || !$0.isGoogleAndroidPreinstalledCategory
+        }
+        Task {
+            let icons = await iOSAppStoreCatalogResolver.fetchIconsForCategories(categories)
+            if !icons.isEmpty {
+                categoryIconOverrides.merge(icons) { _, new in new }
+            }
+        }
+    }
+
     private func refreshSenderAppsCatalog() {
+        isLoadingAppsCatalog = true
         let quickProbes = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly()
         verifiedLocalAppsCount = quickProbes.count
         let initialDetected = iOSInstalledAppsScanner.scanLocallyInstalledApps()
@@ -676,6 +934,7 @@ struct DirectSwitchMainView: View {
             if !enriched.isEmpty {
                 self.senderAppsCatalog = enriched
             }
+            isLoadingAppsCatalog = false
         }
     }
 
@@ -708,46 +967,66 @@ struct DirectSwitchMainView: View {
         }.count
     }
 
-    private func toggleQuickCategoryOnSender(_ category: AppQuickCategory) {
-        let allSelected = !category.apps.isEmpty && category.apps.allSatisfy { item in
-            senderAppsCatalog.contains {
-                ($0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
-                    || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId))
-                    && !deselectedSenderAppIds.contains($0.id)
-            }
+    private func matchingCatalogApp(for target: InstalledAppRecord) -> InstalledAppRecord? {
+        senderAppsCatalog.first {
+            $0.packageName.caseInsensitiveCompare(target.packageName) == .orderedSame
+                || ($0.appStoreId != nil && $0.appStoreId == target.appStoreId)
         }
-        if allSelected {
+    }
+
+    private func toggleCatalogAppSelection(_ app: InstalledAppRecord) {
+        if deselectedSenderAppIds.contains(app.id) {
+            deselectedSenderAppIds.remove(app.id)
+        } else {
+            deselectedSenderAppIds.insert(app.id)
+        }
+    }
+
+    private func toggleCategorySingleApp(_ item: InstalledAppRecord, isCurrentlySelected: Bool) {
+        if isCurrentlySelected {
+            if let existing = matchingCatalogApp(for: item) {
+                deselectedSenderAppIds.insert(existing.id)
+            }
+            appImportStatusNote = nil
+        } else {
+            addAppsToSenderCatalog([item])
+        }
+    }
+
+    private func toggleCategoryAllApps(_ category: AppQuickCategory, currentlyAllSelected: Bool) {
+        if currentlyAllSelected {
             for item in category.apps {
-                if let existing = senderAppsCatalog.first(where: {
-                    $0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
-                        || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId)
-                }) {
+                if let existing = matchingCatalogApp(for: item) {
                     deselectedSenderAppIds.insert(existing.id)
                 }
             }
             appImportStatusNote = nil
         } else {
-            var newlyAdded: [InstalledAppRecord] = []
-            for item in category.apps {
-                if let existing = senderAppsCatalog.first(where: {
-                    $0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
-                        || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId)
-                }) {
-                    deselectedSenderAppIds.remove(existing.id)
-                } else {
-                    senderAppsCatalog.append(item)
-                    deselectedSenderAppIds.remove(item.id)
-                    newlyAdded.append(item)
+            addAppsToSenderCatalog(category.apps)
+            appImportStatusNote = "Categoria «\(category.title)» selezionata (\(category.apps.count) app)."
+        }
+    }
+
+    private func addAppsToSenderCatalog(_ incomingApps: [InstalledAppRecord]) {
+        var newlyAdded: [InstalledAppRecord] = []
+        for item in incomingApps {
+            if let existing = matchingCatalogApp(for: item) {
+                deselectedSenderAppIds.remove(existing.id)
+            } else {
+                var seeded = item
+                if seeded.iconUrl == nil, let icon = categoryIconOverrides[item.packageName.lowercased()] {
+                    seeded.iconUrl = icon
                 }
+                senderAppsCatalog.append(seeded)
+                deselectedSenderAppIds.remove(seeded.id)
+                newlyAdded.append(seeded)
             }
-            if !newlyAdded.isEmpty {
-                iOSInstalledAppsScanner.appendCustomApps(newlyAdded)
-                Task {
-                    let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(newlyAdded)
-                    mergeDetectedAppsIntoCatalog(enriched)
-                }
-            }
-            appImportStatusNote = "✓ Categoria «\(category.title)» selezionata (\(category.apps.count) app)."
+        }
+        guard !newlyAdded.isEmpty else { return }
+        iOSInstalledAppsScanner.appendCustomApps(newlyAdded)
+        Task {
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(newlyAdded)
+            mergeDetectedAppsIntoCatalog(enriched)
         }
     }
 
@@ -758,23 +1037,6 @@ struct DirectSwitchMainView: View {
         senderAppsCatalog = []
         photoDetectedAppsCount = 0
         refreshSenderAppsCatalog()
-    }
-
-    private func scanExactDeviceCounts() {
-        isScanningDevice = true
-        let staged = pickedDocuments.map(\.0)
-        Task {
-            async let summaryTask = iOSDeviceDataAnalyzer.requestPermissionsAndScanAll(stagedItems: staged)
-            async let precheckTask = Task.detached(priority: .utility) {
-                iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
-            }.value
-            let (summary, precheck) = await (summaryTask, precheckTask)
-            scanSummary = summary
-            documentPrecheckReport = precheck
-            isScanningDevice = false
-            // Ora che Foto è autorizzata, rileva subito anche eventuali app da Album/Metadati Foto
-            refreshSenderAppsCatalog()
-        }
     }
 
     private func refreshAuthorizedSummary() {
@@ -847,6 +1109,7 @@ struct DirectSwitchMainView: View {
         selectedBeacon = nil
         pinCodeInput = ""
         pairingErrorNote = nil
+        resetCategorySelectionsAndPreloads()
         appInstaller.reset()
         transport.resetSession()
         withAnimation(.easeInOut(duration: 0.22)) {

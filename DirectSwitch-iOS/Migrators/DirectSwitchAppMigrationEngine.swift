@@ -44,6 +44,7 @@ private actor AppStoreMetadataCache {
     static let shared = AppStoreMetadataCache()
 
     private var byBundleId: [String: (trackId: Int, iconUrl: String?, trackName: String)] = [:]
+    private var byStoreId: [Int: String] = [:]
     private var byNormalizedName: [String: InstalledAppRecord] = [:]
 
     func getByBundle(_ bundleId: String) -> (trackId: Int, iconUrl: String?, trackName: String)? {
@@ -52,6 +53,17 @@ private actor AppStoreMetadataCache {
 
     func setByBundle(_ bundleId: String, trackId: Int, iconUrl: String?, trackName: String) {
         byBundleId[bundleId.lowercased()] = (trackId, iconUrl, trackName)
+        if let iconUrl, !iconUrl.isEmpty {
+            byStoreId[trackId] = iconUrl
+        }
+    }
+
+    func getIconByStoreId(_ trackId: Int) -> String? {
+        byStoreId[trackId]
+    }
+
+    func setIconByStoreId(_ trackId: Int, iconUrl: String) {
+        byStoreId[trackId] = iconUrl
     }
 
     func getByName(_ name: String) -> InstalledAppRecord? {
@@ -178,8 +190,31 @@ enum iOSInstalledAppsScanner {
     ]
 
     /// Categorie curate italiane ed europee con Bundle ID e App Store ID verificati su App Store Italia,
-    /// selezionabili con 1 tocco in `SenderAppsSelectionSheet` (zero attese e zero fotocamera).
+    /// selezionabili nella tendina stile iPhone (icona + nome) con zero attese e zero fotocamera.
     static let curatedCategories: [AppQuickCategory] = [
+        AppQuickCategory(
+            id: "social_messaging",
+            title: "Social & Messaggi",
+            iconName: "bubble.left.and.bubble.right.fill",
+            apps: [
+                InstalledAppRecord(packageName: "net.whatsapp.WhatsApp", appName: "WhatsApp Messenger", appStoreId: 310633997, urlScheme: "whatsapp-consumer", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "net.whatsapp.WhatsAppSMB", appName: "WhatsApp Business", appStoreId: 1386412985, urlScheme: "whatsapp-smb", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.burbn.instagram", appName: "Instagram", appStoreId: 389801252, urlScheme: "instagram", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "ph.telegra.Telegraph", appName: "Telegram Messenger", appStoreId: 686449807, urlScheme: "tg", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.facebook.Facebook", appName: "Facebook", appStoreId: 284882215, urlScheme: "fb", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.facebook.Messenger", appName: "Messenger", appStoreId: 454638411, urlScheme: "fb-messenger", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.zhiliaoapp.musically", appName: "TikTok", appStoreId: 835599320, urlScheme: "tiktok", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.burbn.barcelona", appName: "Threads", appStoreId: 6446901002, urlScheme: "barcelona", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.atebits.Tweetie2", appName: "X", appStoreId: 333903271, urlScheme: "twitter", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.linkedin.LinkedIn", appName: "LinkedIn", appStoreId: 288429040, urlScheme: "linkedin", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.toyopagroup.picaboo", appName: "Snapchat", appStoreId: 447188370, urlScheme: "snapchat", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "pinterest", appName: "Pinterest", appStoreId: 429047995, urlScheme: "pinterest", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.reddit.Reddit", appName: "Reddit", appStoreId: 1064216828, urlScheme: "reddit", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.hammerandchisel.discord", appName: "Discord", appStoreId: 985746746, urlScheme: "discord", detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "org.whispersystems.signal", appName: "Signal", appStoreId: 874139669, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.viber", appName: "Viber", appStoreId: 382617920, detectionSource: "Categoria Social")
+            ]
+        ),
         AppQuickCategory(
             id: "banks_payments",
             title: "Banche & Pagamenti",
@@ -191,6 +226,7 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.intesasanpaolo.isybank.mobile", appName: "Isybank", appStoreId: 1666218772, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.fineco.fineco", appName: "Fineco", appStoreId: 405225581, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.bbva.italy", appName: "BBVA Italia", appStoreId: 1536949050, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.ing.app.OneApp", appName: "ING Italia", appStoreId: 6479606116, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.bper.mobilebanking", appName: "BPER Banca", appStoreId: 554965344, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.bancamediolanum.imedfullclient", appName: "Banca Mediolanum", appStoreId: 412610547, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.caitalia.apphub", appName: "Crédit Agricole Italia", appStoreId: 1502700297, detectionSource: "Categoria Banche"),
@@ -204,31 +240,39 @@ enum iOSInstalledAppsScanner {
         ),
         AppQuickCategory(
             id: "spid_office",
-            title: "SPID, CIE & Ufficio",
+            title: "SPID, CIE & Lavoro",
             iconName: "person.text.rectangle.fill",
             apps: [
                 InstalledAppRecord(packageName: "it.pagopa.app.io", appName: "IO", appStoreId: 1501681835, urlScheme: "ioit", detectionSource: "Categoria SPID/PA"),
                 InstalledAppRecord(packageName: "it.ipzs.cieID", appName: "CieID", appStoreId: 1504644677, urlScheme: "cieid", detectionSource: "Categoria SPID/PA"),
                 InstalledAppRecord(packageName: "it.poste.postebuy2", appName: "PosteID", appStoreId: 649492675, urlScheme: "posteid", detectionSource: "Categoria SPID/PA"),
                 InstalledAppRecord(packageName: "it.aruba.mobilepec", appName: "Aruba PEC", appStoreId: 973510245, detectionSource: "Categoria SPID/PA"),
-                InstalledAppRecord(packageName: "com.adobe.scan.ios", appName: "Adobe Scan", appStoreId: 1199564834, detectionSource: "Categoria SPID/PA"),
-                InstalledAppRecord(packageName: "com.intsig.CamScanner", appName: "CamScanner", appStoreId: 388624839, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "com.microsoft.Office.Outlook", appName: "Microsoft Outlook", appStoreId: 951937596, urlScheme: "ms-outlook", detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.microsoft.skype.teams", appName: "Microsoft Teams", appStoreId: 1113153706, urlScheme: "msteams", detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "us.zoom.videomeetings", appName: "Zoom Workplace", appStoreId: 546505307, urlScheme: "zoomus", detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.Office.Word", appName: "Microsoft Word", appStoreId: 586447913, detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.Office.Excel", appName: "Microsoft Excel", appStoreId: 586683407, detectionSource: "Categoria Ufficio"),
-                InstalledAppRecord(packageName: "com.microsoft.skydrive", appName: "Microsoft OneDrive", appStoreId: 477537958, detectionSource: "Categoria Ufficio")
+                InstalledAppRecord(packageName: "com.microsoft.Office.Powerpoint", appName: "Microsoft PowerPoint", appStoreId: 586449534, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.microsoft.skydrive", appName: "Microsoft OneDrive", appStoreId: 477537958, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.getdropbox.Dropbox", appName: "Dropbox", appStoreId: 327630330, urlScheme: "dbapi-2", detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.tinyspeck.chatlyio", appName: "Slack", appStoreId: 618783545, urlScheme: "slack", detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.adobe.scan.ios", appName: "Adobe Scan", appStoreId: 1199564834, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.intsig.CamScanner", appName: "CamScanner", appStoreId: 388624839, detectionSource: "Categoria Ufficio")
             ]
         ),
         AppQuickCategory(
             id: "transport_travel",
-            title: "Trasporti & Viaggi",
+            title: "Trasporti, Auto & Viaggi",
             iconName: "tram.fill",
             apps: [
                 InstalledAppRecord(packageName: "com.promptu.ProntoTreno", appName: "Trenitalia", appStoreId: 331050847, urlScheme: "trenitalia", detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "com.accenture.ntvapp", appName: "Italo Treno", appStoreId: 804056898, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "it.telepass", appName: "Telepass", appStoreId: 454224356, urlScheme: "telepass", detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "it.unipolsai.move", appName: "UnipolMove", appStoreId: 1609074315, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "net.pluservice.myCicero", appName: "MooneyGo", appStoreId: 595700208, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "net.easypark.app", appName: "EasyPark", appStoreId: 449594317, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "com.ryanair.cheapflights", appName: "Ryanair", appStoreId: 504270602, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "ur7OWf.mobile", appName: "ITA Airways", appStoreId: 1589844779, detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "com.booking.BookingApp", appName: "Booking.com", appStoreId: 367003839, urlScheme: "booking", detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "com.airbnb.app", appName: "Airbnb", appStoreId: 401626263, urlScheme: "airbnb", detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "com.ubercab.UberClient", appName: "Uber", appStoreId: 368677368, urlScheme: "uber", detectionSource: "Categoria Trasporti"),
@@ -237,18 +281,39 @@ enum iOSInstalledAppsScanner {
         ),
         AppQuickCategory(
             id: "shopping_food",
-            title: "Shopping & Cibo",
+            title: "Shopping, Spesa & Cibo",
             iconName: "bag.fill",
             apps: [
                 InstalledAppRecord(packageName: "com.amazon.AmazonIT", appName: "Amazon Shopping", appStoreId: 297606951, urlScheme: "com.amazon.mobile.shopping", detectionSource: "Categoria Shopping"),
-                InstalledAppRecord(packageName: "com.glovo.glovo", appName: "Glovo", appStoreId: 951812684, detectionSource: "Categoria Cibo"),
-                InstalledAppRecord(packageName: "com.deliveroo.orderapp", appName: "Deliveroo", appStoreId: 1001501844, detectionSource: "Categoria Cibo"),
-                InstalledAppRecord(packageName: "com.justeat.JUSTEAT", appName: "Just Eat", appStoreId: 566347057, detectionSource: "Categoria Cibo"),
                 InstalledAppRecord(packageName: "com.einnovation.temu", appName: "Temu", appStoreId: 1641486558, urlScheme: "temu", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "zzkko.com.ZZKKO", appName: "SHEIN", appStoreId: 878577184, urlScheme: "shein", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "com.subito.subito", appName: "Subito", appStoreId: 450775137, urlScheme: "subito", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "lt.manodrabuziai.fr", appName: "Vinted", appStoreId: 632064380, urlScheme: "vinted", detectionSource: "Categoria Shopping"),
-                InstalledAppRecord(packageName: "com.ebay.iphone", appName: "eBay", appStoreId: 282614216, urlScheme: "ebay", detectionSource: "Categoria Shopping")
+                InstalledAppRecord(packageName: "com.ebay.iphone", appName: "eBay", appStoreId: 282614216, urlScheme: "ebay", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "it.esselunga.mobile.esselunga", appName: "Esselunga", appStoreId: 472618543, detectionSource: "Categoria Spesa"),
+                InstalledAppRecord(packageName: "com.lidl.eci.lidl.plus", appName: "Lidl Plus", appStoreId: 1238611143, detectionSource: "Categoria Spesa"),
+                InstalledAppRecord(packageName: "com.glovo.glovo", appName: "Glovo", appStoreId: 951812684, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.deliveroo.orderapp", appName: "Deliveroo", appStoreId: 1001501844, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.justeat.JUSTEAT", appName: "Just Eat", appStoreId: 566347057, detectionSource: "Categoria Cibo")
+            ]
+        ),
+        AppQuickCategory(
+            id: "music_streaming",
+            title: "Musica, Video & Streaming",
+            iconName: "play.tv.fill",
+            apps: [
+                InstalledAppRecord(packageName: "com.spotify.client", appName: "Spotify", appStoreId: 324684580, urlScheme: "spotify", detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.shazam.Shazam", appName: "Shazam", appStoreId: 284993459, urlScheme: "shazam", detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.apple.Music", appName: "Apple Music", appStoreId: 1108187390, detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.netflix.Netflix", appName: "Netflix", appStoreId: 363590051, urlScheme: "nflx", detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.amazon.aiv.AIVApp", appName: "Amazon Prime Video", appStoreId: 545519333, urlScheme: "aiv", detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.disney.disneyplus", appName: "Disney+", appStoreId: 1446075923, urlScheme: "disneyplus", detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.dazn.theApp", appName: "DAZN", appStoreId: 1129523589, urlScheme: "dazn", detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "it.rainet.ipad.raitv", appName: "RaiPlay", appStoreId: 501323740, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "it.mediaset.video.iphone", appName: "Mediaset Infinity", appStoreId: 412625083, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "it.sky.skygoitalia", appName: "Sky Go", appStoreId: 454435005, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.nowtv.it", appName: "NOW", appStoreId: 1377753603, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "tv.twitch", appName: "Twitch", appStoreId: 460177396, urlScheme: "twitch", detectionSource: "Categoria Streaming")
             ]
         ),
         AppQuickCategory(
@@ -257,6 +322,7 @@ enum iOSInstalledAppsScanner {
             iconName: "camera.aperture",
             apps: [
                 InstalledAppRecord(packageName: "com.lemon.lvoverseas", appName: "CapCut", appStoreId: 1500855883, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.canva.canvaeditor", appName: "Canva", appStoreId: 897446215, urlScheme: "canva", detectionSource: "Categoria Foto & Video"),
                 InstalledAppRecord(packageName: "com.camerasideas.InstaShot", appName: "InShot", appStoreId: 997362197, detectionSource: "Categoria Foto & Video"),
                 InstalledAppRecord(packageName: "com.adobe.lrmobilephone", appName: "Lightroom", appStoreId: 878783582, detectionSource: "Categoria Foto & Video"),
                 InstalledAppRecord(packageName: "com.niksoftware.snapseedforipad", appName: "Snapseed", appStoreId: 439438619, detectionSource: "Categoria Foto & Video"),
@@ -273,37 +339,27 @@ enum iOSInstalledAppsScanner {
             ]
         ),
         AppQuickCategory(
-            id: "operators_home",
-            title: "Operatori, Utenze & Casa",
+            id: "operators_home_ai",
+            title: "Operatori, Casa, AI & Sicurezza",
             iconName: "house.fill",
             apps: [
                 InstalledAppRecord(packageName: "it.telecomitalia.119SelfService", appName: "MyTIM", appStoreId: 378783815, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "com.vodafone.my190", appName: "My Vodafone", appStoreId: 365804068, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "it.wind.mywind", appName: "WINDTRE", appStoreId: 492519547, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "it.iliad.customer", appName: "iliad", appStoreId: 6739246132, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "com.enel.energia", appName: "Enel Energia", appStoreId: 767368903, detectionSource: "Categoria Utenze"),
                 InstalledAppRecord(packageName: "com.eni.EniAutoletturaGas", appName: "Eni Plenitude", appStoreId: 454695340, detectionSource: "Categoria Utenze"),
                 InstalledAppRecord(packageName: "com.tplink.tapo", appName: "TP-Link Tapo", appStoreId: 1472718009, detectionSource: "Categoria Casa"),
                 InstalledAppRecord(packageName: "com.hikvision.ezviz", appName: "EZVIZ", appStoreId: 886947564, detectionSource: "Categoria Casa"),
-                InstalledAppRecord(packageName: "cloud.shelly.app", appName: "Shelly Smart Control", appStoreId: 1660045967, detectionSource: "Categoria Casa")
-            ]
-        ),
-        AppQuickCategory(
-            id: "streaming_ai_tools",
-            title: "Streaming, TV, AI & Sicurezza",
-            iconName: "tv.fill",
-            apps: [
-                InstalledAppRecord(packageName: "it.rainet.ipad.raitv", appName: "RaiPlay", appStoreId: 501323740, detectionSource: "Categoria Streaming"),
-                InstalledAppRecord(packageName: "it.mediaset.video.iphone", appName: "Mediaset Infinity", appStoreId: 412625083, detectionSource: "Categoria Streaming"),
-                InstalledAppRecord(packageName: "it.sky.skygoitalia", appName: "Sky Go", appStoreId: 454435005, detectionSource: "Categoria Streaming"),
-                InstalledAppRecord(packageName: "com.nowtv.it", appName: "NOW", appStoreId: 1377753603, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "cloud.shelly.app", appName: "Shelly Smart Control", appStoreId: 1660045967, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.openai.chat", appName: "ChatGPT", appStoreId: 6448311069, urlScheme: "chatgpt", detectionSource: "Categoria AI"),
                 InstalledAppRecord(packageName: "com.google.gemini", appName: "Google Gemini", appStoreId: 6477489729, detectionSource: "Categoria AI"),
                 InstalledAppRecord(packageName: "com.anthropic.claude", appName: "Claude", appStoreId: 6473753684, detectionSource: "Categoria AI"),
                 InstalledAppRecord(packageName: "ai.perplexity.app", appName: "Perplexity", appStoreId: 1668000334, detectionSource: "Categoria AI"),
+                InstalledAppRecord(packageName: "com.google.Authenticator", appName: "Google Authenticator", appStoreId: 388497605, urlScheme: "googleauthenticator", detectionSource: "Categoria Sicurezza"),
                 InstalledAppRecord(packageName: "com.nordvpn.NordVPN", appName: "NordVPN", appStoreId: 905953485, detectionSource: "Categoria Sicurezza"),
                 InstalledAppRecord(packageName: "ch.protonmail.protonmail", appName: "Proton Mail", appStoreId: 979659905, detectionSource: "Categoria Sicurezza"),
-                InstalledAppRecord(packageName: "com.duolingo.DuolingoMobile", appName: "Duolingo", appStoreId: 570060128, detectionSource: "Categoria Studio"),
-                InstalledAppRecord(packageName: "org.whispersystems.signal", appName: "Signal", appStoreId: 874139669, detectionSource: "Categoria Messaggi"),
-                InstalledAppRecord(packageName: "com.viber", appName: "Viber", appStoreId: 382617920, detectionSource: "Categoria Messaggi")
+                InstalledAppRecord(packageName: "com.duolingo.DuolingoMobile", appName: "Duolingo", appStoreId: 570060128, detectionSource: "Categoria Studio")
             ]
         ),
         AppQuickCategory(
@@ -1792,25 +1848,10 @@ enum iOSAppStoreCatalogResolver {
         let missingIconIds = Array(Set(
             working.compactMap { $0.iconUrl == nil ? $0.appStoreId : nil }
         ))
-        offset = 0
-        while offset < missingIconIds.count {
-            let chunk = Array(missingIconIds[offset..<min(offset + batchSize, missingIconIds.count)])
-            offset += batchSize
-            let joined = chunk.map(String.init).joined(separator: ",")
-            if let url = URL(string: "https://itunes.apple.com/lookup?id=\(joined)&country=it") {
-                var req = URLRequest(url: url, timeoutInterval: 6.0)
-                req.httpMethod = "GET"
-                if let (data, resp) = try? await URLSession.shared.data(for: req),
-                   (resp as? HTTPURLResponse)?.statusCode == 200,
-                   let parsed = try? JSONDecoder().decode(ITunesLookupResponse.self, from: data) {
-                    for entry in parsed.results {
-                        guard let tId = entry.trackId else { continue }
-                        let cleanIcon = sanitizeIconUrl(entry.artworkUrl100)
-                        for idx in working.indices where working[idx].appStoreId == tId {
-                            if let cleanIcon { working[idx].iconUrl = cleanIcon }
-                        }
-                    }
-                }
+        let iconsByStoreId = await lookupArtworkUrlsByStoreIds(missingIconIds)
+        for idx in working.indices {
+            if working[idx].iconUrl == nil, let sid = working[idx].appStoreId, let cleanIcon = iconsByStoreId[sid] {
+                working[idx].iconUrl = cleanIcon
             }
         }
 
@@ -1829,6 +1870,92 @@ enum iOSAppStoreCatalogResolver {
         }
 
         return working
+    }
+
+    /// Recupera e memorizza in cache le icone ufficiali App Store per tutte le app delle categorie estese.
+    static func fetchIconsForCategories(_ categories: [AppQuickCategory]) async -> [String: String] {
+        var resolvedByBundle: [String: String] = [:]
+        var storeIdsToFetch: [Int] = []
+        var bundleByStoreId: [Int: [String]] = [:]
+
+        for cat in categories {
+            for app in cat.apps {
+                let bKey = app.packageName.lowercased()
+                if let existing = app.iconUrl, !existing.isEmpty {
+                    resolvedByBundle[bKey] = existing
+                    continue
+                }
+                if let sid = app.appStoreId {
+                    if let cachedIcon = await AppStoreMetadataCache.shared.getIconByStoreId(sid) {
+                        resolvedByBundle[bKey] = cachedIcon
+                    } else {
+                        storeIdsToFetch.append(sid)
+                        bundleByStoreId[sid, default: []].append(bKey)
+                    }
+                }
+            }
+        }
+
+        let uniqueIds = Array(Set(storeIdsToFetch))
+        if !uniqueIds.isEmpty {
+            let fetched = await lookupArtworkUrlsByStoreIds(uniqueIds)
+            for (sid, icon) in fetched {
+                for bKey in bundleByStoreId[sid] ?? [] {
+                    resolvedByBundle[bKey] = icon
+                }
+            }
+        }
+        return resolvedByBundle
+    }
+
+    private static func lookupArtworkUrlsByStoreIds(_ storeIds: [Int]) async -> [Int: String] {
+        guard !storeIds.isEmpty else { return [:] }
+        var out: [Int: String] = [:]
+        var pending: [Int] = []
+        for sid in storeIds {
+            if let cached = await AppStoreMetadataCache.shared.getIconByStoreId(sid) {
+                out[sid] = cached
+            } else {
+                pending.append(sid)
+            }
+        }
+        let batchSize = 20
+        var chunks: [[Int]] = []
+        var offset = 0
+        while offset < pending.count {
+            chunks.append(Array(pending[offset..<min(offset + batchSize, pending.count)]))
+            offset += batchSize
+        }
+        await withTaskGroup(of: [(Int, String)].self) { group in
+            for chunk in chunks {
+                group.addTask {
+                    let joined = chunk.map(String.init).joined(separator: ",")
+                    guard let url = URL(string: "https://itunes.apple.com/lookup?id=\(joined)&country=it") else {
+                        return []
+                    }
+                    var req = URLRequest(url: url, timeoutInterval: 6.0)
+                    req.httpMethod = "GET"
+                    guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                          (resp as? HTTPURLResponse)?.statusCode == 200,
+                          let parsed = try? JSONDecoder().decode(ITunesLookupResponse.self, from: data) else {
+                        return []
+                    }
+                    var chunkPairs: [(Int, String)] = []
+                    for entry in parsed.results {
+                        guard let tId = entry.trackId, let clean = sanitizeIconUrl(entry.artworkUrl100) else { continue }
+                        chunkPairs.append((tId, clean))
+                    }
+                    return chunkPairs
+                }
+            }
+            for await pairs in group {
+                for (tId, clean) in pairs {
+                    out[tId] = clean
+                    await AppStoreMetadataCache.shared.setIconByStoreId(tId, iconUrl: clean)
+                }
+            }
+        }
+        return out
     }
 
     /// Normalizza un titolo rimuovendo accenti e punteggiatura superflua (mantenendo `+` e `&` per nomi come `Disney+` e `H&M`).

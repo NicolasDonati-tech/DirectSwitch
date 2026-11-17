@@ -1349,4 +1349,55 @@ final class DirectSwitchTests: XCTestCase {
             InstalledAppRecord(packageName: "com.google.Gmail", appName: "Gmail")
         ))
     }
+
+    func testExtendedCuratedCategoriesUniquenessAndDocumentPresets() async throws {
+        // 1. Verifica che tutte le 9 categorie estese non abbiano duplicati di Bundle ID né App Store ID
+        let allCategories = iOSInstalledAppsScanner.curatedCategories
+        XCTAssertGreaterThanOrEqual(allCategories.count, 9)
+        XCTAssertTrue(allCategories.contains { $0.id == "social_messaging" })
+        XCTAssertTrue(allCategories.contains { $0.id == "music_streaming" })
+
+        var seenBundles: Set<String> = []
+        var seenStoreIds: Set<Int> = []
+        for cat in allCategories {
+            for app in cat.apps {
+                XCTAssertTrue(
+                    seenBundles.insert(app.packageName.lowercased()).inserted,
+                    "Duplicate bundleId across categories: \(app.packageName)"
+                )
+                if let sid = app.appStoreId {
+                    XCTAssertTrue(
+                        seenStoreIds.insert(sid).inserted,
+                        "Duplicate appStoreId across categories: \(sid) (\(app.appName))"
+                    )
+                }
+            }
+        }
+
+        // 2. Classificazione posizioni predefinite iPhone (iCloud Drive, Su iPhone, Chrome) + altre posizioni utente
+        let icloudSummary = iOSDocumentLocationSummary(locationId: "pos:/var/mobile/Library/Mobile Documents/com~apple~CloudDocs", locationName: "iCloud Drive", folderCount: 30, fileCount: 412, totalBytes: 120_000_000)
+        let onIphoneSummary = iOSDocumentLocationSummary(locationId: "pos:/var/mobile/Containers/Shared/AppGroup/File Provider Storage", locationName: "Su iPhone", folderCount: 12, fileCount: 85, totalBytes: 42_000_000)
+        let chromeSummary = iOSDocumentLocationSummary(locationId: "pos:/var/mobile/File Provider Storage/Chrome", locationName: "Su iPhone • Chrome", folderCount: 3, fileCount: 14, totalBytes: 8_000_000)
+        let chromeDirectSummary = iOSDocumentLocationSummary(locationId: "pos:/tmp/Chrome", locationName: "Chrome", folderCount: 2, fileCount: 5, totalBytes: 1_500_000)
+        let customUsbSummary = iOSDocumentLocationSummary(locationId: "pos:/Volumes/SanDisk", locationName: "SanDisk USB", folderCount: 4, fileCount: 19, totalBytes: 9_000_000)
+
+        XCTAssertEqual(iOSDocumentPresetKind.match(for: icloudSummary), .iCloudDrive)
+        XCTAssertEqual(iOSDocumentPresetKind.match(for: onIphoneSummary), .onMyIPhone)
+        XCTAssertEqual(iOSDocumentPresetKind.match(for: chromeSummary), .chrome)
+        XCTAssertEqual(iOSDocumentPresetKind.match(for: chromeDirectSummary), .chrome)
+        XCTAssertNil(iOSDocumentPresetKind.match(for: customUsbSummary))
+
+        let chromeLabel = iOSDocumentsSandboxBridge.displayPositionLabel(
+            for: URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/File Provider Storage/Chrome", isDirectory: true),
+            isDirectory: true
+        )
+        XCTAssertEqual(chromeLabel, "Chrome")
+
+        // 3. Modelli preload / sync data odierna
+        let contactsState = ContactsPreloadState(loadedCount: 250, totalCount: 250, isLoading: false, isCompleted: true)
+        XCTAssertEqual(contactsState.loadedCount, contactsState.totalCount)
+        XCTAssertTrue(iOSCalendarMigrator.readEvents(upToDate: Date()).isEmpty || iOSCalendarMigrator.isAuthorized())
+        let remindersCheck = await iOSRemindersMigrator.readReminders(upToDate: Date())
+        XCTAssertTrue(remindersCheck.isEmpty || iOSRemindersMigrator.isAuthorized())
+    }
 }

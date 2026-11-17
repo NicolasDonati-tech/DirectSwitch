@@ -514,39 +514,56 @@ private struct WiFiShareQrSheetView: View {
     }
 }
 
-// MARK: - Passo 2 Mittente: Scegli cosa copiare (stile "Passa a Android" + "CloudSave")
+// MARK: - Passo 2 Mittente: Scegli cosa copiare (tendine inline stile iPhone, tutto da spuntare)
 
 struct SendCategoriesStepView: View {
     let pairedPayload: QrPairingPayload
     let scanSummary: iOSLocalDeviceScanSummary?
-    let isScanningDevice: Bool
     let isLocalProUnlocked: Bool
     let pickedDocuments: [(ManifestItem, URL)]
     let documentPrecheck: iOSDocumentsPrecheckReport?
     var isLoadingPositions: Bool = false
-    let selectedAppsCount: Int
-    let totalDetectedAppsCount: Int
-    let selectedAppsPreview: [InstalledAppRecord]
+
+    let contactsPreload: ContactsPreloadState
+    let photosPreload: PhotosPreloadState
+    let videosPreload: VideosPreloadState
+    let calendarsSync: DateSyncPreloadState
+    let remindersSync: DateSyncPreloadState
+
+    let senderAppsCatalog: [InstalledAppRecord]
+    let deselectedSenderAppIds: Set<String>
     let verifiedLocalAppsCount: Int
     let photoDetectedAppsCount: Int
     let selectedBundleIdsSet: Set<String>
+    let selectedStoreIdsSet: Set<Int>
+    let categoryIconOverrides: [String: String]
+    let isLoadingAppsCatalog: Bool
     let appImportStatusNote: String?
 
     @Binding var includeContacts: Bool
     @Binding var includePhotos: Bool
     @Binding var includeVideos: Bool
     @Binding var includeCalendars: Bool
+    @Binding var calendarsUpToTodayOnly: Bool
     @Binding var includeReminders: Bool
+    @Binding var remindersUpToTodayOnly: Bool
     @Binding var includeDocuments: Bool
     @Binding var includeApps: Bool
     @Binding var includeWhatsApp: Bool
 
-    var onScanExactCounts: () -> Void
-    var onToggleQuickCategory: (AppQuickCategory) -> Void
-    var onResetAppsToZero: (() -> Void)? = nil
-    var onManageApps: () -> Void
+    var onPreloadContacts: () -> Void
+    var onPreloadPhotos: () -> Void
+    var onPreloadVideos: () -> Void
+    var onRefreshCalendars: () -> Void
+    var onRefreshReminders: () -> Void
+    var onToggleCatalogApp: (InstalledAppRecord) -> Void
+    var onToggleCategoryAllApps: (AppQuickCategory, Bool) -> Void
+    var onToggleCategorySingleApp: (InstalledAppRecord, Bool) -> Void
+    var onAddSearchApp: (InstalledAppRecord) -> Void
+    var onRescanAutomaticApps: () -> Void
+    var onRequestPhotoScanForApps: () -> Void
+    var onResetAppsToDetectedOnly: (() -> Void)? = nil
     var onAddFolders: () -> Void
-    var onAddFilesOrWhatsApp: () -> Void
     var onTogglePositionSelection: ((String, Bool) -> Void)? = nil
     var onRemovePosition: ((String) -> Void)? = nil
     var onRefreshDocumentCheck: () -> Void
@@ -555,12 +572,10 @@ struct SendCategoriesStepView: View {
     var onChangePairedDevice: () -> Void
     var onStartCopy: () -> Void
 
-    @State private var didAutoRequestPermissions: Bool = false
-
-    private var hasAnyPermissionDenied: Bool {
-        guard let s = scanSummary else { return false }
-        return s.contactsDenied || s.photosDenied || s.calendarsDenied || s.remindersDenied
-    }
+    @State private var expandedAppCategoryIds: Set<String> = ["social_messaging", "banks_payments"]
+    @State private var appSearchQuery: String = ""
+    @State private var appSearchResults: [AppStoreSearchHit] = []
+    @State private var isSearchingAppStore: Bool = false
 
     private var allSelected: Bool {
         includeContacts && includePhotos && includeVideos && includeCalendars && includeReminders && includeDocuments && includeApps && includeWhatsApp
@@ -594,13 +609,45 @@ struct SendCategoriesStepView: View {
             ?? 0
     }
 
-    private var whatsAppCount: Int {
-        pickedDocuments.filter { $0.0.category == .WHATSAPP_VAULT }.count
+    private var displayedCatalogApps: [InstalledAppRecord] {
+        senderAppsCatalog.filter {
+            !isCrossOs || !iOSInstalledAppsScanner.isGoogleAppPreinstalledOnAndroid($0)
+        }
     }
+
+    private var selectedAppsCount: Int {
+        displayedCatalogApps.filter { !deselectedSenderAppIds.contains($0.id) }.count
+    }
+
+    private var visibleQuickCategories: [AppQuickCategory] {
+        iOSInstalledAppsScanner.curatedCategories.filter {
+            !isCrossOs || !$0.isGoogleAndroidPreinstalledCategory
+        }
+    }
+
+    private var shortTodayLabel: String {
+        Self.shortDateFormatter.string(from: Date())
+    }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "it_IT")
+        df.dateStyle = .medium
+        df.timeStyle = .none
+        return df
+    }()
+
+    private static let syncDateTimeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "it_IT")
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df
+    }()
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 14) {
                 HStack {
                     Text("Passo 2 di 3")
                         .font(.system(size: 13, weight: .semibold))
@@ -608,16 +655,18 @@ struct SendCategoriesStepView: View {
                     Spacer()
                     Button(action: {
                         let target = !allSelected
-                        includeContacts = target
-                        includePhotos = target
-                        includeVideos = target
-                        includeCalendars = target
-                        includeReminders = target
-                        includeDocuments = target
-                        includeApps = target
-                        includeWhatsApp = target
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            includeContacts = target
+                            includePhotos = target
+                            includeVideos = target
+                            includeCalendars = target
+                            includeReminders = target
+                            includeDocuments = target
+                            includeApps = target
+                            includeWhatsApp = target
+                        }
                     }) {
-                        Text(allSelected ? "Deseleziona" : "Seleziona tutto")
+                        Text(allSelected ? "Deseleziona tutto" : "Seleziona tutto")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -625,7 +674,7 @@ struct SendCategoriesStepView: View {
                 }
                 .padding(.top, 8)
 
-                // Dispositivo collegato (sottotitolo dentro ⓘ)
+                // Dispositivo collegato
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 10) {
                         ZStack {
@@ -688,380 +737,133 @@ struct SendCategoriesStepView: View {
                 }
                 .appleCard(padding: 14, selected: true)
 
-                HStack {
+                VStack(alignment: .leading, spacing: 3) {
                     Text("Cosa inviare")
                         .font(.system(size: 20, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Spacer()
-                    if !(scanSummary?.hasFullPermissions ?? false) {
-                        Button(action: onScanExactCounts) {
-                            Text(isScanningDevice ? "Calcolo..." : "Calcola dimensioni")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(AppleTheme.blue)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isScanningDevice)
-                    }
+                    Text("Spunta ogni voce per aprire la configurazione del passaggio al nuovo telefono.")
+                        .font(.system(size: 12.5))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                // 1. Rubrica contatti
+                categoryDropdownCard(
+                    icon: "person.crop.circle.fill",
+                    iconColor: AppleTheme.blue,
+                    title: "Rubrica contatti",
+                    countBadge: badgeForCount(
+                        max(contactsPreload.totalCount, scanSummary?.contactsCount ?? 0),
+                        unit: "contatti"
+                    ),
+                    infoMessage: "Trasferisce tutti i contatti completi di foto profilo, compleanni, indirizzi di casa/lavoro, azienda, siti web ed etichette dei numeri unendo eventuali duplicati.",
+                    isOn: $includeContacts
+                ) {
+                    contactsDropdownContent
                 }
 
-                if hasAnyPermissionDenied {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.shield.fill")
-                                .foregroundColor(AppleTheme.orange)
-                            Text("Alcuni permessi sono disattivati su questo iPhone")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                        }
-                        Text("Per caricare tutti i Contatti, le Foto/Video e i Calendari senza blocchi, attiva tutti i permessi nella pagina di DirectSwitch in Impostazioni.")
-                            .font(.system(size: 13))
-                            .foregroundColor(AppleTheme.textSecondary)
-                        AppleSecondaryButton(
-                            title: "Abilita Contatti e Foto in Impostazioni",
-                            icon: "gearshape.fill",
-                            tint: AppleTheme.orange
-                        ) {
-                            iOSPermissionsHelper.openDirectSwitchSettings()
-                        }
-                    }
-                    .appleCard(padding: 14)
+                // 2. Foto, Live Photos e Album
+                categoryDropdownCard(
+                    icon: "photo.fill",
+                    iconColor: AppleTheme.orange,
+                    title: "Foto, Live Photos e Album",
+                    countBadge: badgeForPhotos(
+                        count: max(photosPreload.totalCount, scanSummary?.photosCount ?? 0),
+                        liveCount: max(photosPreload.livePhotosCount, scanSummary?.livePhotosCount ?? 0),
+                        bytes: max(photosPreload.estimatedBytes, scanSummary?.photosBytes ?? 0)
+                    ),
+                    infoMessage: "Copia tutte le foto nella qualità originale HEIC/RAW preservando Live Photos animate (.HEIC + .MOV), Preferiti, data di scatto, posizione GPS e Album utente.",
+                    isOn: $includePhotos
+                ) {
+                    photosDropdownContent
                 }
 
-                // Lista pulita con sottotitoli racchiusi in ⓘ
-                VStack(spacing: 0) {
-                    CleanCategoryToggleRow(
-                        icon: "person.crop.circle.fill",
-                        iconColor: AppleTheme.blue,
-                        title: "Rubrica contatti",
-                        countBadge: badgeForCount(scanSummary?.contactsCount, unit: "contatti"),
-                        infoMessage: "Trasferisce tutti i contatti completi di foto profilo, compleanni, indirizzi di casa/lavoro, azienda, siti web ed etichette dei numeri unendo eventuali duplicati.",
-                        isOn: $includeContacts
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "photo.fill",
-                        iconColor: AppleTheme.orange,
-                        title: "Foto, Live Photos e Album",
-                        countBadge: badgeForPhotos(
-                            count: scanSummary?.photosCount,
-                            liveCount: scanSummary?.livePhotosCount,
-                            bytes: scanSummary?.photosBytes
-                        ),
-                        infoMessage: "Copia tutte le foto nella qualità originale HEIC/RAW preservando Live Photos animate (.HEIC + .MOV), Preferiti (❤️), data di scatto, posizione GPS e Album utente.",
-                        isOn: $includePhotos
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "video.fill",
-                        iconColor: AppleTheme.red,
-                        title: "Video originali",
-                        countBadge: badgeForMedia(count: scanSummary?.videosCount, bytes: scanSummary?.videosBytes, unit: "video"),
-                        infoMessage: "Copia tutti i video in risoluzione originale (inclusi 4K 60fps e Slow-Motion) in streaming su disco senza compressione.",
-                        isOn: $includeVideos
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "calendar",
-                        iconColor: AppleTheme.slate,
-                        title: "Calendari",
-                        countBadge: badgeForCount(scanSummary?.calendarEventsCount, unit: "eventi"),
-                        infoMessage: "Importa lo storico completo degli appuntamenti (-10/+10 anni) con ricorrenze annuali/settimanali e avvisi.",
-                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
-                        isOn: $includeCalendars
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "checklist",
-                        iconColor: AppleTheme.blue,
-                        title: "Promemoria",
-                        countBadge: badgeForCount(scanSummary?.remindersCount, unit: "promemoria"),
-                        infoMessage: "Trasferisce le tue liste di Promemoria Apple con scadenze, note, priorità e stato di completamento senza usare iCloud.",
-                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
-                        isOn: $includeReminders
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "doc.fill",
-                        iconColor: AppleTheme.teal,
-                        title: "Documenti e Posizioni File",
-                        countBadge: docsCount > 0 ? "\(docsCount) file • \(max(1, docFoldersCount)) cartelle" : "Posizioni intere",
-                        infoMessage: "Copia intere posizioni (Su iPhone, iCloud Drive, Drive/USB) e tutti i file di DirectSwitch mantenendo esattamente ogni cartella e sottocartella sul nuovo telefono.",
-                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
-                        isOn: $includeDocuments
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "square.grid.2x2.fill",
-                        iconColor: AppleTheme.blue,
-                        title: "App scaricate",
-                        countBadge: includeApps
-                            ? (selectedAppsCount > 0 ? "\(selectedAppsCount) selezionate" : "Tocca per scegliere")
-                            : (totalDetectedAppsCount > 0 ? "\(totalDetectedAppsCount) sul telefono" : nil),
-                        infoMessage: "Quando «App scaricate» è spuntata in blu, seleziona automaticamente tutte le app presenti su questo iPhone per installarle una dopo l'altra sul nuovo telefono!",
-                        premiumBadge: isCrossOs && !isSessionFullUnlocked,
-                        isOn: $includeApps
-                    )
-
-                    Divider().padding(.leading, 58)
-
-                    CleanCategoryToggleRow(
-                        icon: "bubble.left.and.bubble.right.fill",
-                        iconColor: AppleTheme.green,
-                        title: "Chat WhatsApp",
-                        countBadge: "Gratuito • Cronologia via QR",
-                        infoMessage: isCrossOs
-                            ? "Guida gratuita al passaggio delle chat dentro WhatsApp sul nuovo Android tramite una sola scansione QR (senza Android Switch e senza formattare)."
-                            : "Apre una schermata dedicata gratuita per trasferire la cronologia chat dentro WhatsApp tramite Codice QR.",
-                        isOn: $includeWhatsApp
-                    )
-                }
-                .appleCard(padding: 0)
-
-                // Visibile ESCLUSIVAMENTE quando la spunta «App scaricate» è attiva in blu (rilevamento istantaneo + categorie 1 tocco)
-                if includeApps {
-                    appsDetectionAndPreviewCard
-                        .appleCard(padding: 14)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                // 3. Video originali
+                categoryDropdownCard(
+                    icon: "video.fill",
+                    iconColor: AppleTheme.red,
+                    title: "Video originali",
+                    countBadge: badgeForMedia(
+                        count: max(videosPreload.totalCount, scanSummary?.videosCount ?? 0),
+                        bytes: max(videosPreload.estimatedBytes, scanSummary?.videosBytes ?? 0),
+                        unit: "video"
+                    ),
+                    infoMessage: "Copia tutti i video in risoluzione originale (inclusi 4K 60fps e Slow-Motion) in streaming su disco senza compressione.",
+                    isOn: $includeVideos
+                ) {
+                    videosDropdownContent
                 }
 
-                // Visibile ESCLUSIVAMENTE quando la spunta «Documenti, Cartelle e Password» è attiva in blu
-                if includeDocuments {
-                    let activePrecheck = documentPrecheck
-                    let locationSummaries = activePrecheck?.locationSummaries ?? scanSummary?.documentLocationSummaries ?? []
-                    let selectedLocationsCount = locationSummaries.filter(\.isSelected).count
-                    let folderSummaries = activePrecheck?.folderSummaries ?? scanSummary?.documentFolderSummaries ?? []
-                    let totalFilesFound = activePrecheck?.totalFiles ?? docsCount
-                    let totalBytesFound = activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0
-                    let unreadableCount = activePrecheck?.unreadableFilesCount ?? 0
-                    let hasAuthorizedAnyPositions = (activePrecheck?.authorizedBookmarkFoldersCount ?? 0) > 0 || !pickedDocuments.isEmpty
-                    let hasSuIPhoneLoaded = locationSummaries.contains { $0.locationName == "Su iPhone" }
-                    let hasICloudLoaded = locationSummaries.contains { $0.locationName == "iCloud Drive" }
+                // 4. Calendari
+                categoryDropdownCard(
+                    icon: "calendar",
+                    iconColor: AppleTheme.slate,
+                    title: "Calendari",
+                    countBadge: badgeForCount(
+                        calendarsUpToTodayOnly ? calendarsSync.totalUpToTodayCount : max(calendarsSync.totalAllCount, scanSummary?.calendarEventsCount ?? 0),
+                        unit: "eventi"
+                    ),
+                    infoMessage: "Importa lo storico completo degli appuntamenti (-10/+10 anni) con ricorrenze annuali/settimanali e avvisi oppure fino alla data odierna.",
+                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
+                    isOn: $includeCalendars
+                ) {
+                    calendarsDropdownContent
+                }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            AppleSettingsIcon(systemName: "externaldrive.fill", color: AppleTheme.teal)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Seleziona le posizioni da trasferire")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                Text(isLoadingPositions
-                                    ? "Caricamento posizione in corso…"
-                                    : (selectedLocationsCount > 0
-                                        ? "\(selectedLocationsCount) posizioni selezionate • \(totalFilesFound) file in \(folderSummaries.count) cartelle • \(DirectSwitchUIHelpers.formatBytes(totalBytesFound))"
-                                        : "Spunta una o più posizioni da copiare")
-                                )
-                                    .font(.system(size: 12))
-                                    .foregroundColor(isLoadingPositions ? AppleTheme.blue : AppleTheme.textSecondary)
-                            }
-                            Spacer()
-                            if isLoadingPositions {
-                                ProgressView()
-                                    .scaleEffect(0.85)
-                            } else {
-                                Button(action: onRefreshDocumentCheck) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "arrow.clockwise")
-                                        Text("Ricontrolla")
-                                    }
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(AppleTheme.blue)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            InfoCircleButton(
-                                title: "Selezionare le posizioni da trasferire",
-                                message: "Non serve fare «Seleziona tutto».\n\n• Usa la spunta qui sotto per scegliere quali posizioni trasferire.\n• Per aggiungere «Su iPhone», «iCloud Drive» o un'altra posizione (Google Drive / USB), toccala qui sotto, entra nella posizione e premi direttamente «Apri» in alto a destra."
-                            )
-                        }
+                // 5. Promemoria
+                categoryDropdownCard(
+                    icon: "checklist",
+                    iconColor: AppleTheme.blue,
+                    title: "Promemoria",
+                    countBadge: badgeForCount(
+                        remindersUpToTodayOnly ? remindersSync.totalUpToTodayCount : max(remindersSync.totalAllCount, scanSummary?.remindersCount ?? 0),
+                        unit: "promemoria"
+                    ),
+                    infoMessage: "Trasferisce le tue liste di Promemoria Apple con scadenze, note, priorità e stato di completamento senza usare iCloud.",
+                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
+                    isOn: $includeReminders
+                ) {
+                    remindersDropdownContent
+                }
 
-                        if unreadableCount > 0 {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(AppleTheme.orange)
-                                    .font(.system(size: 14))
-                                Text("\(unreadableCount) file risultano ancora solo su iCloud Drive o non leggibili: scaricali in File prima di avviare.")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                            }
-                            .padding(10)
-                            .background(AppleTheme.orange.opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
+                // 6. Documenti e File
+                categoryDropdownCard(
+                    icon: "doc.fill",
+                    iconColor: AppleTheme.teal,
+                    title: "Documenti e Posizioni File",
+                    countBadge: docsCount > 0 ? "\(max(1, docFoldersCount)) cartelle • \(docsCount) file" : "iCloud Drive, Su iPhone, Chrome",
+                    infoMessage: "Copia intere posizioni (iCloud Drive, Su iPhone, Chrome o altra posizione aggiunta dall'utente) ricreando identica tutta la gerarchia sul nuovo telefono.",
+                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
+                    isOn: $includeDocuments
+                ) {
+                    documentsDropdownContent
+                }
 
-                        if !locationSummaries.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(locationSummaries) { loc in
-                                    HStack(spacing: 10) {
-                                        Button {
-                                            onTogglePositionSelection?(loc.locationId, !loc.isSelected)
-                                        } label: {
-                                            HStack(spacing: 10) {
-                                                Image(systemName: loc.isSelected ? "checkmark.circle.fill" : "circle")
-                                                    .font(.system(size: 18, weight: .semibold))
-                                                    .foregroundColor(loc.isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text(loc.locationName)
-                                                        .font(.system(size: 13, weight: .bold))
-                                                        .foregroundColor(loc.isSelected ? AppleTheme.textPrimary : AppleTheme.textSecondary)
-                                                        .lineLimit(1)
-                                                    Text("\(loc.folderCount) cartelle • \(loc.fileCount) file • \(DirectSwitchUIHelpers.formatBytes(loc.totalBytes))")
-                                                        .font(.system(size: 11.5))
-                                                        .foregroundColor(AppleTheme.textSecondary)
-                                                }
-                                                Spacer(minLength: 4)
-                                            }
-                                            .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
+                // 7. App scaricate
+                categoryDropdownCard(
+                    icon: "square.grid.2x2.fill",
+                    iconColor: AppleTheme.blue,
+                    title: "App scaricate",
+                    countBadge: selectedAppsCount > 0 ? "\(selectedAppsCount) app pronte" : nil,
+                    infoMessage: "Rileva automaticamente le app installate su questo iPhone tramite verifica schemi iOS + Album/Foto e permette di aggiungerne altre dalle categorie in stile iPhone.",
+                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
+                    isOn: $includeApps
+                ) {
+                    appsDropdownContent
+                }
 
-                                        if loc.isRemovableBookmark {
-                                            Button {
-                                                onRemovePosition?(loc.locationId)
-                                            } label: {
-                                                Image(systemName: "xmark.circle.fill")
-                                                    .font(.system(size: 16))
-                                                    .foregroundColor(AppleTheme.textTertiary)
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
-                                    .background(loc.isSelected ? AppleTheme.blue.opacity(0.08) : AppleTheme.cardSurface.opacity(0.6))
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .stroke(loc.isSelected ? AppleTheme.blue.opacity(0.32) : AppleTheme.cardBorder, lineWidth: 0.9)
-                                    )
-                                }
-                            }
-                        }
-
-                        if !hasSuIPhoneLoaded || !hasICloudLoaded {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Tocca una posizione da aggiungere (entra e premi «Apri»):")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundColor(AppleTheme.textSecondary)
-
-                                if !hasSuIPhoneLoaded {
-                                    Button(action: onAddFolders) {
-                                        HStack(spacing: 10) {
-                                            Image(systemName: "iphone")
-                                                .font(.system(size: 16, weight: .semibold))
-                                                .foregroundColor(AppleTheme.blue)
-                                                .frame(width: 24)
-                                            VStack(alignment: .leading, spacing: 1) {
-                                                Text("Su iPhone")
-                                                    .font(.system(size: 13, weight: .bold))
-                                                    .foregroundColor(AppleTheme.textPrimary)
-                                                Text("Entra in «Su iPhone» e premi «Apri» in alto a destra")
-                                                    .font(.system(size: 11.5))
-                                                    .foregroundColor(AppleTheme.textSecondary)
-                                            }
-                                            Spacer()
-                                            Image(systemName: "plus.circle.fill")
-                                                .font(.system(size: 18))
-                                                .foregroundColor(AppleTheme.blue)
-                                        }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 8)
-                                        .background(AppleTheme.cardSurface)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .stroke(AppleTheme.cardBorder, lineWidth: 0.9)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-
-                                if !hasICloudLoaded {
-                                    Button(action: onAddFolders) {
-                                        HStack(spacing: 10) {
-                                            Image(systemName: "icloud.fill")
-                                                .font(.system(size: 15, weight: .semibold))
-                                                .foregroundColor(AppleTheme.blue)
-                                                .frame(width: 24)
-                                            VStack(alignment: .leading, spacing: 1) {
-                                                Text("iCloud Drive")
-                                                    .font(.system(size: 13, weight: .bold))
-                                                    .foregroundColor(AppleTheme.textPrimary)
-                                                Text("Entra in «iCloud Drive» e premi «Apri» in alto a destra")
-                                                    .font(.system(size: 11.5))
-                                                    .foregroundColor(AppleTheme.textSecondary)
-                                            }
-                                            Spacer()
-                                            Image(systemName: "plus.circle.fill")
-                                                .font(.system(size: 18))
-                                                .foregroundColor(AppleTheme.blue)
-                                        }
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 8)
-                                        .background(AppleTheme.cardSurface)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .stroke(AppleTheme.cardBorder, lineWidth: 0.9)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-
-                        if !folderSummaries.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(Array(folderSummaries.prefix(6))) { folder in
-                                    HStack {
-                                        Text("\(folder.folderPath)/")
-                                            .font(.system(size: 11.5, weight: .medium))
-                                            .foregroundColor(AppleTheme.textSecondary)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        Text("\(folder.fileCount) file")
-                                            .font(.system(size: 11.5))
-                                            .foregroundColor(AppleTheme.textTertiary)
-                                    }
-                                }
-                                if folderSummaries.count > 6 {
-                                    Text("e altre \(folderSummaries.count - 6) cartelle (\(totalFilesFound) file totali)")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(AppleTheme.teal)
-                                }
-                            }
-                        }
-
-                        AppleSecondaryButton(
-                            title: "Aggiungi altra posizione (Drive / USB / Cartella)",
-                            icon: "externaldrive.badge.plus",
-                            tint: AppleTheme.blue,
-                            action: onAddFolders
-                        )
-
-                        if hasAuthorizedAnyPositions {
-                            HStack {
-                                Spacer()
-                                Button("Rimuovi posizioni aggiunte", action: onClearStagedFiles)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(AppleTheme.red)
-                                    .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    .appleCard(padding: 14)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                // 8. Chat WhatsApp
+                categoryDropdownCard(
+                    icon: "bubble.left.and.bubble.right.fill",
+                    iconColor: AppleTheme.green,
+                    title: "Chat WhatsApp",
+                    countBadge: "Gratuito • Codice QR",
+                    infoMessage: isCrossOs
+                        ? "Guida gratuita al passaggio delle chat dentro WhatsApp sul nuovo Android tramite una sola scansione QR (senza Android Switch e senza formattare)."
+                        : "Apre una schermata dedicata gratuita per trasferire la cronologia chat dentro WhatsApp tramite Codice QR.",
+                    isOn: $includeWhatsApp
+                ) {
+                    whatsAppDropdownContent
                 }
 
                 ApplePrimaryButton(
@@ -1082,163 +884,830 @@ struct SendCategoriesStepView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
-        .onAppear {
-            if !didAutoRequestPermissions && !(scanSummary?.hasFullPermissions ?? false) {
-                didAutoRequestPermissions = true
-                onScanExactCounts()
+    }
+
+    // MARK: - Contenitore fisarmonica inline per ogni voce
+
+    @ViewBuilder
+    private func categoryDropdownCard<Content: View>(
+        icon: String,
+        iconColor: Color,
+        title: String,
+        countBadge: String? = nil,
+        infoMessage: String,
+        premiumBadge: Bool = false,
+        isOn: Binding<Bool>,
+        @ViewBuilder dropdownContent: () -> Content
+    ) -> some View {
+        VStack(spacing: 0) {
+            CleanCategoryToggleRow(
+                icon: icon,
+                iconColor: iconColor,
+                title: title,
+                countBadge: countBadge,
+                infoMessage: infoMessage,
+                premiumBadge: premiumBadge,
+                isOn: isOn
+            )
+
+            if isOn.wrappedValue {
+                Divider()
+                    .padding(.horizontal, 14)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    dropdownContent()
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppleTheme.inputSurface.opacity(0.45))
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
+        }
+        .appleCard(padding: 0, selected: isOn.wrappedValue)
+        .animation(.easeInOut(duration: 0.22), value: isOn.wrappedValue)
+    }
+
+    // MARK: - Tendina 1: Rubrica contatti
+
+    @ViewBuilder
+    private var contactsDropdownContent: some View {
+        if scanSummary?.contactsDenied == true {
+            permissionDeniedInlineView(
+                message: "Permesso Contatti disattivato su questo iPhone.",
+                buttonTitle: "Abilita Contatti in Impostazioni"
+            )
+        } else {
+            let total = max(contactsPreload.totalCount, scanSummary?.contactsCount ?? 0)
+            let loaded = contactsPreload.isCompleted ? total : contactsPreload.loadedCount
+
+            HStack(spacing: 8) {
+                Image(systemName: contactsPreload.isLoading ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(contactsPreload.isLoading ? AppleTheme.blue : AppleTheme.green)
+
+                Text(contactsPreload.isLoading
+                    ? "Precaricamento rubrica: \(loaded) / \(max(loaded, total)) contatti"
+                    : "\(total) contatti totali preparati")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+
+                Spacer()
+
+                if !contactsPreload.isLoading {
+                    Button(action: onPreloadContacts) {
+                        Text("Ricarica")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if contactsPreload.isLoading || total > 0 {
+                ProgressView(
+                    value: Double(min(loaded, max(1, total))),
+                    total: Double(max(1, total))
+                )
+                .tint(contactsPreload.isLoading ? AppleTheme.blue : AppleTheme.green)
+            }
+
+            Text("Include numeri con etichette, foto profilo, email, indirizzi, compleanni ed eventuale unione duplicati.")
+                .font(.system(size: 12))
+                .foregroundColor(AppleTheme.textSecondary)
         }
     }
 
-    private var visibleQuickCategories: [AppQuickCategory] {
-        iOSInstalledAppsScanner.curatedCategories.filter {
-            !isCrossOs || !$0.isGoogleAndroidPreinstalledCategory
+    // MARK: - Tendina 2: Foto, Live Photos e Album
+
+    @ViewBuilder
+    private var photosDropdownContent: some View {
+        if scanSummary?.photosDenied == true {
+            permissionDeniedInlineView(
+                message: "Permesso Foto disattivato su questo iPhone.",
+                buttonTitle: "Abilita Foto in Impostazioni"
+            )
+        } else {
+            let total = max(photosPreload.totalCount, scanSummary?.photosCount ?? 0)
+            let loaded = photosPreload.isCompleted ? total : photosPreload.loadedCount
+            let live = max(photosPreload.livePhotosCount, scanSummary?.livePhotosCount ?? 0)
+            let albums = max(photosPreload.albumsCount, scanSummary?.photoAlbumsCount ?? 0)
+            let bytes = max(photosPreload.estimatedBytes, scanSummary?.photosBytes ?? 0)
+
+            HStack(spacing: 8) {
+                Image(systemName: photosPreload.isLoading ? "photo.stack.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(photosPreload.isLoading ? AppleTheme.orange : AppleTheme.green)
+
+                Text(photosPreload.isLoading
+                    ? "Precaricamento immagini: \(loaded) / \(max(loaded, total)) foto"
+                    : "\(total) foto totali preparate")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+
+                Spacer()
+
+                if !photosPreload.isLoading {
+                    Button(action: onPreloadPhotos) {
+                        Text("Ricarica")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if photosPreload.isLoading || total > 0 {
+                ProgressView(
+                    value: Double(min(loaded, max(1, total))),
+                    total: Double(max(1, total))
+                )
+                .tint(photosPreload.isLoading ? AppleTheme.orange : AppleTheme.green)
+            }
+
+            Text("\(live) Live Photos • \(albums) album utente • \(bytes > 0 ? DirectSwitchUIHelpers.formatBytes(bytes) : "qualità originale HEIC/RAW")")
+                .font(.system(size: 12))
+                .foregroundColor(AppleTheme.textSecondary)
+        }
+    }
+
+    // MARK: - Tendina 3: Video originali
+
+    @ViewBuilder
+    private var videosDropdownContent: some View {
+        if scanSummary?.photosDenied == true {
+            permissionDeniedInlineView(
+                message: "Permesso Foto e Video disattivato su questo iPhone.",
+                buttonTitle: "Abilita Foto in Impostazioni"
+            )
+        } else {
+            let total = max(videosPreload.totalCount, scanSummary?.videosCount ?? 0)
+            let loaded = videosPreload.isCompleted ? total : videosPreload.loadedCount
+            let bytes = max(videosPreload.estimatedBytes, scanSummary?.videosBytes ?? 0)
+
+            HStack(spacing: 8) {
+                Image(systemName: videosPreload.isLoading ? "video.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(videosPreload.isLoading ? AppleTheme.red : AppleTheme.green)
+
+                Text(videosPreload.isLoading
+                    ? "Precaricamento video: \(loaded) / \(max(loaded, total)) video"
+                    : "\(total) video originali preparati")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+
+                Spacer()
+
+                if !videosPreload.isLoading {
+                    Button(action: onPreloadVideos) {
+                        Text("Ricarica")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if videosPreload.isLoading || total > 0 {
+                ProgressView(
+                    value: Double(min(loaded, max(1, total))),
+                    total: Double(max(1, total))
+                )
+                .tint(videosPreload.isLoading ? AppleTheme.red : AppleTheme.green)
+            }
+
+            Text("Qualità 4K 60fps e Slow-Motion preservata\(bytes > 0 ? " • \(DirectSwitchUIHelpers.formatBytes(bytes))" : "").")
+                .font(.system(size: 12))
+                .foregroundColor(AppleTheme.textSecondary)
+        }
+    }
+
+    // MARK: - Tendina 4: Calendari
+
+    @ViewBuilder
+    private var calendarsDropdownContent: some View {
+        if scanSummary?.calendarsDenied == true {
+            permissionDeniedInlineView(
+                message: "Permesso Calendari disattivato su questo iPhone.",
+                buttonTitle: "Abilita Calendari in Impostazioni"
+            )
+        } else {
+            let activeCount = calendarsUpToTodayOnly
+                ? calendarsSync.totalUpToTodayCount
+                : max(calendarsSync.totalAllCount, scanSummary?.calendarEventsCount ?? 0)
+
+            HStack(spacing: 8) {
+                if calendarsSync.isLoading {
+                    ProgressView().scaleEffect(0.85)
+                } else {
+                    Image(systemName: "calendar.badge.checkmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(AppleTheme.green)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(calendarsSync.isLoading
+                        ? "Aggiornamento alla data odierna in corso..."
+                        : "Aggiornato al \(formattedSyncTimestamp(calendarsSync.lastUpdatedAt))")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("\(activeCount) eventi pronti al passaggio")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+
+                Spacer()
+
+                if !calendarsSync.isLoading {
+                    Button(action: onRefreshCalendars) {
+                        Text("Aggiorna")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Toggle(isOn: $calendarsUpToTodayOnly) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Trasferisci solo fino ad oggi (\(shortTodayLabel))")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("Se spento trasferisce sia storico sia eventi futuri (-10/+10 anni).")
+                        .font(.system(size: 11))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+            }
+            .tint(AppleTheme.green)
+        }
+    }
+
+    // MARK: - Tendina 5: Promemoria
+
+    @ViewBuilder
+    private var remindersDropdownContent: some View {
+        if scanSummary?.remindersDenied == true {
+            permissionDeniedInlineView(
+                message: "Permesso Promemoria disattivato su questo iPhone.",
+                buttonTitle: "Abilita Promemoria in Impostazioni"
+            )
+        } else {
+            let activeCount = remindersUpToTodayOnly
+                ? remindersSync.totalUpToTodayCount
+                : max(remindersSync.totalAllCount, scanSummary?.remindersCount ?? 0)
+
+            HStack(spacing: 8) {
+                if remindersSync.isLoading {
+                    ProgressView().scaleEffect(0.85)
+                } else {
+                    Image(systemName: "checklist.checked")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(AppleTheme.green)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(remindersSync.isLoading
+                        ? "Aggiornamento alla data odierna in corso..."
+                        : "Aggiornato al \(formattedSyncTimestamp(remindersSync.lastUpdatedAt))")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("\(activeCount) promemoria pronti al passaggio")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+
+                Spacer()
+
+                if !remindersSync.isLoading {
+                    Button(action: onRefreshReminders) {
+                        Text("Aggiorna")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Toggle(isOn: $remindersUpToTodayOnly) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Solo scadenze fino ad oggi (\(shortTodayLabel))")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("Se spento trasferisce tutte le liste complete anche con scadenze future.")
+                        .font(.system(size: 11))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+            }
+            .tint(AppleTheme.green)
+        }
+    }
+
+    // MARK: - Tendina 6: Documenti e Posizioni File (solo iCloud Drive, Su iPhone, Chrome + aggiungi posizione)
+
+    @ViewBuilder
+    private var documentsDropdownContent: some View {
+        let activePrecheck = documentPrecheck
+        let locationSummaries = activePrecheck?.locationSummaries ?? scanSummary?.documentLocationSummaries ?? []
+        let customLocations = locationSummaries.filter {
+            iOSDocumentPresetKind.match(for: $0) == nil && ($0.isRemovableBookmark || $0.fileCount > 0)
+        }
+        let unreadableCount = activePrecheck?.unreadableFilesCount ?? 0
+        let hasAuthorizedAnyPositions = (activePrecheck?.authorizedBookmarkFoldersCount ?? 0) > 0 || !pickedDocuments.isEmpty
+
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Aggiungi e spunta le posizioni")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Text(isLoadingPositions
+                    ? "Caricamento posizione e cartelle in corso…"
+                    : (docsCount > 0
+                        ? "\(max(1, docFoldersCount)) cartelle preparate • \(docsCount) file • \(DirectSwitchUIHelpers.formatBytes(activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0))"
+                        : "Seleziona iCloud Drive, Su iPhone, Chrome o un'altra posizione"))
+                    .font(.system(size: 12))
+                    .foregroundColor(isLoadingPositions ? AppleTheme.blue : AppleTheme.textSecondary)
+            }
+
+            Spacer()
+
+            if isLoadingPositions {
+                ProgressView().scaleEffect(0.85)
+            } else {
+                Button(action: onRefreshDocumentCheck) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Ricontrolla")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(AppleTheme.blue)
+                }
+                .buttonStyle(.plain)
+            }
+
+            InfoCircleButton(
+                title: "Posizioni File su iPhone",
+                message: "Scegli direttamente le posizioni intere invece dei singoli file:\n\n• iCloud Drive\n• Su iPhone\n• Chrome (Su iPhone → Chrome)\n• Altra posizione (Google Drive / USB / Cartella)\n\nTocca una posizione non ancora collegata, entra dentro nell'app File e premi «Apri» in alto a destra per preparare tutte le sue cartelle."
+            )
+        }
+
+        if unreadableCount > 0 {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(AppleTheme.orange)
+                    .font(.system(size: 14))
+                Text("\(unreadableCount) file sono solo su iCloud e non scaricati in locale: scaricali in File prima di avviare.")
+                    .font(.system(size: 12))
+                    .foregroundColor(AppleTheme.textPrimary)
+            }
+            .padding(10)
+            .background(AppleTheme.orange.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+
+        VStack(spacing: 7) {
+            ForEach(iOSDocumentPresetKind.allCases) { preset in
+                let matched = locationSummaries.first { iOSDocumentPresetKind.match(for: $0) == preset }
+                documentPositionRow(
+                    title: preset.title,
+                    iconName: preset.systemIcon,
+                    summary: matched
+                )
+            }
+
+            ForEach(customLocations) { custom in
+                documentPositionRow(
+                    title: custom.locationName,
+                    iconName: "folder.fill",
+                    summary: custom
+                )
+            }
+        }
+
+        AppleSecondaryButton(
+            title: "Aggiungi altra posizione",
+            icon: "externaldrive.fill",
+            tint: AppleTheme.blue,
+            action: onAddFolders
+        )
+
+        if hasAuthorizedAnyPositions {
+            HStack {
+                Spacer()
+                Button("Rimuovi posizioni aggiunte", action: onClearStagedFiles)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(AppleTheme.red)
+                    .buttonStyle(.plain)
+            }
         }
     }
 
     @ViewBuilder
-    private var appsDetectionAndPreviewCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 8) {
+    private func documentPositionRow(
+        title: String,
+        iconName: String,
+        summary: iOSDocumentLocationSummary?
+    ) -> some View {
+        if let loc = summary {
+            HStack(spacing: 10) {
+                Button {
+                    onTogglePositionSelection?(loc.locationId, !loc.isSelected)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: loc.isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundColor(loc.isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
+
+                        Image(systemName: iconName)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(loc.isSelected ? AppleTheme.teal : AppleTheme.textSecondary)
+                            .frame(width: 24)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(title)
+                                .font(.system(size: 13.5, weight: .bold))
+                                .foregroundColor(loc.isSelected ? AppleTheme.textPrimary : AppleTheme.textSecondary)
+                                .lineLimit(1)
+                            Text(preparedFoldersSubtitle(for: loc))
+                                .font(.system(size: 12))
+                                .foregroundColor(loc.isSelected ? AppleTheme.green : AppleTheme.textSecondary)
+                        }
+                        Spacer(minLength: 4)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if loc.isRemovableBookmark {
+                    Button {
+                        onRemovePosition?(loc.locationId)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(AppleTheme.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(loc.isSelected ? AppleTheme.cardSurface : AppleTheme.cardSurface.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(loc.isSelected ? AppleTheme.blue.opacity(0.35) : AppleTheme.cardBorder, lineWidth: 0.9)
+            )
+        } else {
+            Button(action: onAddFolders) {
+                HStack(spacing: 10) {
+                    Image(systemName: iconName)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(AppleTheme.blue)
+                        .frame(width: 24)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 13.5, weight: .bold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Text("Tocca per aggiungere posizione e preparare tutto")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                    Spacer()
+                    Text("Aggiungi")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(AppleTheme.inputSurface)
+                        .clipShape(Capsule())
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .background(AppleTheme.cardSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(AppleTheme.cardBorder, lineWidth: 0.9)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func preparedFoldersSubtitle(for loc: iOSDocumentLocationSummary) -> String {
+        let foldersCount = max(loc.folderCount, loc.fileCount > 0 ? 1 : 0)
+        let foldersPart = foldersCount == 1
+            ? "1 cartella preparata"
+            : "\(foldersCount) cartelle preparate"
+        if loc.fileCount > 0 {
+            return "\(foldersPart) • \(loc.fileCount) file • \(DirectSwitchUIHelpers.formatBytes(loc.totalBytes))"
+        }
+        return foldersPart
+    }
+
+    // MARK: - Tendina 7: App scaricate (tutto inline: rilevate con icona+nome + categorie estese iPhone + ricerca)
+
+    @ViewBuilder
+    private var appsDropdownContent: some View {
+        // Blocco 1: App rilevate automaticamente su questo iPhone
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if isLoadingAppsCatalog {
+                    ProgressView().scaleEffect(0.85)
+                } else {
                     Image(systemName: "checkmark.shield.fill")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(AppleTheme.green)
-                    Text("Rilevamento istantaneo (zero foto)")
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("App verificate su questo iPhone (\(selectedAppsCount))")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Spacer()
-                    InfoCircleButton(
-                        title: "Come rileva le tue App iOS",
-                        message: "DirectSwitch controlla subito fino a 50 schemi iOS verificati senza attese (priorità alle app assenti su Android) e riconosce automaticamente ulteriori app reali dai titoli Album Foto e dai metadati dei file nel Rullino.\n\nPer eventuali banche, SPID, trasporti o servizi italiani aggiuntivi, usa i pulsanti per categoria con 1 tocco qui sotto oppure cerca il nome esatto."
-                    )
-                }
-
-                if photoDetectedAppsCount > 0 {
-                    Text("**\(verifiedLocalAppsCount)** verificate da iOS + **\(photoDetectedAppsCount)** trovate da Album/Foto (**\(selectedAppsCount)** totali pronte).")
-                        .font(.system(size: 12.5))
-                        .foregroundColor(AppleTheme.textSecondary)
-                } else {
-                    Text("**\(verifiedLocalAppsCount)** app verificate automaticamente su questo iPhone (\(selectedAppsCount) totali pronte), senza screenshot né attese.")
-                        .font(.system(size: 12.5))
-                        .foregroundColor(AppleTheme.textSecondary)
-                }
-
-                if isCrossOs {
-                    Text("App Google di sistema (Gmail, Maps, Chrome, YouTube, Drive) escluse perché già su Android.")
+                    Text(photoDetectedAppsCount > 0
+                        ? "\(verifiedLocalAppsCount) schemi iOS + \(photoDetectedAppsCount) da Album/Foto"
+                        : "\(verifiedLocalAppsCount) app rilevate in automatico su iPhone")
                         .font(.system(size: 11.5))
-                        .foregroundColor(AppleTheme.textTertiary)
+                        .foregroundColor(AppleTheme.textSecondary)
                 }
+                Spacer()
+                Button(action: onRescanAutomaticApps) {
+                    Text("Aggiorna")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(AppleTheme.blue)
+                }
+                .buttonStyle(.plain)
+                .disabled(isLoadingAppsCatalog)
+            }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Aggiunta rapida per categoria (1 tocco):")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundColor(AppleTheme.textPrimary)
+            if !iOSPhotoKitMigrator.isAuthorized() && scanSummary?.photosDenied != true {
+                Button(action: onRequestPhotoScanForApps) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                        Text("Rileva altre app anche da Album e Metadati Foto")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(AppleTheme.cardSelected)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 7) {
-                            ForEach(visibleQuickCategories) { category in
-                                quickCategoryChip(category)
-                            }
+            if isCrossOs {
+                Text("Le app Google di sistema (Gmail, Maps, Chrome, YouTube, Drive) restano escluse perché già su Android.")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(AppleTheme.textTertiary)
+            }
+
+            if let note = appImportStatusNote, !note.isEmpty {
+                Text(note)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(note.hasPrefix("⚠") ? AppleTheme.orange : AppleTheme.green)
+            }
+
+            if !displayedCatalogApps.isEmpty {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: 4),
+                    spacing: 12
+                ) {
+                    ForEach(displayedCatalogApps) { app in
+                        let checked = !deselectedSenderAppIds.contains(app.id)
+                        let icon = app.iconUrl ?? categoryIconOverrides[app.packageName.lowercased()]
+                        iPhoneAppGridTile(
+                            appName: app.appName,
+                            iconUrl: icon,
+                            isSelected: checked,
+                            iconSize: 52
+                        ) {
+                            onToggleCatalogApp(app)
                         }
                     }
                 }
+                .padding(.top, 2)
+            } else {
+                Text("Nessuna app extra rilevata finora in automatico. Scegli dalle categorie qui sotto oppure usa la ricerca.")
+                    .font(.system(size: 12))
+                    .foregroundColor(AppleTheme.textSecondary)
+            }
 
-                if let note = appImportStatusNote, !note.isEmpty {
-                    Text(note)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(note.hasPrefix("⚠") ? AppleTheme.orange : AppleTheme.green)
+            if let resetAction = onResetAppsToDetectedOnly,
+               displayedCatalogApps.count > verifiedLocalAppsCount + photoDetectedAppsCount {
+                HStack {
+                    Spacer()
+                    Button(action: resetAction) {
+                        Text("Ripristina solo rilevate")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(AppleTheme.orange)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .padding(12)
-            .background(AppleTheme.cardSelected)
-            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .padding(12)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
 
-            Divider()
+        // Blocco 2: Categorie estese in stile iPhone (icona + nome per ogni app)
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Categorie estese stile iPhone")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(AppleTheme.textPrimary)
 
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 8) {
-                    Text("App pronte al trasferimento (\(selectedAppsCount))")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(AppleTheme.textPrimary)
-                    Spacer()
-                    if let resetAction = onResetAppsToZero, totalDetectedAppsCount > verifiedLocalAppsCount {
-                        Button(action: resetAction) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.counterclockwise")
-                                    .font(.system(size: 10, weight: .bold))
-                                Text("Solo rilevate")
-                                    .font(.system(size: 11, weight: .semibold))
+            VStack(spacing: 8) {
+                ForEach(visibleQuickCategories) { category in
+                    let isExpanded = expandedAppCategoryIds.contains(category.id)
+                    iPhoneAppCategoryAccordionCard(
+                        category: category,
+                        iconOverrides: categoryIconOverrides,
+                        isExpanded: isExpanded,
+                        isAppSelected: isQuickAppSelected,
+                        onToggleExpand: {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                if isExpanded {
+                                    expandedAppCategoryIds.remove(category.id)
+                                } else {
+                                    expandedAppCategoryIds.insert(category.id)
+                                }
                             }
-                            .foregroundColor(AppleTheme.orange)
+                        },
+                        onToggleWholeCategory: { currentlyAllSelected in
+                            onToggleCategoryAllApps(category, currentlyAllSelected)
+                        },
+                        onToggleApp: { item, currentlySelected in
+                            onToggleCategorySingleApp(item, currentlySelected)
                         }
-                        .buttonStyle(.plain)
+                    )
+                }
+            }
+        }
+
+        // Blocco 3: Ricerca esatta su App Store (icona + nome, zero "+" blu)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Cerca altre app su App Store")
+                .font(.system(size: 13.5, weight: .bold))
+                .foregroundColor(AppleTheme.textPrimary)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(AppleTheme.textSecondary)
+                TextField("Cerca un'app (es. banca, SPID, utility)...", text: $appSearchQuery)
+                    .font(.system(size: 13.5))
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .onSubmit {
+                        triggerInlineAppStoreSearch()
+                    }
+                if !appSearchQuery.isEmpty {
+                    Button(action: {
+                        appSearchQuery = ""
+                        appSearchResults = []
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(AppleTheme.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button(action: triggerInlineAppStoreSearch) {
+                    Text(isSearchingAppStore ? "..." : "Cerca")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(AppleTheme.blue)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(appSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSearchingAppStore)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(AppleTheme.cardSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(AppleTheme.cardBorder, lineWidth: 0.8)
+            )
+
+            if !appSearchResults.isEmpty {
+                VStack(spacing: 8) {
+                    ForEach(appSearchResults) { hit in
+                        let found = hit.record
+                        let alreadyAdded = isQuickAppSelected(found)
+                        HStack(spacing: 10) {
+                            AppIconThumbnailView(iconUrl: found.iconUrl, size: 38)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(found.appName)
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundColor(AppleTheme.textPrimary)
+                                    .lineLimit(1)
+                                if let dev = hit.developerName, !dev.isEmpty {
+                                    Text(dev)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            Button(action: {
+                                var tagged = found
+                                tagged.detectionSource = "Aggiunta da ricerca"
+                                onAddSearchApp(tagged)
+                            }) {
+                                HStack(spacing: 4) {
+                                    if alreadyAdded {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 11, weight: .bold))
+                                    }
+                                    Text(alreadyAdded ? "Selezionata" : "Seleziona")
+                                        .font(.system(size: 12, weight: .bold))
+                                }
+                                .foregroundColor(alreadyAdded ? AppleTheme.green : AppleTheme.textPrimary)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 6)
+                                .background(alreadyAdded ? AppleTheme.green.opacity(0.12) : AppleTheme.inputSurface)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(alreadyAdded)
+                        }
                     }
                 }
+                .padding(.top, 2)
+            }
+        }
+        .padding(12)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+    }
 
-                if !selectedAppsPreview.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(selectedAppsPreview.prefix(12)) { app in
-                                AppIconThumbnailView(iconUrl: app.iconUrl, size: 34)
-                            }
-                            if selectedAppsCount > 12 {
-                                Text("+\(selectedAppsCount - 12)")
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                                    .foregroundColor(AppleTheme.blue)
-                                    .frame(width: 34, height: 34)
-                                    .background(AppleTheme.cardSelected)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            }
-                        }
-                    }
-                }
+    // MARK: - Tendina 8: Chat WhatsApp
 
-                AppleSecondaryButton(
-                    title: selectedAppsCount > 0
-                        ? "Vedi, cerca o modifica App (\(selectedAppsCount))"
-                        : "Scegli App dall'elenco ufficiale",
-                    icon: "square.grid.2x2.fill",
-                    tint: AppleTheme.blue,
-                    action: onManageApps
-                )
+    @ViewBuilder
+    private var whatsAppDropdownContent: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "qrcode")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(AppleTheme.green)
+            Text("Passaggio guidato gratuito tramite Codice QR")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(AppleTheme.textPrimary)
+        }
+        Text(isCrossOs
+            ? "Trasferisce cronologia chat, foto, video e messaggi vocali direttamente dentro WhatsApp verso Android senza resettare il telefono."
+            : "Trasferisce tutta la cronologia chat, allegati e vocali direttamente da iPhone a iPhone dentro WhatsApp senza occupare spazio iCloud.")
+            .font(.system(size: 12))
+            .foregroundColor(AppleTheme.textSecondary)
+    }
+
+    // MARK: - Helpers UI & Ricerca
+
+    @ViewBuilder
+    private func permissionDeniedInlineView(message: String, buttonTitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundColor(AppleTheme.orange)
+                Text(message)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundColor(AppleTheme.textPrimary)
+            }
+            AppleSecondaryButton(
+                title: buttonTitle,
+                icon: "gearshape.fill",
+                tint: AppleTheme.orange
+            ) {
+                iOSPermissionsHelper.openDirectSwitchSettings()
             }
         }
     }
 
-    private func quickCategoryChip(_ category: AppQuickCategory) -> some View {
-        let matchedCount = category.apps.filter {
-            selectedBundleIdsSet.contains($0.packageName.lowercased())
-        }.count
-        let isAllCategorySelected = matchedCount == category.apps.count && !category.apps.isEmpty
-        return Button(action: {
-            onToggleQuickCategory(category)
-        }) {
-            HStack(spacing: 5) {
-                Image(systemName: isAllCategorySelected ? "checkmark.circle.fill" : category.iconName)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(category.title)
-                    .font(.system(size: 12, weight: .semibold))
-                if matchedCount > 0 {
-                    Text("\(matchedCount)")
-                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.white.opacity(0.28))
-                        .clipShape(Capsule())
-                }
-            }
-            .foregroundColor(isAllCategorySelected ? .white : AppleTheme.blue)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(isAllCategorySelected ? AppleTheme.blue : AppleTheme.cardSurface)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(isAllCategorySelected ? AppleTheme.blue : AppleTheme.blue.opacity(0.28), lineWidth: 0.9)
-            )
+    private func isQuickAppSelected(_ app: InstalledAppRecord) -> Bool {
+        let pkgLower = app.packageName.lowercased()
+        if selectedBundleIdsSet.contains(pkgLower) { return true }
+        if let sid = app.appStoreId, selectedStoreIdsSet.contains(sid) { return true }
+        return false
+    }
+
+    private func triggerInlineAppStoreSearch() {
+        let q = appSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        isSearchingAppStore = true
+        Task {
+            let found = await iOSAppStoreCatalogResolver.searchAppStoreDetailed(query: q, limit: 12)
+            isSearchingAppStore = false
+            appSearchResults = found
         }
-        .buttonStyle(.plain)
+    }
+
+    private func formattedSyncTimestamp(_ date: Date?) -> String {
+        Self.syncDateTimeFormatter.string(from: date ?? Date())
     }
 
     private func badgeForCount(_ count: Int?, unit: String) -> String? {

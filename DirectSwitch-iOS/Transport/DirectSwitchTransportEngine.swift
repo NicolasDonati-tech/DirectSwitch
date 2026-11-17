@@ -1784,7 +1784,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         includePhotos: Bool = true,
         includeVideos: Bool = true,
         includeCalendars: Bool,
+        calendarsUpToTodayOnly: Bool = false,
         includeReminders: Bool = true,
+        remindersUpToTodayOnly: Bool = false,
         includeDocuments: Bool = true,
         includeApps: Bool = false,
         includeWhatsAppVault: Bool = true,
@@ -1907,9 +1909,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if includeCalendars && previouslySentIds.isEmpty { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
             if includeReminders && previouslySentIds.isEmpty { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
 
+            let nowCutoff = Date()
             let contacts = (includeContacts && previouslySentIds.isEmpty) ? iOSContactsSmartMerger.readAllContacts() : []
-            let calendars = (includeCalendars && previouslySentIds.isEmpty) ? iOSCalendarMigrator.readEvents() : []
-            let reminders = (includeReminders && previouslySentIds.isEmpty) ? await iOSRemindersMigrator.readReminders() : []
+            let calendars = (includeCalendars && previouslySentIds.isEmpty)
+                ? iOSCalendarMigrator.readEvents(upToDate: calendarsUpToTodayOnly ? nowCutoff : nil)
+                : []
+            let reminders = (includeReminders && previouslySentIds.isEmpty)
+                ? await iOSRemindersMigrator.readReminders(upToDate: remindersUpToTodayOnly ? nowCutoff : nil)
+                : []
             let scanResult = await iOSPhotoKitMigrator.scanLibraryAssetsDetailed(
                 includePhotos: includePhotos,
                 includeVideos: includeVideos

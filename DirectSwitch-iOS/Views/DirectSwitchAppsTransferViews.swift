@@ -488,6 +488,143 @@ struct AppIconThumbnailView: View {
     }
 }
 
+/// Riquadro app in stile iPhone (icona con angoli arrotondati + nome app sotto + spunta discreta se selezionata, zero "+" blu).
+struct iPhoneAppGridTile: View {
+    let appName: String
+    let iconUrl: String?
+    let isSelected: Bool
+    var iconSize: CGFloat = 52
+    var onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 6) {
+                ZStack(alignment: .topTrailing) {
+                    AppIconThumbnailView(iconUrl: iconUrl, size: iconSize)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: iconSize * 0.225, style: .continuous)
+                                .stroke(isSelected ? AppleTheme.blue : Color.clear, lineWidth: isSelected ? 2.0 : 0)
+                        )
+                        .shadow(color: Color.black.opacity(isSelected ? 0.10 : 0.04), radius: 3, x: 0, y: 1.5)
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(AppleTheme.green)
+                            .background(Circle().fill(Color.white).padding(2))
+                            .offset(x: 4, y: -4)
+                    }
+                }
+
+                Text(appName)
+                    .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                    .foregroundColor(AppleTheme.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Categoria estesa in stile Libreria App iPhone (intestazione con conteggio + griglia 4 colonne icona e nome).
+struct iPhoneAppCategoryAccordionCard: View {
+    let category: AppQuickCategory
+    let iconOverrides: [String: String]
+    let isExpanded: Bool
+    let isAppSelected: (InstalledAppRecord) -> Bool
+    var categoryTint: Color = AppleTheme.blue
+    var onToggleExpand: () -> Void
+    var onToggleWholeCategory: (_ currentlyAllSelected: Bool) -> Void
+    var onToggleApp: (_ app: InstalledAppRecord, _ currentlySelected: Bool) -> Void
+
+    private var selectedCount: Int {
+        category.apps.filter { isAppSelected($0) }.count
+    }
+
+    private var allSelected: Bool {
+        selectedCount == category.apps.count && !category.apps.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Button(action: onToggleExpand) {
+                    HStack(spacing: 10) {
+                        AppleSettingsIcon(systemName: category.iconName, color: categoryTint, size: 30)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(category.title)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                                .lineLimit(1)
+                            Text(selectedCount > 0
+                                ? "\(selectedCount) di \(category.apps.count) selezionate"
+                                : "\(category.apps.count) app disponibili")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(selectedCount > 0 ? AppleTheme.green : AppleTheme.textSecondary)
+                        }
+                        Spacer(minLength: 4)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(AppleTheme.textTertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button(action: {
+                    onToggleWholeCategory(allSelected)
+                }) {
+                    Text(allSelected ? "Togli" : "Tutte")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(allSelected ? AppleTheme.orange : AppleTheme.textPrimary)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(allSelected ? AppleTheme.orange.opacity(0.14) : AppleTheme.cardSurface)
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(allSelected ? AppleTheme.orange.opacity(0.35) : AppleTheme.cardBorder, lineWidth: 0.8)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isExpanded {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: 4),
+                    spacing: 12
+                ) {
+                    ForEach(category.apps) { item in
+                        let checked = isAppSelected(item)
+                        let resolvedIcon = item.iconUrl ?? iconOverrides[item.packageName.lowercased()]
+                        iPhoneAppGridTile(
+                            appName: item.appName,
+                            iconUrl: resolvedIcon,
+                            isSelected: checked,
+                            iconSize: 52
+                        ) {
+                            onToggleApp(item, checked)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(12)
+        .background(AppleTheme.inputSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(AppleTheme.cardBorder.opacity(0.8), lineWidth: 0.8)
+        )
+    }
+}
+
 // MARK: - Sheet Mittente: Rilevamento Istantaneo (Schemi iOS + Foto/Album) + Categorie 1-Tocco + Ricerca Esatta App Store
 
 struct SenderAppsSelectionSheet: View {
@@ -505,7 +642,8 @@ struct SenderAppsSelectionSheet: View {
     @State private var searchResults: [AppStoreSearchHit] = []
     @State private var isSearching: Bool = false
     @State private var isRescanning: Bool = false
-    @State private var expandedCategoryIds: Set<String> = ["banks_payments", "spid_office"]
+    @State private var expandedCategoryIds: Set<String> = ["social_messaging", "banks_payments"]
+    @State private var categoryIconOverrides: [String: String] = [:]
 
     private var selectedCount: Int {
         appsCatalog.filter { !deselectedAppIds.contains($0.id) }.count
@@ -737,15 +875,17 @@ struct SenderAppsSelectionSheet: View {
                                                 addAppToSenderCatalog(tagged)
                                             }) {
                                                 HStack(spacing: 4) {
-                                                    Image(systemName: alreadyAdded ? "checkmark" : "plus")
-                                                        .font(.system(size: 11, weight: .bold))
-                                                    Text(alreadyAdded ? "Aggiunta" : "Aggiungi")
+                                                    if alreadyAdded {
+                                                        Image(systemName: "checkmark")
+                                                            .font(.system(size: 11, weight: .bold))
+                                                    }
+                                                    Text(alreadyAdded ? "Selezionata" : "Seleziona")
                                                         .font(.system(size: 12, weight: .bold))
                                                 }
-                                                .foregroundColor(alreadyAdded ? AppleTheme.green : AppleTheme.blue)
-                                                .padding(.horizontal, 10)
+                                                .foregroundColor(alreadyAdded ? AppleTheme.green : AppleTheme.textPrimary)
+                                                .padding(.horizontal, 11)
                                                 .padding(.vertical, 6)
-                                                .background(alreadyAdded ? AppleTheme.green.opacity(0.12) : AppleTheme.cardSelected)
+                                                .background(alreadyAdded ? AppleTheme.green.opacity(0.12) : AppleTheme.inputSurface)
                                                 .clipShape(Capsule())
                                             }
                                             .buttonStyle(.plain)
@@ -774,90 +914,37 @@ struct SenderAppsSelectionSheet: View {
             }
         }
         .preferredColorScheme(.light)
+        .task {
+            let icons = await iOSAppStoreCatalogResolver.fetchIconsForCategories(visibleQuickCategories)
+            if !icons.isEmpty {
+                categoryIconOverrides.merge(icons) { _, new in new }
+            }
+        }
     }
 
     private func quickCategoryAccordionRow(_ category: AppQuickCategory) -> some View {
         let isExpanded = expandedCategoryIds.contains(category.id)
-        let selectedInCategory = category.apps.filter { isAppSelected($0) }.count
-        let allInCategorySelected = selectedInCategory == category.apps.count && !category.apps.isEmpty
-
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        if isExpanded {
-                            expandedCategoryIds.remove(category.id)
-                        } else {
-                            expandedCategoryIds.insert(category.id)
-                        }
+        return iPhoneAppCategoryAccordionCard(
+            category: category,
+            iconOverrides: categoryIconOverrides,
+            isExpanded: isExpanded,
+            isAppSelected: isAppSelected,
+            onToggleExpand: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if isExpanded {
+                        expandedCategoryIds.remove(category.id)
+                    } else {
+                        expandedCategoryIds.insert(category.id)
                     }
-                }) {
-                    HStack(spacing: 9) {
-                        Image(systemName: category.iconName)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(AppleTheme.blue)
-                            .frame(width: 24)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(category.title)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(AppleTheme.textPrimary)
-                            Text("\(selectedInCategory)/\(category.apps.count) selezionate")
-                                .font(.system(size: 11))
-                                .foregroundColor(selectedInCategory > 0 ? AppleTheme.green : AppleTheme.textSecondary)
-                        }
-                        Spacer()
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(AppleTheme.textTertiary)
-                    }
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-
-                Button(action: {
-                    toggleWholeCategory(category, currentlyAllSelected: allInCategorySelected)
-                }) {
-                    Text(allInCategorySelected ? "Togli" : "Tutte")
-                        .font(.system(size: 11.5, weight: .bold))
-                        .foregroundColor(allInCategorySelected ? AppleTheme.orange : AppleTheme.blue)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(allInCategorySelected ? AppleTheme.orange.opacity(0.12) : AppleTheme.cardSelected)
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
+            },
+            onToggleWholeCategory: { currentlyAllSelected in
+                toggleWholeCategory(category, currentlyAllSelected: currentlyAllSelected)
+            },
+            onToggleApp: { item, currentlySelected in
+                toggleSingleCategoryApp(item, isCurrentlySelected: currentlySelected)
             }
-
-            if isExpanded {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 7) {
-                        ForEach(category.apps) { item in
-                            let checked = isAppSelected(item)
-                            Button(action: {
-                                toggleSingleCategoryApp(item, isCurrentlySelected: checked)
-                            }) {
-                                HStack(spacing: 5) {
-                                    Image(systemName: checked ? "checkmark.circle.fill" : "plus.circle.fill")
-                                        .font(.system(size: 12))
-                                    Text(item.appName)
-                                        .font(.system(size: 12, weight: .semibold))
-                                }
-                                .foregroundColor(checked ? .white : AppleTheme.blue)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(checked ? AppleTheme.green : AppleTheme.cardSelected)
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.top, 2)
-                }
-            }
-        }
-        .padding(10)
-        .background(AppleTheme.inputSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        )
     }
 
     private func senderCatalogAppRow(_ app: InstalledAppRecord) -> some View {
