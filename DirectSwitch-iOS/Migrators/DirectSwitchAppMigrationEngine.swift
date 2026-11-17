@@ -3370,13 +3370,22 @@ enum iOSPhotoMetadataAppDetector {
             }
         }
         if let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
-            for path in ["tiff:Software", "xmp:CreatorTool"] {
-                if let value = CGImageMetadataCopyStringValueWithPath(metadata, nil, path as CFString) {
-                    let clean = (value as String).trimmingCharacters(in: .whitespacesAndNewlines)
+            var foundSoftware: String? = nil
+            let enumOpts = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
+            CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, enumOpts) { _, tag in
+                let tagName = (CGImageMetadataTagCopyName(tag) as String?) ?? ""
+                if tagName == "Software" || tagName == "CreatorTool",
+                   let rawVal = CGImageMetadataTagCopyValue(tag) as? String {
+                    let clean = rawVal.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !clean.isEmpty {
-                        return clean
+                        foundSoftware = clean
+                        return false
                     }
                 }
+                return true
+            }
+            if let foundSoftware {
+                return foundSoftware
             }
         }
         return nil
