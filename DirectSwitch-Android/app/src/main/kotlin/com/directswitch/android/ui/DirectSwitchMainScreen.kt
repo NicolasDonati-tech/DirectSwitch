@@ -2014,11 +2014,13 @@ private fun TransferProgressWizardView(
         return
     }
 
+    val processedItems = progress.completedItems + progress.failedItemsCount
     val ratio = when {
         progress.isCompleted -> 1f
-        progress.transferredBytes == 0L && progress.completedItems == 0 -> 0f
-        progress.totalBytes > 0L -> (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0f, 1f)
-        progress.totalItems > 0 -> (progress.completedItems.toFloat() / progress.totalItems.toFloat()).coerceIn(0f, 1f)
+        progress.transferredBytes == 0L && processedItems == 0 -> 0f
+        progress.totalBytes > 0L && progress.transferredBytes > 0L ->
+            (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0.01f, 1f)
+        progress.totalItems > 0 -> (processedItems.toFloat() / progress.totalItems.toFloat()).coerceIn(0.01f, 1f)
         else -> 0f
     }
     val pct = (ratio * 100f).toInt()
@@ -2139,6 +2141,10 @@ private fun TransferProgressWizardView(
         if (progress.failedItemsCount > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.Warning, DirectSwitchTheme.orange, "File non disponibili saltati", "${progress.failedItemsCount}")
+        }
+        if (progress.gatedPreviewCount > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.LockOpen, DirectSwitchTheme.blue, "Extra bloccati (solo 25 gratis Cross-OS)", "${progress.gatedPreviewCount}")
         }
     }
 

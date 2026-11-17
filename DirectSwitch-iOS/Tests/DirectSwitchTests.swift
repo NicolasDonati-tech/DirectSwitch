@@ -1098,4 +1098,97 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "WA Business"), "WhatsApp Business")
         XCTAssertEqual(iOSInstalledAppsScanner.canonicalAppQuery(for: "WhatsApp"), "WhatsApp Messenger")
     }
+
+    func testTransferProgressAccountingLivePhotosFailuresAndSlidingSpeedMeter() {
+        // 1. Live Photos iPhone -> iPhone: i byte della clip .MOV devono contribuire sia al totale sia al throughput
+        var liveAcc = TransferProgressAccounting(
+            queuedItemsCount: 2,
+            remainingEstimatedPrimaryBytes: 4_000_000,
+            remainingEstimatedLiveBytes: 6_000_000
+        )
+        XCTAssertEqual(liveAcc.totalBytesForProgress, 10_000_000)
+        XCTAssertEqual(liveAcc.progressFraction, 0.0, accuracy: 0.0001)
+
+        liveAcc.recordLiveVideoUploaded(estimatedLiveBytes: 3_000_000, actualBytes: 3_200_000)
+        liveAcc.recordPrimaryItemUploaded(estimatedPrimaryBytes: 2_000_000, actualBytes: 2_000_000)
+        XCTAssertEqual(liveAcc.succeededItemsCount, 1)
+        XCTAssertEqual(liveAcc.transferredBytes, 5_200_000)
+        XCTAssertEqual(liveAcc.totalBytesForProgress, 10_200_000)
+        XCTAssertEqual(liveAcc.progressFraction, 5_200_000.0 / 10_200_000.0, accuracy: 0.001)
+
+        liveAcc.recordLiveVideoUploaded(estimatedLiveBytes: 3_000_000, actualBytes: 2_800_000)
+        liveAcc.recordPrimaryItemUploaded(estimatedPrimaryBytes: 2_000_000, actualBytes: 2_000_000)
+        XCTAssertEqual(liveAcc.succeededItemsCount, 2)
+        XCTAssertEqual(liveAcc.progressFraction, 1.0, accuracy: 0.0001)
+
+        // 2. Se metà foto falliscono (iCloud offline / illeggibili), la percentuale riconcilia i byte stimati residui e non resta al 50%
+        var failAcc = TransferProgressAccounting(
+            queuedItemsCount: 4,
+            remainingEstimatedPrimaryBytes: 8_000_000
+        )
+        failAcc.recordPrimaryItemUploaded(estimatedPrimaryBytes: 2_000_000, actualBytes: 2_000_000)
+        failAcc.recordItemFailedOrSkipped(estimatedPrimaryBytes: 2_000_000)
+        failAcc.recordPrimaryItemUploaded(estimatedPrimaryBytes: 2_000_000, actualBytes: 2_000_000)
+        failAcc.recordItemFailedOrSkipped(estimatedPrimaryBytes: 2_000_000)
+        XCTAssertEqual(failAcc.succeededItemsCount, 2)
+        XCTAssertEqual(failAcc.failedItemsCount, 2)
+        XCTAssertEqual(failAcc.totalBytesForProgress, 4_000_000)
+        XCTAssertEqual(failAcc.progressFraction, 1.0, accuracy: 0.0001)
+
+        // 3. Caso limite: tutti i file falliti -> avanza su processed / initialTotalItems fino a 1.0
+        var allFailAcc = TransferProgressAccounting(
+            queuedItemsCount: 2,
+            remainingEstimatedPrimaryBytes: 4_000_000
+        )
+        allFailAcc.recordItemFailedOrSkipped(estimatedPrimaryBytes: 2_000_000)
+        XCTAssertEqual(allFailAcc.progressFraction, 0.5, accuracy: 0.001)
+        allFailAcc.recordItemFailedOrSkipped(estimatedPrimaryBytes: 2_000_000)
+        XCTAssertEqual(allFailAcc.totalBytesForProgress, 0)
+        XCTAssertEqual(allFailAcc.progressFraction, 1.0, accuracy: 0.0001)
+
+        // 4. SlidingTransferSpeedMeter: ignora stalli passati fuori dalla finestra da 4.5s
+        var meter = SlidingTransferSpeedMeter(startTimestamp: 100.0, windowSeconds: 4.5)
+        _ = meter.record(bytes: 1_048_576, at: 101.0)
+        let spd = meter.record(bytes: 20 * 1024 * 1024, at: 108.0)
+        _ = spd
+        let spdRecent = meter.record(bytes: 20 * 1024 * 1024, at: 110.0)
+        XCTAssertGreaterThan(spdRecent, 10.0)
+    }
+
+    func testAppPrivacyReportNDJSONExtractionAndLegacyCachePurge() {
+        let sampleNdjson = """
+        {"type":"access","accessor":{"identifier":"com.apple.springboard","identifierType":"bundleID"},"category":"location"}
+        {"type":"access","accessor":{"identifier":"com.intesasanpaolo.mobile","identifierType":"bundleID"},"category":"camera"}
+        {"type":"access","accessor":{"identifier":"com.intesasanpaolo.mobile.NotificationService","identifierType":"bundleID"},"category":"contacts"}
+        {"type":"access","accessor":{"identifier":"it.poste.postepay.Widget","identifierType":"bundleID"},"category":"photos"}
+        {"type":"networkActivity","bundleID":"com.apple.Pages","domain":"icloud.com"}
+        {"type":"networkActivity","bundleID":"com.directswitch.ios","domain":"localhost"}
+        {"type":"networkActivity","bundleID":"com.deliveroo.orderapp","domain":"api.deliveroo.com"}
+        {"not_valid_json"
+        """
+
+        let bundles = iOSInstalledAppsScanner.extractBundleIdsFromAppPrivacyReportNDJSON(sampleNdjson)
+        XCTAssertTrue(bundles.contains("com.intesasanpaolo.mobile"))
+        XCTAssertTrue(bundles.contains("it.poste.postepay"))
+        XCTAssertTrue(bundles.contains("com.apple.Pages"))
+        XCTAssertTrue(bundles.contains("com.deliveroo.orderapp"))
+        XCTAssertFalse(bundles.contains("com.apple.springboard"))
+        XCTAssertFalse(bundles.contains("com.directswitch.ios"))
+        XCTAssertEqual(bundles.filter { $0 == "com.intesasanpaolo.mobile" }.count, 1)
+
+        // Verifica che il vecchio archivio v1/v2 con eventuali app errate venga eliminato al caricamento
+        iOSInstalledAppsScanner.clearSavedCustomApps()
+        let badLegacyData = try? JSONEncoder().encode([
+            InstalledAppRecord(packageName: "com.fake.hallucinated", appName: "FakeOCR", appStoreId: 999999)
+        ])
+        UserDefaults.standard.set(badLegacyData, forKey: "directswitch_verified_sender_apps_v2")
+        let loaded = iOSInstalledAppsScanner.loadSavedCustomApps()
+        XCTAssertTrue(loaded.isEmpty)
+        XCTAssertNil(UserDefaults.standard.object(forKey: "directswitch_verified_sender_apps_v2"))
+
+        // Verifica i 48 schemi noti (+ whatsapp + com.cloudsave.ios = max 50 su iOS)
+        XCTAssertTrue(iOSInstalledAppsScanner.knownProbes.contains { $0.bundleId == "com.getdropbox.Dropbox" && $0.urlScheme == "dbapi-2" })
+        XCTAssertTrue(iOSInstalledAppsScanner.knownProbes.contains { $0.bundleId == "com.tinyspeck.chatlyio" && $0.urlScheme == "slack" })
+        XCTAssertLessThanOrEqual(Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"]).count, 50)
+    }
 }

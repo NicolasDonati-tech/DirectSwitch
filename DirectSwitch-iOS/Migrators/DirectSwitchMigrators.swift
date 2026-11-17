@@ -715,11 +715,14 @@ enum iOSPhotoKitMigrator {
         if asset.mediaType == .video {
             return resources.first(where: { $0.type == .fullSizeVideo })
                 ?? resources.first(where: { $0.type == .video })
-                ?? resources.first
+                ?? resources.first(where: { $0.type != .adjustmentData })
         } else {
             return resources.first(where: { $0.type == .fullSizePhoto })
                 ?? resources.first(where: { $0.type == .photo })
-                ?? resources.first
+                ?? resources.first(where: { $0.type == .alternatePhoto })
+                ?? resources.first(where: {
+                    $0.type != .adjustmentData && $0.type != .pairedVideo && $0.type != .fullSizePairedVideo
+                })
         }
     }
 
@@ -957,12 +960,20 @@ enum iOSPhotoKitMigrator {
         return created
     }
 
+    struct ScannedLibraryAssetEntry: @unchecked Sendable {
+        let item: ManifestItem
+        let asset: PHAsset
+        let liveVideoBytes: Int64
+        let isLocallyAvailable: Bool
+    }
+
     /// Scansiona Foto, Live Photos e Video del Rullino iOS preservando Album utente, Preferiti (❤️), coordinate GPS
-    /// e usando un ID deterministico basato su `localIdentifier` così il Resume funziona anche dopo nuovi scatti/screenshot.
-    static func scanLibraryAssetsWithMetadata(
+    /// e usando un ID deterministico basato su `localIdentifier`. Ordina prima gli asset locali e in coda gli eventuali
+    /// elementi solo su iCloud così i trasferimenti non subiscono rallentamenti iniziali.
+    static func scanLibraryAssetsDetailed(
         includePhotos: Bool,
         includeVideos: Bool
-    ) async -> (items: [(ManifestItem, PHAsset)], iCloudOptimizedCount: Int) {
+    ) async -> (items: [ScannedLibraryAssetEntry], iCloudOptimizedCount: Int) {
         guard includePhotos || includeVideos else { return ([], 0) }
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else { return ([], 0) }
@@ -971,7 +982,8 @@ enum iOSPhotoKitMigrator {
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         let fetched = PHAsset.fetchAssets(with: opts)
-        var out: [(ManifestItem, PHAsset)] = []
+        var localEntries: [ScannedLibraryAssetEntry] = []
+        var cloudEntries: [ScannedLibraryAssetEntry] = []
         var cloudOptimized = 0
 
         fetched.enumerateObjects { asset, idx, _ in
@@ -981,10 +993,12 @@ enum iOSPhotoKitMigrator {
                 return
             }
             guard let primary = primaryMediaResource(for: asset) else { return }
-            if let locallyAvailable = primary.value(forKey: "locallyAvailable") as? Bool, !locallyAvailable {
+            let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
+            if !isLocal {
                 cloudOptimized += 1
             }
             let pairedLive = isPhoto ? pairedLiveVideoResource(for: asset) : nil
+            let liveSize = (pairedLive?.value(forKey: "fileSize") as? Int64) ?? 0
             let size = (primary.value(forKey: "fileSize") as? Int64) ?? 1_048_576
             let createdMs = Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000.0)
             let fileName = primary.originalFilename.isEmpty ? "media_\(idx).\(isVideo ? "mov" : "jpg")" : primary.originalFilename
@@ -1010,9 +1024,27 @@ enum iOSPhotoKitMigrator {
                 isLivePhoto: pairedLive != nil ? true : nil,
                 livePhotoVideoFileName: pairedLive?.originalFilename
             )
-            out.append((item, asset))
+            let entry = ScannedLibraryAssetEntry(
+                item: item,
+                asset: asset,
+                liveVideoBytes: max(0, liveSize),
+                isLocallyAvailable: isLocal
+            )
+            if isLocal {
+                localEntries.append(entry)
+            } else {
+                cloudEntries.append(entry)
+            }
         }
-        return (out, cloudOptimized)
+        return (localEntries + cloudEntries, cloudOptimized)
+    }
+
+    static func scanLibraryAssetsWithMetadata(
+        includePhotos: Bool,
+        includeVideos: Bool
+    ) async -> (items: [(ManifestItem, PHAsset)], iCloudOptimizedCount: Int) {
+        let detailed = await scanLibraryAssetsDetailed(includePhotos: includePhotos, includeVideos: includeVideos)
+        return (detailed.items.map { ($0.item, $0.asset) }, detailed.iCloudOptimizedCount)
     }
 
     static func stableManifestItemId(
@@ -1035,59 +1067,102 @@ enum iOSPhotoKitMigrator {
         return res.items
     }
 
+    private final class AsyncExportResumeGuard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+        private var dataRequestId: PHAssetResourceDataRequestID? = nil
+        private var imageRequestId: PHImageRequestID? = nil
+
+        func setDataRequestId(_ id: PHAssetResourceDataRequestID) {
+            lock.lock()
+            dataRequestId = id
+            lock.unlock()
+        }
+
+        func setImageRequestId(_ id: PHImageRequestID) {
+            lock.lock()
+            imageRequestId = id
+            lock.unlock()
+        }
+
+        func tryClaim(cancelPending: Bool = false) -> Bool {
+            lock.lock()
+            let shouldResume = !resumed
+            resumed = true
+            let dId = dataRequestId
+            let iId = imageRequestId
+            lock.unlock()
+            if shouldResume && cancelPending {
+                if let dId {
+                    PHAssetResourceManager.default().cancelDataRequest(dId)
+                }
+                if let iId {
+                    PHImageManager.default().cancelImageRequest(iId)
+                }
+            }
+            return shouldResume
+        }
+    }
+
     /// Esporta un `PHAsset` direttamente su file temporaneo su disco con triplo livello di resilienza
-    /// contro rallentamenti di `assetsd` su librerie da 5.000+ elementi o risorse modificate.
+    /// (risorsa locale immediata, download iCloud con timeout limitato così gli hotspot offline non bloccano, e `PHImageManager` fallback).
     static func exportAssetToTempFile(_ asset: PHAsset) async -> URL? {
         if let primary = primaryMediaResource(for: asset) {
-            if let exported = await exportResourceToTempFile(primary, prefix: "ds_exp") {
+            let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
+            if let exported = await exportResourceToTempFile(primary, prefix: "ds_exp", allowNetwork: true, timeoutSeconds: isLocal ? 35.0 : 12.0) {
                 return exported
             }
-            // Livello 2: breve attesa se il demone PhotoKit (`assetsd`) è saturo e tentativo sulla risorsa base originale
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            // Livello 2: breve attesa se `assetsd` era occupato o ripiego su risorsa base originale locale
+            try? await Task.sleep(nanoseconds: 180_000_000)
             let resources = PHAssetResource.assetResources(for: asset)
             let fallbackRes: PHAssetResource? = {
                 if asset.mediaType == .video {
                     return resources.first(where: { $0.type == .video && $0 != primary }) ?? primary
                 } else {
-                    return resources.first(where: { $0.type == .photo && $0 != primary }) ?? primary
+                    return resources.first(where: { $0.type == .photo && $0 != primary })
+                        ?? resources.first(where: { $0.type == .alternatePhoto && $0 != primary })
+                        ?? primary
                 }
             }()
-            if let fallbackRes, let exported = await exportResourceToTempFile(fallbackRes, prefix: "ds_exp_fb") {
+            if let fallbackRes,
+               let exported = await exportResourceToTempFile(fallbackRes, prefix: "ds_exp_fb", allowNetwork: false, timeoutSeconds: 8.0) {
                 return exported
             }
         }
 
-        // Livello 3 (per foto): fallback tramite PHImageManager ad alta qualità
+        // Livello 3 (per foto): fallback tramite PHImageManager (prima rete+alta qualità con timeout, poi cache locale offline)
         if asset.mediaType == .image {
-            return await exportImageViaImageManager(asset)
+            if let highQ = await exportImageViaImageManager(asset, allowNetwork: true, deliveryMode: .highQualityFormat, timeoutSeconds: 10.0) {
+                return highQ
+            }
+            return await exportImageViaImageManager(asset, allowNetwork: false, deliveryMode: .opportunistic, timeoutSeconds: 5.0)
         }
         return nil
     }
 
-    private static func exportImageViaImageManager(_ asset: PHAsset) async -> URL? {
+    private static func exportImageViaImageManager(
+        _ asset: PHAsset,
+        allowNetwork: Bool = true,
+        deliveryMode: PHImageRequestOptionsDeliveryMode = .highQualityFormat,
+        timeoutSeconds: TimeInterval = 12.0
+    ) async -> URL? {
         await withCheckedContinuation { continuation in
             let opts = PHImageRequestOptions()
-            opts.isNetworkAccessAllowed = true
-            opts.deliveryMode = .highQualityFormat
+            opts.isNetworkAccessAllowed = allowNetwork
+            opts.deliveryMode = deliveryMode
             opts.version = .current
             opts.isSynchronous = false
 
-            final class ResumeGuard: @unchecked Sendable {
-                private let lock = NSLock()
-                private var resumed = false
-                func tryClaim() -> Bool {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    if resumed { return false }
-                    resumed = true
-                    return true
+            let guardBox = AsyncExportResumeGuard()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+                if guardBox.tryClaim(cancelPending: true) {
+                    continuation.resume(returning: nil)
                 }
             }
-            let guardBox = ResumeGuard()
 
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, info in
+            let reqId = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, info in
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if isDegraded { return }
+                if isDegraded && deliveryMode == .highQualityFormat { return }
                 guard guardBox.tryClaim() else { return }
                 guard let data, !data.isEmpty else {
                     continuation.resume(returning: nil)
@@ -1103,16 +1178,23 @@ enum iOSPhotoKitMigrator {
                     continuation.resume(returning: nil)
                 }
             }
+            guardBox.setImageRequestId(reqId)
         }
     }
 
     /// Esporta la componente video `.MOV` accoppiata di una Live Photo su file temporaneo.
     static func exportLivePairedVideoToTempFile(_ asset: PHAsset) async -> URL? {
         guard let paired = pairedLiveVideoResource(for: asset) else { return nil }
-        return await exportResourceToTempFile(paired, prefix: "ds_live")
+        let isLocal = (paired.value(forKey: "locallyAvailable") as? Bool) ?? true
+        return await exportResourceToTempFile(paired, prefix: "ds_live", allowNetwork: true, timeoutSeconds: isLocal ? 20.0 : 9.0)
     }
 
-    private static func exportResourceToTempFile(_ resource: PHAssetResource, prefix: String) async -> URL? {
+    private static func exportResourceToTempFile(
+        _ resource: PHAssetResource,
+        prefix: String,
+        allowNetwork: Bool = true,
+        timeoutSeconds: TimeInterval = 25.0
+    ) async -> URL? {
         let safeName = URL(fileURLWithPath: resource.originalFilename).lastPathComponent
         let destURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)_\(UUID().uuidString)_\(safeName.isEmpty ? "asset.bin" : safeName)")
@@ -1120,12 +1202,23 @@ enum iOSPhotoKitMigrator {
 
         return await withCheckedContinuation { continuation in
             let opts = PHAssetResourceRequestOptions()
-            opts.isNetworkAccessAllowed = true
-            PHAssetResourceManager.default().writeData(
+            opts.isNetworkAccessAllowed = allowNetwork
+            let guardBox = AsyncExportResumeGuard()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+                if guardBox.tryClaim(cancelPending: true) {
+                    try? FileManager.default.removeItem(at: destURL)
+                    continuation.resume(returning: nil)
+                }
+            }
+            let reqId = PHAssetResourceManager.default().writeData(
                 for: resource,
                 toFile: destURL,
                 options: opts
             ) { error in
+                guard guardBox.tryClaim() else {
+                    try? FileManager.default.removeItem(at: destURL)
+                    return
+                }
                 if error != nil || !FileManager.default.fileExists(atPath: destURL.path) {
                     try? FileManager.default.removeItem(at: destURL)
                     continuation.resume(returning: nil)
@@ -1133,6 +1226,7 @@ enum iOSPhotoKitMigrator {
                     continuation.resume(returning: destURL)
                 }
             }
+            guardBox.setDataRequestId(reqId)
         }
     }
 

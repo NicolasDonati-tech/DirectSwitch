@@ -756,3 +756,107 @@ enum DirectSwitchLocalNetwork {
             || (octets[0] == 169 && octets[1] == 254)
     }
 }
+
+/// Riconcilia byte stimati, clip Live Photo (.MOV) e file saltati per evitare percentuali bloccate al 50%.
+struct TransferProgressAccounting: Sendable {
+    let initialTotalItems: Int
+    private(set) var succeededItemsCount: Int
+    private(set) var failedItemsCount: Int
+    private(set) var transferredBytes: Int64
+    private(set) var remainingEstimatedPrimaryBytes: Int64
+    private(set) var remainingEstimatedLiveBytes: Int64
+
+    init(
+        previouslyCompletedItems: Int = 0,
+        queuedItemsCount: Int,
+        previouslySentBytes: Int64 = 0,
+        remainingEstimatedPrimaryBytes: Int64,
+        remainingEstimatedLiveBytes: Int64 = 0
+    ) {
+        self.initialTotalItems = max(0, previouslyCompletedItems + queuedItemsCount)
+        self.succeededItemsCount = max(0, previouslyCompletedItems)
+        self.failedItemsCount = 0
+        self.transferredBytes = max(0, previouslySentBytes)
+        self.remainingEstimatedPrimaryBytes = max(0, remainingEstimatedPrimaryBytes)
+        self.remainingEstimatedLiveBytes = max(0, remainingEstimatedLiveBytes)
+    }
+
+    var processedItemsCount: Int {
+        succeededItemsCount + failedItemsCount
+    }
+
+    var totalBytesForProgress: Int64 {
+        max(transferredBytes, transferredBytes + remainingEstimatedPrimaryBytes + remainingEstimatedLiveBytes)
+    }
+
+    var progressFraction: Double {
+        let total = totalBytesForProgress
+        if total > 0 && transferredBytes > 0 {
+            return min(1.0, max(0.01, Double(transferredBytes) / Double(total)))
+        }
+        if initialTotalItems > 0 {
+            let processed = processedItemsCount
+            guard processed > 0 else { return 0.0 }
+            return min(1.0, max(0.01, Double(processed) / Double(initialTotalItems)))
+        }
+        return 0.0
+    }
+
+    mutating func recordLiveVideoUploaded(estimatedLiveBytes: Int64, actualBytes: Int64) {
+        transferredBytes += max(0, actualBytes)
+        remainingEstimatedLiveBytes = max(0, remainingEstimatedLiveBytes - max(0, estimatedLiveBytes))
+    }
+
+    mutating func recordLiveVideoSkipped(estimatedLiveBytes: Int64) {
+        remainingEstimatedLiveBytes = max(0, remainingEstimatedLiveBytes - max(0, estimatedLiveBytes))
+    }
+
+    mutating func recordPrimaryItemUploaded(estimatedPrimaryBytes: Int64, actualBytes: Int64) {
+        succeededItemsCount += 1
+        transferredBytes += max(0, actualBytes)
+        remainingEstimatedPrimaryBytes = max(0, remainingEstimatedPrimaryBytes - max(0, estimatedPrimaryBytes))
+    }
+
+    mutating func recordItemFailedOrSkipped(estimatedPrimaryBytes: Int64, estimatedLiveBytes: Int64 = 0) {
+        failedItemsCount += 1
+        remainingEstimatedPrimaryBytes = max(0, remainingEstimatedPrimaryBytes - max(0, estimatedPrimaryBytes))
+        remainingEstimatedLiveBytes = max(0, remainingEstimatedLiveBytes - max(0, estimatedLiveBytes))
+    }
+}
+
+/// Misuratore di velocità su finestra scorrevole (4.5s) insensibile a stalli iniziali o file saltati.
+struct SlidingTransferSpeedMeter: Sendable {
+    private let windowSeconds: TimeInterval
+    private let startTimestamp: TimeInterval
+    private var samples: [(timestamp: TimeInterval, bytes: Int64)] = []
+    private var totalBytesRecorded: Int64 = 0
+
+    init(startTimestamp: TimeInterval = Date().timeIntervalSinceReferenceDate, windowSeconds: TimeInterval = 4.5) {
+        self.startTimestamp = startTimestamp
+        self.windowSeconds = max(1.0, windowSeconds)
+    }
+
+    mutating func record(bytes: Int64, at timestamp: TimeInterval = Date().timeIntervalSinceReferenceDate) -> Double {
+        let clampedBytes = max(0, bytes)
+        if clampedBytes > 0 {
+            totalBytesRecorded += clampedBytes
+            samples.append((timestamp: timestamp, bytes: clampedBytes))
+        }
+        return currentMegabytesPerSec(at: timestamp)
+    }
+
+    mutating func currentMegabytesPerSec(at timestamp: TimeInterval = Date().timeIntervalSinceReferenceDate) -> Double {
+        let cutoff = timestamp - windowSeconds
+        while let first = samples.first, first.timestamp < cutoff {
+            samples.removeFirst()
+        }
+        guard totalBytesRecorded > 0 else { return 0.0 }
+        let windowBytes = samples.reduce(Int64(0)) { $0 + $1.bytes }
+        if windowBytes > 0, let oldest = samples.first {
+            let span = max(0.35, min(windowSeconds, timestamp - oldest.timestamp + 0.15))
+            return (Double(windowBytes) / (1024.0 * 1024.0)) / span
+        }
+        let elapsed = max(0.25, timestamp - startTimestamp)
+        return (Double(totalBytesRecorded) / (1024.0 * 1024.0)) / elapsed
+    }
+}

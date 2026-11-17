@@ -669,4 +669,40 @@ class DirectSwitchProtocolTest {
         assertEquals(null, legacyDecoded.labeledPhones)
         assertEquals(null, legacyDecoded.postalAddresses)
     }
+
+    @Test
+    fun transferProgressAccountingReconcilesFailuresAndSlidingSpeedMeterWorks() {
+        val acc = com.directswitch.android.protocol.TransferProgressAccounting(
+            queuedItemsCount = 4,
+            remainingEstimatedBytes = 8_000_000L
+        )
+        assertEquals(8_000_000L, acc.totalBytesForProgress)
+        assertEquals(0f, acc.progressFraction, 0.0001f)
+
+        acc.recordUploaded(estimatedBytes = 2_000_000L, actualBytes = 1_800_000L)
+        acc.recordFailedOrSkipped(estimatedBytes = 2_000_000L)
+        acc.recordUploaded(estimatedBytes = 2_000_000L, actualBytes = 2_200_000L)
+        acc.recordFailedOrSkipped(estimatedBytes = 2_000_000L)
+
+        assertEquals(2, acc.succeededItemsCount)
+        assertEquals(2, acc.failedItemsCount)
+        assertEquals(4_000_000L, acc.totalBytesForProgress)
+        assertEquals(1.0f, acc.progressFraction, 0.0001f)
+
+        val allFailed = com.directswitch.android.protocol.TransferProgressAccounting(
+            queuedItemsCount = 2,
+            remainingEstimatedBytes = 4_000_000L
+        )
+        allFailed.recordFailedOrSkipped(2_000_000L)
+        assertEquals(0.5f, allFailed.progressFraction, 0.001f)
+        allFailed.recordFailedOrSkipped(2_000_000L)
+        assertEquals(0L, allFailed.totalBytesForProgress)
+        assertEquals(1.0f, allFailed.progressFraction, 0.0001f)
+
+        val meter = com.directswitch.android.protocol.SlidingTransferSpeedMeter(startMillis = 10_000L, windowMillis = 4_500L)
+        meter.record(bytes = 1_048_576L, nowMillis = 11_000L)
+        meter.record(bytes = 20L * 1024L * 1024L, nowMillis = 18_000L)
+        val recentSpeed = meter.record(bytes = 20L * 1024L * 1024L, nowMillis = 20_000L)
+        assertTrue(recentSpeed > 10.0)
+    }
 }

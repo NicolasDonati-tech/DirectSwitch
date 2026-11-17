@@ -48,22 +48,13 @@ struct DirectSwitchMainView: View {
     @State private var includeApps: Bool = true
     @State private var includeWhatsApp: Bool = true
 
-    // Catalogo App rilevate sull'iPhone che invia + Passo 1 Fotocamera Live / Screenshot Home
+    // Catalogo App verificate sull'iPhone che invia + Importazione esatta da Resoconto Privacy Apple
     @State private var senderAppsCatalog: [InstalledAppRecord] = []
+    @State private var verifiedLocalAppsCount: Int = 0
     @State private var deselectedSenderAppIds: Set<String> = []
     @State private var showSenderAppsSheet: Bool = false
-    @State private var showAutoAppCaptureGuideSheet: Bool = false
-    @State private var isRemoteAppScannerActiveOnPeer: Bool = false
-    @State private var isStartingRemoteAppScanner: Bool = false
-    @State private var remoteScannerPollTask: Task<Void, Never>? = nil
-    @State private var isAwaitingAutoAppCapture: Bool = false
-    @State private var autoCaptureArmedAt: Date? = nil
-    @State private var isExtractingAutoAppScreenshots: Bool = false
-    @State private var hasCompletedAutoAppCapture: Bool = !iOSInstalledAppsScanner.loadSavedCustomApps().isEmpty
-    @State private var autoAppCaptureStatusNote: String? = nil
-    @State private var lastTemporaryCapturedAssetIds: [String] = []
-    @State private var replacePeerAppsOnNextRemoteScan: Bool = false
-    @State private var remoteScannerAddedPackageIds: Set<String> = []
+    @State private var isImportingPrivacyReport: Bool = false
+    @State private var appImportStatusNote: String? = nil
 
     private var selectedSenderApps: [InstalledAppRecord] {
         senderAppsCatalog.filter { !deselectedSenderAppIds.contains($0.id) }
@@ -188,9 +179,6 @@ struct DirectSwitchMainView: View {
                                         receiverAuthorizedDestinations = []
                                         receiverFallbackRootLabel = nil
                                     },
-                                    onOpenLiveAppScanner: {
-                                        transport.showRemoteAppScannerOnReceiver = true
-                                    },
                                     onOpenAppSettings: {
                                         DirectSwitchTransportViewModel.openAppSettings()
                                     },
@@ -237,13 +225,9 @@ struct DirectSwitchMainView: View {
                                     selectedAppsCount: selectedSenderApps.count,
                                     totalDetectedAppsCount: senderAppsCatalog.count,
                                     selectedAppsPreview: selectedSenderApps,
-                                    isRemoteAppScannerActiveOnPeer: isRemoteAppScannerActiveOnPeer,
-                                    isStartingRemoteAppScanner: isStartingRemoteAppScanner,
-                                    isAwaitingAutoAppCapture: isAwaitingAutoAppCapture,
-                                    isExtractingAutoAppScreenshots: isExtractingAutoAppScreenshots,
-                                    hasCompletedAutoAppCapture: hasCompletedAutoAppCapture,
-                                    autoAppCaptureStatusNote: autoAppCaptureStatusNote,
-                                    canDeleteTempAutoRecording: !lastTemporaryCapturedAssetIds.isEmpty,
+                                    verifiedLocalAppsCount: verifiedLocalAppsCount,
+                                    isImportingPrivacyReport: isImportingPrivacyReport,
+                                    appImportStatusNote: appImportStatusNote,
                                     includeContacts: $includeContacts,
                                     includePhotos: $includePhotos,
                                     includeVideos: $includeVideos,
@@ -253,15 +237,9 @@ struct DirectSwitchMainView: View {
                                     includeApps: $includeApps,
                                     includeWhatsApp: $includeWhatsApp,
                                     onScanExactCounts: scanExactDeviceCounts,
-                                    onStartRemoteCameraAppScan: startRemoteScannerOnPairedIPhone,
-                                    onRefreshRemoteCameraAppScanNow: {
-                                        refreshRemoteScannerOnce()
+                                    onImportAppPrivacyReport: {
+                                        presentDocumentPicker(mode: .appPrivacyReport)
                                     },
-                                    onStartAutoAppCapture: armAndPresentAutoAppCapture,
-                                    onExtractRecentAutoCaptureNow: {
-                                        runAutomaticAppScreenshotExtraction(fromForegroundReturn: false)
-                                    },
-                                    onDeleteTempAutoRecording: deleteTemporaryAutoRecording,
                                     onResetAppsToZero: resetSenderAppsToVerifiedOnly,
                                     onManageApps: { showSenderAppsSheet = true },
                                     onAddFolders: { presentDocumentPicker(mode: .positions) },
@@ -282,7 +260,6 @@ struct DirectSwitchMainView: View {
                                     },
                                     onOpenProSheet: { showProSheet = true },
                                     onChangePairedDevice: {
-                                        stopRemoteScannerPolling()
                                         pairedTargetPayload = nil
                                         pinCodeInput = ""
                                         pairingErrorNote = nil
@@ -366,12 +343,6 @@ struct DirectSwitchMainView: View {
                 refreshAuthorizedSummary()
                 refreshSenderAppsCatalog()
                 appInstaller.handleSceneBecameActive()
-                if isRemoteAppScannerActiveOnPeer {
-                    refreshRemoteScannerOnce()
-                }
-                if isAwaitingAutoAppCapture && !isExtractingAutoAppScreenshots {
-                    runAutomaticAppScreenshotExtraction(fromForegroundReturn: true)
-                }
                 receiverDeniedSummary = iOSPermissionsHelper.receiverDeniedSummaryText()
                 if activeStep == .sendConnect {
                     transport.startUdpAutoDiscovery()
@@ -421,36 +392,14 @@ struct DirectSwitchMainView: View {
             SenderAppsSelectionSheet(
                 appsCatalog: $senderAppsCatalog,
                 deselectedAppIds: $deselectedSenderAppIds,
-                canScanWithPairedIPhone: pairedTargetPayload?.receiverPlatform == .IOS,
-                pairedIPhoneName: pairedTargetPayload?.receiverName ?? "",
-                onTriggerPairedIPhoneScanner: startRemoteScannerOnPairedIPhone,
-                onStartGuidedAutoCapture: armAndPresentAutoAppCapture,
-                onResetAllCustomApps: {
-                    stopRemoteScannerPolling()
-                    lastTemporaryCapturedAssetIds.removeAll()
-                    hasCompletedAutoAppCapture = false
-                    replacePeerAppsOnNextRemoteScan = true
-                    autoAppCaptureStatusNote = nil
-                }
-            )
-        }
-        .sheet(isPresented: $showAutoAppCaptureGuideSheet) {
-            AutoAppScrollCaptureGuideSheet(
-                canUsePairedNewIPhoneCamera: pairedTargetPayload?.receiverPlatform == .IOS,
-                pairedNewIPhoneName: pairedTargetPayload?.receiverName ?? "",
-                onOpenScannerOnNewIPhone: startRemoteScannerOnPairedIPhone,
-                onArmHomeScreenshotsCapture: armLocalHomeScreenshotsCapture
-            )
-        }
-        .sheet(isPresented: $transport.showRemoteAppScannerOnReceiver) {
-            LiveCameraAppScannerSheet(
-                seedApps: transport.remoteScannedApps,
-                senderPhoneLabel: transport.remoteScannerPeerName,
-                onLiveAppsUpdated: { liveApps in
-                    transport.updateReceiverScannedApps(liveApps, replaceExisting: true, completed: false)
+                verifiedLocalAppsCount: verifiedLocalAppsCount,
+                isImportingPrivacyReport: isImportingPrivacyReport,
+                appImportStatusNote: appImportStatusNote,
+                onImportAppPrivacyReport: {
+                    presentDocumentPicker(mode: .appPrivacyReport)
                 },
-                onConfirmApps: { confirmedApps in
-                    transport.updateReceiverScannedApps(confirmedApps, replaceExisting: true, completed: true)
+                onResetAllCustomApps: {
+                    appImportStatusNote = nil
                 }
             )
         }
@@ -513,9 +462,6 @@ struct DirectSwitchMainView: View {
                 withAnimation(.easeInOut(duration: 0.22)) {
                     activeStep = .sendSelectCategories
                 }
-                if paired.receiverPlatform == .IOS {
-                    refreshRemoteScannerOnce()
-                }
             } catch {
                 isPairingBusy = false
                 pairingErrorNote = error.localizedDescription
@@ -534,9 +480,6 @@ struct DirectSwitchMainView: View {
             pairedTargetPayload = parsed
             withAnimation(.easeInOut(duration: 0.22)) {
                 activeStep = .sendSelectCategories
-            }
-            if parsed.receiverPlatform == .IOS {
-                refreshRemoteScannerOnce()
             }
         } catch {
             pairingErrorNote = "Codice QR non riconosciuto. Assicurati di inquadrare il QR mostrato da DirectSwitch sul nuovo telefono."
@@ -606,6 +549,10 @@ struct DirectSwitchMainView: View {
                         documentPrecheckReport = precheck
                         isLoadingDocumentPositions = false
                     }
+                case .appPrivacyReport:
+                    if let fileURL = urls.first {
+                        importAppPrivacyReportFromURL(fileURL)
+                    }
                 }
             }
         )
@@ -646,7 +593,6 @@ struct DirectSwitchMainView: View {
     }
 
     private func launchSenderTransferWithPayload(_ paired: QrPairingPayload, isResume: Bool) {
-        stopRemoteScannerPolling()
         sharedVaultToast = nil
         isReceiverMode = false
         let currentScope = ActiveTransferScope(
@@ -711,6 +657,8 @@ struct DirectSwitchMainView: View {
     }
 
     private func refreshSenderAppsCatalog() {
+        let probesCount = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly().count
+        verifiedLocalAppsCount = probesCount
         let detected = iOSInstalledAppsScanner.scanLocallyInstalledApps()
         if senderAppsCatalog.isEmpty {
             senderAppsCatalog = detected
@@ -736,204 +684,29 @@ struct DirectSwitchMainView: View {
         }
     }
 
-    private func armLocalHomeScreenshotsCapture() {
-        stopRemoteScannerPolling()
-        autoCaptureArmedAt = Date()
-        isAwaitingAutoAppCapture = true
-        autoAppCaptureStatusNote = nil
-    }
-
-    private func armAndPresentAutoAppCapture() {
-        armLocalHomeScreenshotsCapture()
-        showAutoAppCaptureGuideSheet = true
-    }
-
-    private func startRemoteScannerOnPairedIPhone() {
-        guard let paired = pairedTargetPayload,
-              paired.receiverPlatform == .IOS,
-              !isStartingRemoteAppScanner else { return }
-
-        stopRemoteScannerPolling()
-        isAwaitingAutoAppCapture = false
-        isStartingRemoteAppScanner = true
-        autoAppCaptureStatusNote = nil
-
-        let seedSnapshot = senderAppsCatalog
-        let shouldReplacePeer = replacePeerAppsOnNextRemoteScan
-        replacePeerAppsOnNextRemoteScan = false
-        Task {
-            do {
-                let status = try await transport.requestRemoteAppScannerStart(
-                    pairedPayload: paired,
-                    seedApps: seedSnapshot,
-                    replaceExisting: shouldReplacePeer
-                )
-                isStartingRemoteAppScanner = false
-                isRemoteAppScannerActiveOnPeer = status.isScannerOpen
-                mergeIncomingRemoteScannedApps(
-                    status.discoveredApps,
-                    peerName: paired.receiverName,
-                    scannerClosed: !status.isScannerOpen || status.isCompleted
-                )
-                if status.isScannerOpen && !status.isCompleted {
-                    beginRemoteScannerPollingLoop(for: paired)
-                }
-            } catch {
-                isStartingRemoteAppScanner = false
-                isRemoteAppScannerActiveOnPeer = false
-                autoAppCaptureStatusNote = "⚠ \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func beginRemoteScannerPollingLoop(for paired: QrPairingPayload) {
-        remoteScannerPollTask?.cancel()
-        remoteScannerPollTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-                if Task.isCancelled { break }
-                do {
-                    let status = try await transport.pollRemoteAppScannerStatus(pairedPayload: paired)
-                    let closed = !status.isScannerOpen || status.isCompleted
-                    mergeIncomingRemoteScannedApps(
-                        status.discoveredApps,
-                        peerName: paired.receiverName,
-                        scannerClosed: closed
-                    )
-                    if closed {
-                        isRemoteAppScannerActiveOnPeer = false
-                        break
-                    }
-                } catch {
-                    // Continua in silenzio anche se questo iPhone è passato sulla schermata Home per qualche secondo
-                }
-            }
-        }
-    }
-
-    private func refreshRemoteScannerOnce() {
-        guard let paired = pairedTargetPayload, paired.receiverPlatform == .IOS else { return }
-        Task {
-            if let status = try? await transport.pollRemoteAppScannerStatus(pairedPayload: paired) {
-                let closed = !status.isScannerOpen || status.isCompleted
-                mergeIncomingRemoteScannedApps(
-                    status.discoveredApps,
-                    peerName: paired.receiverName,
-                    scannerClosed: closed
-                )
-                if closed {
-                    stopRemoteScannerPolling()
-                }
-            }
-        }
-    }
-
-    private func stopRemoteScannerPolling() {
-        remoteScannerPollTask?.cancel()
-        remoteScannerPollTask = nil
-        isRemoteAppScannerActiveOnPeer = false
-        isStartingRemoteAppScanner = false
-    }
-
     private func resetSenderAppsToVerifiedOnly() {
-        stopRemoteScannerPolling()
         iOSInstalledAppsScanner.clearSavedCustomApps()
         deselectedSenderAppIds.removeAll()
-        lastTemporaryCapturedAssetIds.removeAll()
-        remoteScannerAddedPackageIds.removeAll()
-        hasCompletedAutoAppCapture = false
-        replacePeerAppsOnNextRemoteScan = true
-        autoAppCaptureStatusNote = nil
+        appImportStatusNote = nil
         senderAppsCatalog = []
         refreshSenderAppsCatalog()
     }
 
-    private func mergeIncomingRemoteScannedApps(
-        _ incoming: [InstalledAppRecord],
-        peerName: String,
-        scannerClosed: Bool
-    ) {
-        let verifiedIncoming = iOSInstalledAppsScanner.filterFalsePositiveProbesOnSender(incoming)
-        let verifiedPackageSet = Set(verifiedIncoming.map { $0.packageName.lowercased() })
-
-        // Se l'utente ha rimosso/azzerato app sullo scanner del nuovo iPhone, sincronizza la rimozione anche qui
-        var didRemoveRemote = false
-        if !remoteScannerAddedPackageIds.isEmpty {
-            let removedKeys = remoteScannerAddedPackageIds.subtracting(verifiedPackageSet)
-            if !removedKeys.isEmpty {
-                senderAppsCatalog.removeAll { removedKeys.contains($0.packageName.lowercased()) }
-                remoteScannerAddedPackageIds.subtract(removedKeys)
-                let cleanedSaved = iOSInstalledAppsScanner.loadSavedCustomApps()
-                    .filter { !removedKeys.contains($0.packageName.lowercased()) }
-                iOSInstalledAppsScanner.saveCustomApps(cleanedSaved)
-                didRemoveRemote = true
-            }
-        }
-
-        guard !verifiedIncoming.isEmpty else {
-            if didRemoveRemote {
-                autoAppCaptureStatusNote = "Elenco aggiornato: \(senderAppsCatalog.count) App selezionate."
-            }
-            return
-        }
-
-        var newlyAdded = 0
-        var newlyAddedRecords: [InstalledAppRecord] = []
-        for app in verifiedIncoming {
-            let exists = senderAppsCatalog.contains {
-                $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
-                    || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
-            }
-            if !exists {
-                senderAppsCatalog.append(app)
-                remoteScannerAddedPackageIds.insert(app.packageName.lowercased())
-                newlyAddedRecords.append(app)
-                newlyAdded += 1
-            }
-            deselectedSenderAppIds.remove(app.id)
-        }
-
-        if newlyAdded > 0 {
-            iOSInstalledAppsScanner.appendCustomApps(newlyAddedRecords)
-            hasCompletedAutoAppCapture = true
-            autoAppCaptureStatusNote = "✓ \(senderAppsCatalog.count) App selezionate in tempo reale con \(peerName)!"
-        } else if didRemoveRemote {
-            autoAppCaptureStatusNote = "Elenco aggiornato: \(senderAppsCatalog.count) App selezionate."
-        } else if scannerClosed && !senderAppsCatalog.isEmpty {
-            hasCompletedAutoAppCapture = true
-            autoAppCaptureStatusNote = "✓ Scansione completata su \(peerName): \(senderAppsCatalog.count) App pronte!"
-        }
-    }
-
-    private func runAutomaticAppScreenshotExtraction(fromForegroundReturn: Bool) {
-        guard !isExtractingAutoAppScreenshots else { return }
-        isExtractingAutoAppScreenshots = true
-        autoAppCaptureStatusNote = nil
-        let armedSince = fromForegroundReturn ? autoCaptureArmedAt : nil
-
+    private func importAppPrivacyReportFromURL(_ url: URL) {
+        guard !isImportingPrivacyReport else { return }
+        isImportingPrivacyReport = true
+        appImportStatusNote = nil
         Task {
-            var result = await iOSInstalledAppsScanner.extractAutomaticScreenshotsAndRecognizeApps(since: armedSince)
+            let result = await iOSInstalledAppsScanner.importAppsFromAppPrivacyReport(url: url)
+            isImportingPrivacyReport = false
 
-            if fromForegroundReturn && result.generatedScreenshotsCount == 0 {
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-                result = await iOSInstalledAppsScanner.extractAutomaticScreenshotsAndRecognizeApps(since: armedSince)
-            }
-
-            isExtractingAutoAppScreenshots = false
-
-            guard result.generatedScreenshotsCount > 0 else {
-                if !fromForegroundReturn {
-                    autoAppCaptureStatusNote = "⚠ Nessuno screenshot recente trovato. Apri «Libreria app → elenco A–Z», fai screenshot alle schermate delle tue App e riprova!"
-                }
+            guard result.rawBundleIdsCount > 0 else {
+                appImportStatusNote = "⚠ File non riconosciuto come Resoconto sulla privacy delle app (.ndjson)."
                 return
             }
 
-            isAwaitingAutoAppCapture = false
-            lastTemporaryCapturedAssetIds = result.allTemporaryAssetIdentifiers
-            let verifiedApps = iOSInstalledAppsScanner.filterFalsePositiveProbesOnSender(result.discoveredApps)
-
             var newlyAdded = 0
-            for app in verifiedApps {
+            for app in result.apps {
                 let exists = senderAppsCatalog.contains {
                     $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
                         || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
@@ -944,29 +717,17 @@ struct DirectSwitchMainView: View {
                 }
                 deselectedSenderAppIds.remove(app.id)
             }
-
-            if !verifiedApps.isEmpty {
-                iOSInstalledAppsScanner.appendCustomApps(verifiedApps)
-                hasCompletedAutoAppCapture = true
+            if !result.apps.isEmpty {
+                iOSInstalledAppsScanner.appendCustomApps(result.apps)
             }
 
             if newlyAdded > 0 {
-                autoAppCaptureStatusNote = "✓ Letti \(result.generatedScreenshotsCount) screenshot: +\(newlyAdded) app aggiunte (\(senderAppsCatalog.count) selezionate)!"
-            } else if !verifiedApps.isEmpty {
-                hasCompletedAutoAppCapture = true
-                autoAppCaptureStatusNote = "✓ Analizzati \(result.generatedScreenshotsCount) screenshot: tutte le \(senderAppsCatalog.count) app sono selezionate!"
+                appImportStatusNote = "✓ Importate +\(newlyAdded) app esatte da Resoconto Privacy Apple (\(senderAppsCatalog.count) totali)!"
+                sharedVaultToast = "Importate \(newlyAdded) app esatte dal Resoconto Privacy Apple!"
+            } else if !result.apps.isEmpty {
+                appImportStatusNote = "✓ Tutte le \(result.apps.count) app verificate dal Resoconto sono già selezionate."
             } else {
-                autoAppCaptureStatusNote = "⚠ Analizzati \(result.generatedScreenshotsCount) screenshot: nessuna nuova app rilevata."
-            }
-        }
-    }
-
-    private func deleteTemporaryAutoRecording() {
-        let ids = lastTemporaryCapturedAssetIds
-        guard !ids.isEmpty else { return }
-        Task {
-            if await iOSInstalledAppsScanner.deleteTemporaryCapturedAssets(localIdentifiers: ids) {
-                lastTemporaryCapturedAssetIds.removeAll()
+                appImportStatusNote = "⚠ Nessuna nuova app di App Store trovata nel file selezionato."
             }
         }
     }
@@ -1002,6 +763,13 @@ struct DirectSwitchMainView: View {
 
     private func handleIncomingURL(_ incomingURL: URL) {
         if incomingURL.isFileURL {
+            if iOSInstalledAppsScanner.isAppPrivacyReportFile(incomingURL) {
+                importAppPrivacyReportFromURL(incomingURL)
+                if activeStep == .home {
+                    startSendWizard(destination: .newIPhone)
+                }
+                return
+            }
             if let imported = iOSDocumentsSandboxBridge.importIncomingOpenURL(incomingURL) {
                 pickedDocuments.append(imported)
                 sharedVaultToast = "'\(imported.0.fileName)' pronto per la copia"
@@ -1033,7 +801,6 @@ struct DirectSwitchMainView: View {
                 activeStep = .home
             }
         case .sendSelectCategories:
-            stopRemoteScannerPolling()
             pairedTargetPayload = nil
             pinCodeInput = ""
             pairingErrorNote = nil
@@ -1051,7 +818,6 @@ struct DirectSwitchMainView: View {
     }
 
     private func finishAndReturnHome() {
-        stopRemoteScannerPolling()
         showCameraScanner = false
         receiverQrPayload = nil
         pairedTargetPayload = nil
@@ -1214,13 +980,13 @@ private struct DirectSwitchTransferProgressView: View {
             return min(1.0, max(0.0, Double(handledQueueableAppsCount) / Double(total)))
         }
         if transport.isCompleted { return 1.0 }
-        if transport.totalBytesCount > 0 {
-            guard transport.transferredBytesCount > 0 else { return 0.0 }
+        if transport.totalBytesCount > 0 && transport.transferredBytesCount > 0 {
             return min(1.0, max(0.01, Double(transport.transferredBytesCount) / Double(transport.totalBytesCount)))
         }
         if transport.totalItems > 0 {
-            guard transport.completedItems > 0 else { return 0.0 }
-            return min(1.0, max(0.01, Double(transport.completedItems) / Double(transport.totalItems)))
+            let processed = transport.completedItems + transport.failedItemsCount
+            guard processed > 0 else { return 0.0 }
+            return min(1.0, max(0.01, Double(processed) / Double(transport.totalItems)))
         }
         return min(0.99, max(0.0, transport.visualStepProgress))
     }
@@ -1352,6 +1118,18 @@ private struct DirectSwitchTransferProgressView: View {
                     color: AppleTheme.orange,
                     title: "Foto iCloud non scaricate / illeggibili",
                     value: "\(transport.failedItemsCount)"
+                )
+            )
+        }
+
+        if transport.gatedPreviewCount > 0 {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "gated_preview",
+                    icon: "lock.fill",
+                    color: AppleTheme.blue,
+                    title: "Extra bloccati (limite 25 gratis Cross-OS)",
+                    value: "\(transport.gatedPreviewCount)"
                 )
             )
         }

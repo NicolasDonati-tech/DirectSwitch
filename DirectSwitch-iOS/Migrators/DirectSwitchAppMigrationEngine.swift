@@ -75,13 +75,28 @@ struct RecognizedAppTextBox: Equatable, Sendable {
     let confidence: Float
 }
 
-/// Scanner delle app installate sull'iPhone mittente (combina rilevamento istantaneo `canOpenURL`,
-/// lettura spaziale accurata da Libreria App / Home tramite Apple `Vision` OCR locale e verifica rigorosa App Store).
+/// Risultato verificato da App Store con nome sviluppatore per disambiguare omonimie in fase di ricerca manuale.
+struct AppStoreSearchHit: Identifiable, Sendable {
+    let record: InstalledAppRecord
+    let developerName: String?
+
+    var id: String { record.id }
+}
+
+/// Risultato dell'importazione deterministica da Resoconto sulla privacy delle app Apple (`.ndjson`).
+struct AppPrivacyReportImportResult: Sendable {
+    let apps: [InstalledAppRecord]
+    let rawBundleIdsCount: Int
+}
+
+/// Scanner deterministico delle app installate sull'iPhone mittente (utilizza gli schemi Apple `LSApplicationQueriesSchemes`
+/// al massimo di 50 consentito da iOS e l'importazione esatta di `bundleID` dal Resoconto Privacy Apple, con zero allucinazioni).
 enum iOSInstalledAppsScanner {
     private static let legacyCustomAppsStorageKey = "directswitch_custom_sender_apps_v1"
-    private static let customAppsStorageKey = "directswitch_verified_sender_apps_v2"
+    private static let legacyCustomAppsStorageKeyV2 = "directswitch_verified_sender_apps_v2"
+    private static let customAppsStorageKey = "directswitch_verified_sender_apps_v3"
 
-    /// Tutti gli schemi univoci dichiarati in `Info.plist` (`<= 50` secondo il limite Apple; esclusi schemi generici come `otpauth`/`msauth`/`booking` per zero falsi positivi).
+    /// Tutti gli schemi univoci dichiarati in `Info.plist` (`<= 50` incluso `whatsapp` e `com.cloudsave.ios`).
     static let knownProbes: [iOSKnownAppProbe] = [
         iOSKnownAppProbe(bundleId: "net.whatsapp.WhatsApp", appName: "WhatsApp Messenger", urlScheme: "whatsapp-consumer", appStoreId: 310633997),
         iOSKnownAppProbe(bundleId: "net.whatsapp.WhatsAppSMB", appName: "WhatsApp Business", urlScheme: "whatsapp-smb", appStoreId: 1386412985),
@@ -128,7 +143,9 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.canva.canvaeditor", appName: "Canva", urlScheme: "canva", appStoreId: 897446215),
         iOSKnownAppProbe(bundleId: "com.ebay.iphone", appName: "eBay", urlScheme: "ebay", appStoreId: 282614216),
         iOSKnownAppProbe(bundleId: "it.pagopa.app.io", appName: "IO", urlScheme: "ioit", appStoreId: 1505842859),
-        iOSKnownAppProbe(bundleId: "posteitaliane.posteapp.appposteid", appName: "PosteID", urlScheme: "posteid", appStoreId: 1078512138)
+        iOSKnownAppProbe(bundleId: "posteitaliane.posteapp.appposteid", appName: "PosteID", urlScheme: "posteid", appStoreId: 1078512138),
+        iOSKnownAppProbe(bundleId: "com.getdropbox.Dropbox", appName: "Dropbox", urlScheme: "dbapi-2", appStoreId: 327630330),
+        iOSKnownAppProbe(bundleId: "com.tinyspeck.chatlyio", appName: "Slack", urlScheme: "slack", appStoreId: 618783545)
     ]
 
     /// Suggerimenti rapidi italiani ed europei (SPID/CIE, Banche, Pagamenti, Trasporti, Domotica e Utility) aggiungibili con 1 tocco.
@@ -432,14 +449,10 @@ enum iOSInstalledAppsScanner {
         return false
     }
 
-    /// Rileva istantaneamente tutte le app installate su questo iPhone interrogando gli schemi registrati
-    /// e unendole alle eventuali app aggiuntive salvate dall'utente (via ricerca o screenshot Home/Impostazioni).
+    /// Restituisce esclusivamente le app rilevate con certezza matematica sul dispositivo tramite i 50 schemi registrati.
     @MainActor
-    static func scanLocallyInstalledApps() -> [InstalledAppRecord] {
+    static func scanLocallyInstalledProbesOnly() -> [InstalledAppRecord] {
         var detected: [InstalledAppRecord] = []
-        var seenBundles = Set<String>()
-        var seenStoreIds = Set<Int>()
-
         for probe in knownProbes {
             let isInstalled: Bool
             if probe.bundleId == "net.whatsapp.WhatsApp" {
@@ -448,8 +461,6 @@ enum iOSInstalledAppsScanner {
                 isInstalled = canOpenScheme(probe.urlScheme)
             }
             if isInstalled {
-                seenBundles.insert(probe.bundleId.lowercased())
-                seenStoreIds.insert(probe.appStoreId)
                 detected.append(
                     InstalledAppRecord(
                         packageName: probe.bundleId,
@@ -461,8 +472,18 @@ enum iOSInstalledAppsScanner {
                 )
             }
         }
+        return detected
+    }
 
-        for extra in loadSavedCustomApps() {
+    /// Rileva istantaneamente tutte le app verificabili tramite gli schemi `Info.plist`
+    /// unendole alle eventuali app importate dal Resoconto Privacy Apple o aggiunte manualmente dall'utente.
+    @MainActor
+    static func scanLocallyInstalledApps() -> [InstalledAppRecord] {
+        var detected = scanLocallyInstalledProbesOnly()
+        var seenBundles = Set(detected.map { $0.packageName.lowercased() })
+        var seenStoreIds = Set(detected.compactMap(\.appStoreId))
+
+        for extra in filterFalsePositiveProbesOnSender(loadSavedCustomApps()) {
             let bundleKey = extra.packageName.lowercased()
             if seenBundles.contains(bundleKey) { continue }
             if let sid = extra.appStoreId, seenStoreIds.contains(sid) { continue }
@@ -475,9 +496,12 @@ enum iOSInstalledAppsScanner {
     }
 
     static func loadSavedCustomApps() -> [InstalledAppRecord] {
-        // Rimuove eventuali app errate salvate da versioni precedenti nella vecchia chiave v1
+        // Purga automaticamente le vecchie chiavi v1/v2 che potevano contenere app errate da OCR o vecchi matcher
         if UserDefaults.standard.object(forKey: legacyCustomAppsStorageKey) != nil {
             UserDefaults.standard.removeObject(forKey: legacyCustomAppsStorageKey)
+        }
+        if UserDefaults.standard.object(forKey: legacyCustomAppsStorageKeyV2) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyCustomAppsStorageKeyV2)
         }
         guard let data = UserDefaults.standard.data(forKey: customAppsStorageKey),
               let decoded = try? JSONDecoder().decode([InstalledAppRecord].self, from: data) else {
@@ -494,6 +518,7 @@ enum iOSInstalledAppsScanner {
 
     static func clearSavedCustomApps() {
         UserDefaults.standard.removeObject(forKey: legacyCustomAppsStorageKey)
+        UserDefaults.standard.removeObject(forKey: legacyCustomAppsStorageKeyV2)
         UserDefaults.standard.removeObject(forKey: customAppsStorageKey)
     }
 
@@ -511,25 +536,132 @@ enum iOSInstalledAppsScanner {
         saveCustomApps(existing)
     }
 
-    /// Sul telefono Mittente verifica localmente i bundle ambigui (es. "Google" letto da una cartella o da "Google Maps",
-    /// "Messenger" letto da "WhatsApp Messenger", "X" letto da un tasto chiudi, "IO" letto da testo italiano):
-    /// poiché il loro schema URL è dichiarato in `Info.plist`, se `canOpenURL` è falso su questo iPhone l'app NON è installata.
+    /// Verifica localmente ogni app coperta dai 50 schemi `Info.plist` (`knownProbes`), sia per `bundleId` sia per `appStoreId`
+    /// o nome canonico: se `canOpenURL` sul dispositivo restituisce `false`, quell'app viene scartata senza falsi positivi.
     @MainActor
     static func filterFalsePositiveProbesOnSender(_ apps: [InstalledAppRecord]) -> [InstalledAppRecord] {
-        let strictLocalSchemeBundles: [String: String] = [
-            "com.google.googlemobile": "googleapp",
-            "com.facebook.messenger": "fb-messenger",
-            "net.whatsapp.whatsappsmb": "whatsapp-smb",
-            "com.atebits.tweetie2": "twitter",
-            "it.pagopa.app.io": "ioit"
-        ]
         return apps.filter { app in
-            let lowerBundle = app.packageName.lowercased()
-            if let requiredScheme = strictLocalSchemeBundles[lowerBundle] {
-                return canOpenScheme(requiredScheme)
+            if let matchedProbe = knownProbes.first(where: {
+                $0.bundleId.caseInsensitiveCompare(app.packageName) == .orderedSame
+                    || (app.appStoreId != nil && $0.appStoreId == app.appStoreId)
+                    || $0.appName.caseInsensitiveCompare(app.appName) == .orderedSame
+            }) {
+                if matchedProbe.bundleId == "net.whatsapp.WhatsApp" {
+                    return isPersonalWhatsAppInstalled()
+                }
+                if matchedProbe.bundleId == "net.whatsapp.WhatsAppSMB" {
+                    return isWhatsAppBusinessInstalled()
+                }
+                return canOpenScheme(matchedProbe.urlScheme)
             }
             return true
         }
+    }
+
+    private static let allowedUserFacingAppleBundleIds: Set<String> = [
+        "com.apple.pages",
+        "com.apple.keynote",
+        "com.apple.numbers",
+        "com.apple.imovie",
+        "com.apple.garageband",
+        "com.apple.clips",
+        "com.apple.testflight",
+        "com.apple.freeform",
+        "com.apple.itunesu",
+        "com.apple.swift-playgrounds"
+    ]
+
+    private static let extensionBundleSuffixes: [String] = [
+        ".widget", ".widgets", ".widgetextension", ".notificationservice", ".notificationcontent",
+        ".shareextension", ".share", ".intents", ".intentsextension", ".siriextension",
+        ".keyboard", ".spotlight", ".quicklook", ".fileprovider", ".watchkitapp", ".watchkitextension",
+        ".nse", ".appex", ".pluginkit"
+    ]
+
+    /// Riconosce file esportati da Impostazioni iPhone → Privacy e sicurezza → Resoconto sulla privacy delle app (`.ndjson`).
+    static func isAppPrivacyReportFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        let name = url.lastPathComponent.lowercased()
+        return ext == "ndjson" || name.contains("app_privacy_report") || name.contains("privacy_report")
+    }
+
+    /// Estrae gli esatti `bundleID` delle app dal testo NDJSON ufficiale del Resoconto sulla privacy delle app Apple,
+    /// escludendo demoni di sistema Apple, estensioni widget/notifiche e DirectSwitch stesso (zero indovinelli OCR).
+    static func extractBundleIdsFromAppPrivacyReportNDJSON(_ rawText: String) -> [String] {
+        var collected = Set<String>()
+        let lines = rawText.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("{"),
+                  let data = trimmed.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+
+            var candidateId: String? = nil
+            if let accessor = obj["accessor"] as? [String: Any],
+               let identifier = accessor["identifier"] as? String {
+                let idType = (accessor["identifierType"] as? String)?.lowercased()
+                if idType == nil || idType == "bundleid" {
+                    candidateId = identifier
+                }
+            }
+            if candidateId == nil, let topLevelBundle = obj["bundleID"] as? String {
+                candidateId = topLevelBundle
+            }
+            guard let cleanId = normalizePrivacyReportBundleId(candidateId) else { continue }
+            collected.insert(cleanId)
+        }
+        return collected.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private static func normalizePrivacyReportBundleId(_ raw: String?) -> String? {
+        guard var trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              trimmed.contains("."),
+              !trimmed.contains(" "),
+              !trimmed.contains("/") else {
+            return nil
+        }
+        var lower = trimmed.lowercased()
+        for extSuffix in extensionBundleSuffixes where lower.hasSuffix(extSuffix) {
+            trimmed = String(trimmed.dropLast(extSuffix.count))
+            lower = trimmed.lowercased()
+            break
+        }
+        guard trimmed.contains(".") else { return nil }
+        if lower.hasPrefix("com.directswitch.") { return nil }
+        if lower.hasPrefix("com.apple.") && !allowedUserFacingAppleBundleIds.contains(lower) {
+            return nil
+        }
+        return trimmed
+    }
+
+    /// Importa in modo deterministico l'elenco reale delle app da un file `App_Privacy_Report_*.ndjson` condiviso dall'utente:
+    /// interroga `itunes.apple.com/lookup?bundleId=...` in blocchi da 20 e scarta eventuali app già disinstallate verificando `canOpenURL`.
+    static func importAppsFromAppPrivacyReport(url: URL) async -> AppPrivacyReportImportResult {
+        let didStartScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartScope { url.stopAccessingSecurityScopedResource() }
+        }
+        let rawText: String? = try? iOSDocumentsSandboxBridge.coordinatedRead(at: url) { readURL in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: readURL.path),
+                  let fileSize = (attrs[.size] as? Int64) ?? (attrs[.size] as? NSNumber)?.int64Value,
+                  fileSize <= 64 * 1024 * 1024 else {
+                return nil
+            }
+            return try? String(contentsOf: readURL, encoding: .utf8)
+        }
+        guard let rawText, !rawText.isEmpty else {
+            return AppPrivacyReportImportResult(apps: [], rawBundleIdsCount: 0)
+        }
+        let bundleIds = extractBundleIdsFromAppPrivacyReportNDJSON(rawText)
+        guard !bundleIds.isEmpty else {
+            return AppPrivacyReportImportResult(apps: [], rawBundleIdsCount: 0)
+        }
+        let resolved = await iOSAppStoreCatalogResolver.resolveExactAppsByBundleIds(bundleIds)
+        let verified = await filterFalsePositiveProbesOnSender(resolved)
+        return AppPrivacyReportImportResult(apps: verified, rawBundleIdsCount: bundleIds.count)
     }
 
     /// Termini di sistema iOS, barra di stato, calendario dinamico, widget, cartelle generiche e badge che NON sono app scaricate.
@@ -1265,6 +1397,7 @@ enum iOSAppStoreCatalogResolver {
         let trackName: String?
         let bundleId: String?
         let artworkUrl100: String?
+        let artistName: String?
     }
 
     static func sanitizeIconUrl(_ raw: String?) -> String? {
@@ -1332,8 +1465,59 @@ enum iOSAppStoreCatalogResolver {
         "com.google.android.calendar": "com.google.calendar",
         "org.zwanoo.android.speedtest": "com.ookla.speedtest",
         "com.teamviewer.teamviewer.market.mobile": "com.teamviewer.rc",
-        "com.lemon.lvoverseas": "com.lemon.lvoverseas"
+        "com.lemon.lvoverseas": "com.lemon.lvoverseas",
+        "com.dropbox.android": "com.getdropbox.Dropbox",
+        "com.Slack": "com.tinyspeck.chatlyio"
     ]
+
+    /// Risolve un elenco di `bundleId` esatti su App Store Italia (`/lookup?bundleId=...`) senza mai indovinare o alterare nomi.
+    static func resolveExactAppsByBundleIds(_ bundleIds: [String]) async -> [InstalledAppRecord] {
+        let uniqueBundles = Array(Set(bundleIds.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        guard !uniqueBundles.isEmpty else { return [] }
+
+        var resolved: [InstalledAppRecord] = []
+        var seenBundleKeys = Set<String>()
+        let batchSize = 20
+        var offset = 0
+
+        while offset < uniqueBundles.count {
+            let chunk = Array(uniqueBundles[offset..<min(offset + batchSize, uniqueBundles.count)])
+            offset += batchSize
+            let joined = chunk.joined(separator: ",")
+            guard let encoded = joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "https://itunes.apple.com/lookup?bundleId=\(encoded)&country=it") else {
+                continue
+            }
+            var req = URLRequest(url: url, timeoutInterval: 8.0)
+            req.httpMethod = "GET"
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200,
+               let parsed = try? JSONDecoder().decode(ITunesLookupResponse.self, from: data) {
+                for entry in parsed.results {
+                    guard let bId = entry.bundleId, let tId = entry.trackId, let tName = entry.trackName else { continue }
+                    let key = bId.lowercased()
+                    guard !seenBundleKeys.contains(key) else { continue }
+                    seenBundleKeys.insert(key)
+                    let icon = sanitizeIconUrl(entry.artworkUrl100)
+                    await AppStoreMetadataCache.shared.setByBundle(bId, trackId: tId, iconUrl: icon, trackName: tName)
+                    let matchedProbe = iOSInstalledAppsScanner.knownProbes.first {
+                        $0.bundleId.caseInsensitiveCompare(bId) == .orderedSame || $0.appStoreId == tId
+                    }
+                    resolved.append(
+                        InstalledAppRecord(
+                            packageName: bId,
+                            appName: tName,
+                            appStoreId: tId,
+                            iconUrl: icon,
+                            urlScheme: matchedProbe?.urlScheme
+                        )
+                    )
+                }
+            }
+        }
+        return resolved.sorted { $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedAscending }
+    }
 
     /// Arricchisce un elenco di `InstalledAppRecord` (sia nativi iOS sia ricevuti da Android) con `appStoreId` e `iconUrl`.
     static func enrichAppsWithStoreMetadata(_ apps: [InstalledAppRecord]) async -> [InstalledAppRecord] {
@@ -1614,7 +1798,7 @@ enum iOSAppStoreCatalogResolver {
         return nil
     }
 
-    static func searchAppStore(query: String, limit: Int = 12) async -> [InstalledAppRecord] {
+    static func searchAppStoreDetailed(query: String, limit: Int = 12) async -> [AppStoreSearchHit] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
@@ -1633,7 +1817,6 @@ enum iOSAppStoreCatalogResolver {
                     responseData = data
                     break
                 }
-                // Backoff progressivo su rate-limit HTTP 429/403/5xx per non perdere app verso fine elenco
                 if (code == 429 || code == 403 || code >= 500) && attempt < backoffDelaysNs.count {
                     try? await Task.sleep(nanoseconds: backoffDelaysNs[attempt])
                     continue
@@ -1649,7 +1832,7 @@ enum iOSAppStoreCatalogResolver {
             return []
         }
 
-        var out: [InstalledAppRecord] = []
+        var out: [AppStoreSearchHit] = []
         for entry in parsed.results {
             guard let bundleId = entry.bundleId,
                   let trackName = entry.trackName,
@@ -1657,17 +1840,20 @@ enum iOSAppStoreCatalogResolver {
             let matchedProbe = iOSInstalledAppsScanner.knownProbes.first {
                 $0.bundleId.caseInsensitiveCompare(bundleId) == .orderedSame || $0.appStoreId == trackId
             }
-            out.append(
-                InstalledAppRecord(
-                    packageName: bundleId,
-                    appName: trackName,
-                    appStoreId: trackId,
-                    iconUrl: sanitizeIconUrl(entry.artworkUrl100),
-                    urlScheme: matchedProbe?.urlScheme
-                )
+            let rec = InstalledAppRecord(
+                packageName: bundleId,
+                appName: trackName,
+                appStoreId: trackId,
+                iconUrl: sanitizeIconUrl(entry.artworkUrl100),
+                urlScheme: matchedProbe?.urlScheme
             )
+            out.append(AppStoreSearchHit(record: rec, developerName: entry.artistName))
         }
         return out
+    }
+
+    static func searchAppStore(query: String, limit: Int = 12) async -> [InstalledAppRecord] {
+        await searchAppStoreDetailed(query: query, limit: limit).map(\.record)
     }
 
     /// Apre direttamente la scheda esatta dell'app su App Store (mai una ricerca generica quando `appStoreId` è noto).

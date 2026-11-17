@@ -47,18 +47,27 @@ import com.directswitch.android.protocol.ManifestResponse
 import com.directswitch.android.protocol.PinPairingRequest
 import com.directswitch.android.protocol.QrPairingPayload
 import com.directswitch.android.protocol.SessionLicenseTier
+import com.directswitch.android.protocol.SlidingTransferSpeedMeter
 import com.directswitch.android.protocol.TransferCategory
 import com.directswitch.android.protocol.TransferCompletionReport
 import com.directswitch.android.protocol.TransferManifest
+import com.directswitch.android.protocol.TransferProgressAccounting
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlin.coroutines.resume
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -251,6 +260,9 @@ class DirectSwitchTransferServer(
     private val transferredBytesCounter = AtomicLong(0L)
     private val completedFilesCounter = AtomicInteger(0)
     private val docFolderCounts = ConcurrentHashMap<String, Int>()
+    private val rxProgressLock = Any()
+    private var rxProgressAccounting: TransferProgressAccounting? = null
+    private var rxSpeedMeter = SlidingTransferSpeedMeter()
     private var transferStartMillis = 0L
 
     fun startReceiverSession(
@@ -625,6 +637,13 @@ class DirectSwitchTransferServer(
                         emptyList()
                     }
                     val totalBytesToReceive = acceptedItems.sumOf { it.sizeBytes }
+                    synchronized(rxProgressLock) {
+                        rxProgressAccounting = TransferProgressAccounting(
+                            queuedItemsCount = acceptedItems.size,
+                            remainingEstimatedBytes = totalBytesToReceive
+                        )
+                        rxSpeedMeter = SlidingTransferSpeedMeter()
+                    }
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Ricezione file in streaming cifrato...",
                         totalItems = acceptedItems.size,
@@ -740,13 +759,18 @@ class DirectSwitchTransferServer(
                         completedIds.add(itemId)
                         val doneFiles = completedFilesCounter.incrementAndGet()
                         val doneBytes = transferredBytesCounter.addAndGet(plainBytes)
-                        val elapsedSec = ((System.currentTimeMillis() - transferStartMillis).coerceAtLeast(250L)) / 1000.0
-                        val speedMbs = (doneBytes / (1024.0 * 1024.0)) / elapsedSec
+                        val (reconciledTotalBytes, speedMbs) = synchronized(rxProgressLock) {
+                            rxProgressAccounting?.recordUploaded(item.sizeBytes, plainBytes)
+                            val tot = rxProgressAccounting?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: doneBytes
+                            val spd = rxSpeedMeter.record(plainBytes)
+                            tot to spd
+                        }
 
                         _progress.value = _progress.value.copy(
                             currentFileName = sanitizedFileName,
                             completedItems = doneFiles,
                             transferredBytes = doneBytes,
+                            totalBytes = reconciledTotalBytes,
                             speedMegabytesPerSec = speedMbs,
                             receivedDocumentFolders = docFolderCounts.toMap()
                         )
@@ -993,6 +1017,12 @@ class DirectSwitchTransferClient(private val context: Context) {
     )
 
     private val baseHttpClient = OkHttpClient.Builder()
+        .dispatcher(
+            Dispatcher().apply {
+                maxRequests = 16
+                maxRequestsPerHost = 6
+            }
+        )
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
@@ -1170,9 +1200,12 @@ class DirectSwitchTransferClient(private val context: Context) {
             val acceptedSet = manifestResp.acceptedItemIds.toHashSet()
             val entriesToUpload = mediaEntries.filter { it.manifestItem.id in acceptedSet }
             val totalBytes = entriesToUpload.sumOf { it.manifestItem.sizeBytes }
-            val startTime = System.currentTimeMillis()
-            var uploadedBytes = 0L
-            var failedCount = 0
+            val accounting = TransferProgressAccounting(
+                queuedItemsCount = entriesToUpload.size,
+                remainingEstimatedBytes = totalBytes
+            )
+            val speedMeter = SlidingTransferSpeedMeter()
+            val progressLock = Mutex()
 
             _progress.value = _progress.value.copy(
                 phaseLabel = "Trasferimento diretto cifrato in corso...",
@@ -1186,102 +1219,134 @@ class DirectSwitchTransferClient(private val context: Context) {
                 gatedPreviewCount = manifestResp.gatedByCrossOsPreviewCount
             )
 
-            // 4. Upload Streaming CSGCM1 elemento per elemento con retry e continue-on-error
-            for ((index, entry) in entriesToUpload.withIndex()) {
-                val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-                val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
-                try {
-                    val encPair = runCatching {
-                        context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
-                            tempEncrypted.outputStream().use { encOut ->
-                                DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
-                            }
-                        }
-                    }.getOrNull()
-
-                    if (encPair == null) {
-                        failedCount++
-                        _progress.value = _progress.value.copy(
-                            completedItems = index + 1,
-                            failedItemsCount = failedCount,
-                            phaseLabel = "Saltato file non leggibile (${entry.manifestItem.fileName}), proseguo..."
-                        )
-                        continue
-                    }
-
-                    val (plainLen, sha256Hex) = encPair
-                    var uploadedSingleOk = false
-                    var permissionDeniedMsg: String? = null
-
-                    for (attempt in 1..2) {
-                        val body = object : RequestBody() {
-                            override fun contentType() = "application/octet-stream".toMediaType()
-                            override fun contentLength(): Long = tempEncrypted.length()
-                            override fun writeTo(sink: BufferedSink) {
-                                tempEncrypted.inputStream().use { fileIn ->
-                                    val buf = ByteArray(256 * 1024)
-                                    while (true) {
-                                        val r = fileIn.read(buf)
-                                        if (r <= 0) break
-                                        sink.write(buf, 0, r)
+            // 4. Upload streaming parallelo CSGCM1 (3 canali per foto/doc, 1 canale dedicato per video >= 50 MB)
+            val permitSemaphore = Semaphore(3)
+            val heavyAcquireLock = Mutex()
+            coroutineScope {
+                entriesToUpload.mapIndexed { _, entry ->
+                    async(Dispatchers.IO) {
+                        val permitsNeeded = if (entry.manifestItem.sizeBytes >= 50L * 1024L * 1024L) 3 else 1
+                        var acquiredPermits = 0
+                        val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+                        val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
+                        try {
+                            if (permitsNeeded == 3) {
+                                heavyAcquireLock.withLock {
+                                    repeat(3) {
+                                        permitSemaphore.acquire()
+                                        acquiredPermits++
                                     }
                                 }
+                            } else {
+                                permitSemaphore.acquire()
+                                acquiredPermits = 1
                             }
+                            val encPair = runCatching {
+                                context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
+                                    tempEncrypted.outputStream().use { encOut ->
+                                        DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                                    }
+                                }
+                            }.getOrNull()
+
+                            if (encPair == null) {
+                                progressLock.withLock {
+                                    accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
+                                    _progress.value = _progress.value.copy(
+                                        completedItems = accounting.succeededItemsCount,
+                                        transferredBytes = accounting.transferredBytes,
+                                        totalBytes = accounting.totalBytesForProgress,
+                                        speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
+                                        failedItemsCount = accounting.failedItemsCount,
+                                        phaseLabel = "Saltato file non leggibile (${entry.manifestItem.fileName}), proseguo..."
+                                    )
+                                }
+                                return@async
+                            }
+
+                            val (plainLen, sha256Hex) = encPair
+                            var uploadedSingleOk = false
+                            var permissionDeniedMsg: String? = null
+
+                            for (attempt in 1..2) {
+                                val body = object : RequestBody() {
+                                    override fun contentType() = "application/octet-stream".toMediaType()
+                                    override fun contentLength(): Long = tempEncrypted.length()
+                                    override fun writeTo(sink: BufferedSink) {
+                                        tempEncrypted.inputStream().use { fileIn ->
+                                            val buf = ByteArray(256 * 1024)
+                                            while (true) {
+                                                val r = fileIn.read(buf)
+                                                if (r <= 0) break
+                                                sink.write(buf, 0, r)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val putReq = Request.Builder()
+                                    .url("$baseUrl/v1/item/${entry.manifestItem.id}")
+                                    .header("X-DS-Plain-Length", plainLen.toString())
+                                    .header("X-DS-Sha256", sha256Hex)
+                                    .header("Connection", "close")
+                                    .put(body)
+                                    .build()
+
+                                val code = runCatching {
+                                    activeClient.newCall(putReq).execute().use { resp -> resp.code }
+                                }.getOrDefault(-1)
+
+                                if (code in 200..299) {
+                                    uploadedSingleOk = true
+                                    break
+                                } else if (code == 403) {
+                                    permissionDeniedMsg = "Permesso Foto/Libreria negato sul telefono ricevente (${handshakeResp.receiverName}). Abilitalo nelle Impostazioni del ricevente."
+                                    break
+                                } else if (attempt == 1) {
+                                    delay(250L)
+                                }
+                            }
+
+                            if (permissionDeniedMsg != null) {
+                                throw IllegalStateException(permissionDeniedMsg)
+                            }
+
+                            if (!uploadedSingleOk) {
+                                DirectSwitchLog.warn("Impossibile inviare ${entry.manifestItem.fileName}, passo al successivo")
+                                progressLock.withLock {
+                                    accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
+                                    _progress.value = _progress.value.copy(
+                                        completedItems = accounting.succeededItemsCount,
+                                        transferredBytes = accounting.transferredBytes,
+                                        totalBytes = accounting.totalBytesForProgress,
+                                        speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
+                                        failedItemsCount = accounting.failedItemsCount,
+                                        phaseLabel = "Saltato ${entry.manifestItem.fileName}, proseguo col resto..."
+                                    )
+                                }
+                                return@async
+                            }
+
+                            progressLock.withLock {
+                                accounting.recordUploaded(entry.manifestItem.sizeBytes, plainLen)
+                                val speedMbs = speedMeter.record(plainLen)
+                                _progress.value = _progress.value.copy(
+                                    currentFileName = entry.manifestItem.fileName,
+                                    completedItems = accounting.succeededItemsCount,
+                                    transferredBytes = accounting.transferredBytes,
+                                    totalBytes = accounting.totalBytesForProgress,
+                                    speedMegabytesPerSec = speedMbs,
+                                    failedItemsCount = accounting.failedItemsCount
+                                )
+                            }
+                        } finally {
+                            tempEncrypted.delete()
+                            repeat(acquiredPermits) { permitSemaphore.release() }
                         }
-
-                        val putReq = Request.Builder()
-                            .url("$baseUrl/v1/item/${entry.manifestItem.id}")
-                            .header("X-DS-Plain-Length", plainLen.toString())
-                            .header("X-DS-Sha256", sha256Hex)
-                            .header("Connection", "close")
-                            .put(body)
-                            .build()
-
-                        val code = runCatching {
-                            activeClient.newCall(putReq).execute().use { resp -> resp.code }
-                        }.getOrDefault(-1)
-
-                        if (code in 200..299) {
-                            uploadedSingleOk = true
-                            break
-                        } else if (code == 403) {
-                            permissionDeniedMsg = "Permesso Foto/Libreria negato sul telefono ricevente (${handshakeResp.receiverName}). Abilitalo nelle Impostazioni del ricevente."
-                            break
-                        } else if (attempt == 1) {
-                            delay(250L)
-                        }
                     }
-
-                    if (permissionDeniedMsg != null) {
-                        throw IllegalStateException(permissionDeniedMsg)
-                    }
-
-                    if (!uploadedSingleOk) {
-                        failedCount++
-                        DirectSwitchLog.warn("Impossibile inviare ${entry.manifestItem.fileName}, passo al successivo")
-                        _progress.value = _progress.value.copy(
-                            completedItems = index + 1,
-                            failedItemsCount = failedCount,
-                            phaseLabel = "Saltato ${entry.manifestItem.fileName}, proseguo col resto..."
-                        )
-                        continue
-                    }
-
-                    uploadedBytes += plainLen
-                    val elapsedSec = ((System.currentTimeMillis() - startTime).coerceAtLeast(250L)) / 1000.0
-                    val speedMbs = (uploadedBytes / (1024.0 * 1024.0)) / elapsedSec
-
-                    _progress.value = _progress.value.copy(
-                        currentFileName = entry.manifestItem.fileName,
-                        completedItems = index + 1,
-                        transferredBytes = uploadedBytes,
-                        speedMegabytesPerSec = speedMbs,
-                        failedItemsCount = failedCount
-                    )
-                } finally {
-                    tempEncrypted.delete()
-                }
+                }.awaitAll()
             }
+            val failedCount = accounting.failedItemsCount
 
             // 5. Chiusura sessione cifrata e Report certificato
             val completeJson = postEncryptedJson(

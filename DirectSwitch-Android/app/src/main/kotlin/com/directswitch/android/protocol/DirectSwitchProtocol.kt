@@ -678,3 +678,84 @@ object DirectSwitchCrypto {
         return total
     }
 }
+
+/** Riconcilia byte stimati, file effettivi e file saltati per mantenere progressi e totali coerenti. */
+class TransferProgressAccounting(
+    queuedItemsCount: Int,
+    remainingEstimatedBytes: Long
+) {
+    val initialTotalItems: Int = queuedItemsCount.coerceAtLeast(0)
+    var succeededItemsCount: Int = 0
+        private set
+    var failedItemsCount: Int = 0
+        private set
+    var transferredBytes: Long = 0L
+        private set
+    var remainingEstimatedBytes: Long = remainingEstimatedBytes.coerceAtLeast(0L)
+        private set
+
+    val processedItemsCount: Int
+        get() = succeededItemsCount + failedItemsCount
+
+    val totalBytesForProgress: Long
+        get() = maxOf(transferredBytes, transferredBytes + remainingEstimatedBytes)
+
+    val progressFraction: Float
+        get() {
+            val total = totalBytesForProgress
+            if (total > 0L && transferredBytes > 0L) {
+                return (transferredBytes.toFloat() / total.toFloat()).coerceIn(0.01f, 1f)
+            }
+            if (initialTotalItems > 0) {
+                val processed = processedItemsCount
+                if (processed <= 0) return 0f
+                return (processed.toFloat() / initialTotalItems.toFloat()).coerceIn(0.01f, 1f)
+            }
+            return 0f
+        }
+
+    fun recordUploaded(estimatedBytes: Long, actualBytes: Long) {
+        succeededItemsCount += 1
+        transferredBytes += actualBytes.coerceAtLeast(0L)
+        remainingEstimatedBytes = (remainingEstimatedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+    }
+
+    fun recordFailedOrSkipped(estimatedBytes: Long) {
+        failedItemsCount += 1
+        remainingEstimatedBytes = (remainingEstimatedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+    }
+}
+
+/** Misuratore di velocità su finestra scorrevole (4.5s) in millisecondi. */
+class SlidingTransferSpeedMeter(
+    private val startMillis: Long = System.currentTimeMillis(),
+    private val windowMillis: Long = 4_500L
+) {
+    private data class Sample(val timestampMillis: Long, val bytes: Long)
+    private val samples = ArrayDeque<Sample>()
+    private var totalBytesRecorded: Long = 0L
+
+    fun record(bytes: Long, nowMillis: Long = System.currentTimeMillis()): Double {
+        val safeBytes = bytes.coerceAtLeast(0L)
+        if (safeBytes > 0L) {
+            totalBytesRecorded += safeBytes
+            samples.addLast(Sample(nowMillis, safeBytes))
+        }
+        return currentMegabytesPerSec(nowMillis)
+    }
+
+    fun currentMegabytesPerSec(nowMillis: Long = System.currentTimeMillis()): Double {
+        val cutoff = nowMillis - windowMillis
+        while (samples.isNotEmpty() && samples.first().timestampMillis < cutoff) {
+            samples.removeFirst()
+        }
+        if (totalBytesRecorded <= 0L) return 0.0
+        val windowBytes = samples.sumOf { it.bytes }
+        if (windowBytes > 0L && samples.isNotEmpty()) {
+            val spanMs = (nowMillis - samples.first().timestampMillis + 150L).coerceIn(350L, windowMillis)
+            return (windowBytes.toDouble() / (1024.0 * 1024.0)) / (spanMs / 1000.0)
+        }
+        val elapsedMs = (nowMillis - startMillis).coerceAtLeast(250L)
+        return (totalBytesRecorded.toDouble() / (1024.0 * 1024.0)) / (elapsedMs / 1000.0)
+    }
+}
