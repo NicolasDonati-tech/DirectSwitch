@@ -1268,14 +1268,25 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "VID_20261110.MOV"))
         XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "RPReplay_Final170000.MP4"))
 
-        // 4. Lettura reale header EXIF/TIFF Software via CGImageSource a zero decodifica pixel
+        // 4. Lettura reale header EXIF/TIFF & XMP Software via CGImageSource a zero decodifica pixel
         let tmpJpg = FileManager.default.temporaryDirectory.appendingPathComponent("ds_exif_\(UUID().uuidString).jpg")
         defer { try? FileManager.default.removeItem(at: tmpJpg) }
-        let sampleImg = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { ctx in
-            UIColor.systemBlue.setFill()
-            ctx.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: 8,
+            height: 8,
+            bitsPerComponent: 8,
+            bytesPerRow: 32,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else {
+            XCTFail("Failed to create 8-bit RGB CGContext")
+            return
         }
-        guard let cgImg = sampleImg.cgImage,
+        ctx.setFillColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1.0)
+        ctx.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        guard let cgImg = ctx.makeImage(),
               let dest = CGImageDestinationCreateWithURL(tmpJpg as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             XCTFail("Failed to allocate test JPEG writer")
             return
@@ -1283,7 +1294,8 @@ final class DirectSwitchTests: XCTestCase {
         let exifProps: [String: Any] = [
             kCGImagePropertyTIFFDictionary as String: [
                 kCGImagePropertyTIFFSoftware as String: "Snapseed 2.0"
-            ]
+            ],
+            kCGImageDestinationLossyCompressionQuality as String: 0.9
         ]
         CGImageDestinationAddImage(dest, cgImg, exifProps as CFDictionary)
         XCTAssertTrue(CGImageDestinationFinalize(dest))
@@ -1300,6 +1312,31 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(exifDetected?.packageName, "com.niksoftware.snapseedforipad")
         XCTAssertEqual(exifDetected?.appStoreId, 439438619)
         XCTAssertEqual(exifDetected?.detectionSource, "da Metadati Foto • 5g fa")
+
+        // Verifica anche XMP tiff:Software (usato da Lightroom / Canva / editor moderni su JPEG/HEIC)
+        let tmpXmpJpg = FileManager.default.temporaryDirectory.appendingPathComponent("ds_xmp_\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: tmpXmpJpg) }
+        if let xmpDest = CGImageDestinationCreateWithURL(tmpXmpJpg as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
+            let mutableMeta = CGImageMetadataCreateMutable()
+            let registered = CGImageMetadataSetValueWithPath(
+                mutableMeta,
+                nil,
+                "xmp:CreatorTool" as CFString,
+                "Adobe Lightroom Mobile" as CFString
+            )
+            XCTAssertTrue(registered)
+            CGImageDestinationAddImageAndMetadata(xmpDest, cgImg, mutableMeta, nil)
+            XCTAssertTrue(CGImageDestinationFinalize(xmpDest))
+            let xmpDetected = await iOSPhotoMetadataAppDetector.detectAppFromExportedMediaFile(
+                at: tmpXmpJpg,
+                originalFilename: "IMG_8888.JPG",
+                isVideo: false,
+                creationDate: fiveDaysAgo,
+                now: now
+            )
+            XCTAssertEqual(xmpDetected?.packageName, "com.adobe.lrmobilephone")
+            XCTAssertEqual(xmpDetected?.appStoreId, 878783582)
+        }
 
         // 5. Categorie curate + filtro Google Android
         XCTAssertGreaterThanOrEqual(iOSInstalledAppsScanner.curatedCategories.count, 8)

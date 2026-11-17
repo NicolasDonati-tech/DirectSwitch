@@ -3354,20 +3354,30 @@ enum iOSPhotoMetadataAppDetector {
     }
 
     static func extractSoftwareTagFromImageFile(at fileURL: URL) -> String? {
-        let opts = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, opts),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, opts) as? [String: Any] else {
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else {
             return nil
         }
-        if let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
-           let sw = (tiff[kCGImagePropertyTIFFSoftware as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !sw.isEmpty {
-            return sw
+        if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] {
+            if let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
+               let sw = (tiff[kCGImagePropertyTIFFSoftware as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !sw.isEmpty {
+                return sw
+            }
+            if let png = props[kCGImagePropertyPNGDictionary as String] as? [String: Any],
+               let sw = (png["Software"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !sw.isEmpty {
+                return sw
+            }
         }
-        if let png = props[kCGImagePropertyPNGDictionary as String] as? [String: Any],
-           let sw = (png["Software"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !sw.isEmpty {
-            return sw
+        if let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
+            for path in ["tiff:Software", "xmp:CreatorTool"] {
+                if let value = CGImageMetadataCopyStringValueWithPath(metadata, nil, path as CFString) {
+                    let clean = (value as String).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !clean.isEmpty {
+                        return clean
+                    }
+                }
+            }
         }
         return nil
     }
