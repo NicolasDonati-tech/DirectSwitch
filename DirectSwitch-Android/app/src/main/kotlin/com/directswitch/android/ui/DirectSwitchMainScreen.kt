@@ -2427,16 +2427,20 @@ private fun ReceiverAppsMirrorCard(
                 AppleSettingsIcon(icon = Icons.Filled.Apps, color = DirectSwitchTheme.blue, size = 30.dp)
                 Column {
                     Text(
-                        text = "App da reinstallare (${installedApps.size}/${apps.size})",
+                        text = if (pendingApps.isEmpty()) {
+                            "Tutte le app già installate (${installedApps.size})"
+                        } else {
+                            "App da installare (${pendingApps.size})"
+                        },
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
-                        text = if (pendingApps.isEmpty()) {
-                            "Tutte le app ricevute risultano già installate"
-                        } else {
-                            "${pendingApps.size} da installare dal Play Store (aggiornamento automatico al rientro)"
+                        text = when {
+                            pendingApps.isEmpty() -> "Nessuna app mancante: hai già tutte le ${apps.size} app sul telefono"
+                            installedApps.isNotEmpty() -> "${installedApps.size} già presenti e nascoste automaticamente • aggiornamento al rientro"
+                            else -> "Tocca un'app per installarla dal Play Store (aggiornamento automatico al rientro)"
                         },
                         fontSize = 12.sp,
                         color = DirectSwitchTheme.textSecondary
@@ -2490,11 +2494,13 @@ private fun ReceiverAppsMirrorCard(
                                 fontWeight = FontWeight.SemiBold,
                                 color = DirectSwitchTheme.textPrimary
                             )
+                            val targetLabel = when (target) {
+                                is InstalledAppsScanner.PlayStoreTarget.ExactPackage -> target.packageName
+                                is InstalledAppsScanner.PlayStoreTarget.SearchByName -> "Ricerca guidata su Play Store"
+                            }
+                            val sourceNote = app.detectionSource?.takeIf { it.isNotBlank() }
                             Text(
-                                text = when (target) {
-                                    is InstalledAppsScanner.PlayStoreTarget.ExactPackage -> target.packageName
-                                    is InstalledAppsScanner.PlayStoreTarget.SearchByName -> "Ricerca guidata su Play Store"
-                                },
+                                text = if (sourceNote != null) "$sourceNote • $targetLabel" else targetLabel,
                                 fontSize = 11.sp,
                                 color = DirectSwitchTheme.textMuted
                             )
@@ -2548,7 +2554,7 @@ private fun ReceiverAppsMirrorCard(
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        text = "${installedApps.size} app già installate",
+                        text = "${installedApps.size} app già presenti sul telefono (nascoste)",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.green

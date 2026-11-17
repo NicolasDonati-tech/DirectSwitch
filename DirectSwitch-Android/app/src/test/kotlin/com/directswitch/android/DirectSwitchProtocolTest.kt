@@ -611,6 +611,42 @@ class DirectSwitchProtocolTest {
                 DevicePlatform.IOS
             )
         )
+
+        // Verifica mappatura esatta italiana + editor foto/video + Campo detectionSource retrocompatibile
+        val expectedItalianMappings = listOf(
+            "com.intesasanpaolo.ibiphone" to "com.latuabancaperandroid",
+            "com.internet.unicredit.iphoneapp" to "com.unicredit",
+            "it.poste.spim" to "com.posteitaliane.spim",
+            "it.ipzs.cieID" to "it.ipzs.cieid",
+            "it.poste.postebuy2" to "posteitaliane.posteapp.appposteid",
+            "com.promptu.ProntoTreno" to "com.lynxspa.prontotreno",
+            "it.telepass" to "it.telepass.prod.TelepassPyng",
+            "com.booking.BookingApp" to "com.booking",
+            "com.einnovation.temu" to "com.einnovation.temu",
+            "zzkko.com.ZZKKO" to "com.zzkko",
+            "com.camerasideas.InstaShot" to "com.camerasideas.instashot",
+            "com.niksoftware.snapseedforipad" to "com.niksoftware.snapseed",
+            "com.adobe.lrmobilephone" to "com.adobe.lrmobile",
+            "com.strava.stravaride" to "com.strava",
+            "com.tplink.tapo" to "com.tplink.iot",
+            "com.hikvision.ezviz" to "com.ezviz",
+            "it.rainet.ipad.raitv" to "it.rainet",
+            "it.sky.skygoitalia" to "it.sky.anywhere",
+            "com.nowtv.it" to "com.nowtv.it"
+        )
+        for ((iosBundle, expectedAndroidPkg) in expectedItalianMappings) {
+            assertEquals(
+                com.directswitch.android.migrators.InstalledAppsScanner.PlayStoreTarget.ExactPackage(expectedAndroidPkg),
+                scanner.resolvePlayStoreTarget(
+                    InstalledAppRecord(
+                        packageName = iosBundle,
+                        appName = iosBundle,
+                        detectionSource = "da Album Foto • oggi"
+                    ),
+                    DevicePlatform.IOS
+                )
+            )
+        }
     }
 
     @Test

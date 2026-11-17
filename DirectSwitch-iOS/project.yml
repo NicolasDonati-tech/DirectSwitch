@@ -62,13 +62,13 @@ targets:
           - fb
           - fb-messenger
           - tiktok
-          - youtube
-          - googlegmail
-          - comgooglemaps
-          - googlechrome
-          - googledrive
-          - googlephotos
-          - googleapp
+          - cieid
+          - booking
+          - temu
+          - shein
+          - trenitalia
+          - telepass
+          - strava
           - googleauthenticator
           - spotify
           - nflx

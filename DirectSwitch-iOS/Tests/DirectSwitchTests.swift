@@ -1,5 +1,8 @@
 ﻿import XCTest
 import CryptoKit
+import ImageIO
+import UIKit
+import UniformTypeIdentifiers
 @testable import DirectSwitch
 
 final class DirectSwitchTests: XCTestCase {
@@ -1190,5 +1193,123 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertTrue(iOSInstalledAppsScanner.knownProbes.contains { $0.bundleId == "com.getdropbox.Dropbox" && $0.urlScheme == "dbapi-2" })
         XCTAssertTrue(iOSInstalledAppsScanner.knownProbes.contains { $0.bundleId == "com.tinyspeck.chatlyio" && $0.urlScheme == "slack" })
         XCTAssertLessThanOrEqual(Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"]).count, 50)
+    }
+
+    func testOptimizedProbesPhotoMetadataDetectorAndCuratedCategories() async throws {
+        // 1. Verifica che i 7 slot prima occupati da app Google preinstallate su Android siano ora liberati
+        let androidDefaultSchemes: Set<String> = [
+            "youtube", "googlegmail", "comgooglemaps", "googlechrome", "googledrive", "googlephotos", "googleapp"
+        ]
+        for probe in iOSInstalledAppsScanner.knownProbes {
+            XCTAssertFalse(androidDefaultSchemes.contains(probe.urlScheme), "Unexpected Android-preinstalled Google scheme: \(probe.urlScheme)")
+        }
+
+        // Verifica presenza dei 7 nuovi schemi prioritari + ID App Store reali corretti
+        let expectedProbes: [(String, String, Int)] = [
+            ("it.ipzs.cieID", "cieid", 1504644677),
+            ("com.booking.BookingApp", "booking", 367003839),
+            ("com.einnovation.temu", "temu", 1641486558),
+            ("zzkko.com.ZZKKO", "shein", 878577184),
+            ("com.promptu.ProntoTreno", "trenitalia", 331050847),
+            ("it.telepass", "telepass", 454224356),
+            ("com.strava.stravaride", "strava", 426826309),
+            ("it.poste.postebuy2", "posteid", 649492675),
+            ("it.pagopa.app.io", "ioit", 1501681835),
+            ("com.subito.subito", "subito", 450775137),
+            ("lt.manodrabuziai.fr", "vinted", 632064380),
+            ("com.dazn.theApp", "dazn", 1129523589)
+        ]
+        for (bundle, scheme, storeId) in expectedProbes {
+            XCTAssertTrue(
+                iOSInstalledAppsScanner.knownProbes.contains {
+                    $0.bundleId == bundle && $0.urlScheme == scheme && $0.appStoreId == storeId
+                },
+                "Missing expected probe \(bundle)/\(scheme)/\(storeId)"
+            )
+        }
+        XCTAssertEqual(iOSInstalledAppsScanner.knownProbes.count, 48)
+        XCTAssertLessThanOrEqual(
+            Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"]).count,
+            50
+        )
+
+        // 2. Rilevamento extra-50 da Album Foto + recency label
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let fiveDaysAgo = now.addingTimeInterval(-5 * 86_400)
+        let oldDate = now.addingTimeInterval(-120 * 86_400)
+
+        let capcutAlbum = iOSPhotoMetadataAppDetector.matchApp(forAlbumTitle: "CapCut", latestDate: fiveDaysAgo, now: now)
+        XCTAssertEqual(capcutAlbum?.packageName, "com.lemon.lvoverseas")
+        XCTAssertEqual(capcutAlbum?.appStoreId, 1500855883)
+        XCTAssertEqual(capcutAlbum?.detectionSource, "da Album Foto • 5g fa")
+
+        let djiAlbum = iOSPhotoMetadataAppDetector.matchApp(forAlbumTitle: "DJI Fly", latestDate: oldDate, now: now)
+        XCTAssertEqual(djiAlbum?.packageName, "com.dji.golite")
+        XCTAssertEqual(djiAlbum?.detectionSource, "da Album Foto • oltre 90g fa")
+
+        XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forAlbumTitle: "Recenti"))
+        XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forAlbumTitle: "Preferiti"))
+        XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forAlbumTitle: "Vacanze Sicilia 2025"))
+
+        // 3. Rilevamento da prefisso nome file senza falsi positivi sui file fotocamera/sistema
+        XCTAssertEqual(
+            iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "InShot_20261115_1200.mp4", assetDate: now, now: now)?.packageName,
+            "com.camerasideas.InstaShot"
+        )
+        XCTAssertEqual(
+            iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "PicsArt_11-12-01.jpg", assetDate: fiveDaysAgo, now: now)?.packageName,
+            "com.picsart.studio"
+        )
+        XCTAssertEqual(
+            iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "Signal-2026-11-10-120000.jpg", assetDate: fiveDaysAgo, now: now)?.packageName,
+            "org.whispersystems.signal"
+        )
+        XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "IMG_1234.HEIC"))
+        XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "VID_20261110.MOV"))
+        XCTAssertNil(iOSPhotoMetadataAppDetector.matchApp(forMediaFilename: "RPReplay_Final170000.MP4"))
+
+        // 4. Lettura reale header EXIF/TIFF Software via CGImageSource a zero decodifica pixel
+        let tmpJpg = FileManager.default.temporaryDirectory.appendingPathComponent("ds_exif_\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: tmpJpg) }
+        let sampleImg = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { ctx in
+            UIColor.systemBlue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        guard let cgImg = sampleImg.cgImage,
+              let dest = CGImageDestinationCreateWithURL(tmpJpg as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            XCTFail("Failed to allocate test JPEG writer")
+            return
+        }
+        let exifProps: [String: Any] = [
+            kCGImagePropertyTIFFDictionary as String: [
+                kCGImagePropertyTIFFSoftware as String: "Snapseed 2.0"
+            ]
+        ]
+        CGImageDestinationAddImage(dest, cgImg, exifProps as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+
+        let extractedTag = iOSPhotoMetadataAppDetector.extractSoftwareTagFromImageFile(at: tmpJpg)
+        XCTAssertEqual(extractedTag, "Snapseed 2.0")
+        let exifDetected = await iOSPhotoMetadataAppDetector.detectAppFromExportedMediaFile(
+            at: tmpJpg,
+            originalFilename: "IMG_9999.JPG",
+            isVideo: false,
+            creationDate: fiveDaysAgo,
+            now: now
+        )
+        XCTAssertEqual(exifDetected?.packageName, "com.niksoftware.snapseedforipad")
+        XCTAssertEqual(exifDetected?.appStoreId, 439438619)
+        XCTAssertEqual(exifDetected?.detectionSource, "da Metadati Foto • 5g fa")
+
+        // 5. Categorie curate + filtro Google Android
+        XCTAssertGreaterThanOrEqual(iOSInstalledAppsScanner.curatedCategories.count, 8)
+        for cat in iOSInstalledAppsScanner.curatedCategories {
+            XCTAssertFalse(cat.apps.isEmpty, "Category \(cat.id) must not be empty")
+        }
+        let nonGoogle = iOSInstalledAppsScanner.italianQuickSuggestions
+        XCTAssertFalse(nonGoogle.contains(where: { iOSInstalledAppsScanner.isGoogleAppPreinstalledOnAndroid($0) }))
+        XCTAssertTrue(iOSInstalledAppsScanner.isGoogleAppPreinstalledOnAndroid(
+            InstalledAppRecord(packageName: "com.google.Gmail", appName: "Gmail")
+        ))
     }
 }

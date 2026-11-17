@@ -8,6 +8,7 @@
 
 import AVFoundation
 import Foundation
+import ImageIO
 import Photos
 import SwiftUI
 import StoreKit
@@ -89,14 +90,42 @@ struct AppPrivacyReportImportResult: Sendable {
     let rawBundleIdsCount: Int
 }
 
-/// Scanner deterministico delle app installate sull'iPhone mittente (utilizza gli schemi Apple `LSApplicationQueriesSchemes`
-/// al massimo di 50 consentito da iOS e l'importazione esatta di `bundleID` dal Resoconto Privacy Apple, con zero allucinazioni).
+/// Categoria curata per la selezione rapida a 1 tocco (zero attese e zero scansione fotocamera).
+struct AppQuickCategory: Identifiable, Sendable {
+    let id: String
+    let title: String
+    let iconName: String
+    var isGoogleAndroidPreinstalledCategory: Bool = false
+    let apps: [InstalledAppRecord]
+}
+
+/// Scanner deterministico delle app installate sull'iPhone mittente:
+/// 1) 48 schemi verificati (`knownProbes` + WhatsApp + CloudSave = limite massimo 50 consentito da iOS)
+/// 2) Rilevamento automatico gratuito da Album Foto e metadati media (`iOSPhotoMetadataAppDetector`)
+/// 3) Catalogo curato per categorie italiane a 1 tocco e ricerca ufficiale App Store
 enum iOSInstalledAppsScanner {
     private static let legacyCustomAppsStorageKey = "directswitch_custom_sender_apps_v1"
     private static let legacyCustomAppsStorageKeyV2 = "directswitch_verified_sender_apps_v2"
     private static let customAppsStorageKey = "directswitch_verified_sender_apps_v3"
 
+    static let androidPreinstalledGoogleBundleIds: Set<String> = [
+        "com.google.ios.youtube",
+        "com.google.gmail",
+        "com.google.maps",
+        "com.google.chrome.ios",
+        "com.google.drive",
+        "com.google.photos",
+        "com.google.googlemobile",
+        "com.google.calendar"
+    ]
+
+    static func isGoogleAppPreinstalledOnAndroid(_ app: InstalledAppRecord) -> Bool {
+        androidPreinstalledGoogleBundleIds.contains(app.packageName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
     /// Tutti gli schemi univoci dichiarati in `Info.plist` (`<= 50` incluso `whatsapp` e `com.cloudsave.ios`).
+    /// Gli slot precedentemente usati dalle app Google già preinstallate su Android (YouTube, Gmail, Maps, Chrome, Drive, Foto, Google)
+    /// sono ora dedicati a CieID, Booking.com, Temu, SHEIN, Trenitalia, Telepass e Strava.
     static let knownProbes: [iOSKnownAppProbe] = [
         iOSKnownAppProbe(bundleId: "net.whatsapp.WhatsApp", appName: "WhatsApp Messenger", urlScheme: "whatsapp-consumer", appStoreId: 310633997),
         iOSKnownAppProbe(bundleId: "net.whatsapp.WhatsAppSMB", appName: "WhatsApp Business", urlScheme: "whatsapp-smb", appStoreId: 1386412985),
@@ -105,23 +134,23 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.facebook.Facebook", appName: "Facebook", urlScheme: "fb", appStoreId: 284882215),
         iOSKnownAppProbe(bundleId: "com.facebook.Messenger", appName: "Messenger", urlScheme: "fb-messenger", appStoreId: 454638411),
         iOSKnownAppProbe(bundleId: "com.zhiliaoapp.musically", appName: "TikTok", urlScheme: "tiktok", appStoreId: 835599320),
-        iOSKnownAppProbe(bundleId: "com.google.ios.youtube", appName: "YouTube", urlScheme: "youtube", appStoreId: 544007664),
-        iOSKnownAppProbe(bundleId: "com.google.Gmail", appName: "Gmail", urlScheme: "googlegmail", appStoreId: 422689480),
-        iOSKnownAppProbe(bundleId: "com.google.Maps", appName: "Google Maps", urlScheme: "comgooglemaps", appStoreId: 585027354),
-        iOSKnownAppProbe(bundleId: "com.google.chrome.ios", appName: "Google Chrome", urlScheme: "googlechrome", appStoreId: 535886823),
-        iOSKnownAppProbe(bundleId: "com.google.Drive", appName: "Google Drive", urlScheme: "googledrive", appStoreId: 507874739),
-        iOSKnownAppProbe(bundleId: "com.google.photos", appName: "Google Foto", urlScheme: "googlephotos", appStoreId: 962194608),
-        iOSKnownAppProbe(bundleId: "com.google.GoogleMobile", appName: "Google", urlScheme: "googleapp", appStoreId: 284815942),
+        iOSKnownAppProbe(bundleId: "it.ipzs.cieID", appName: "CieID", urlScheme: "cieid", appStoreId: 1504644677),
+        iOSKnownAppProbe(bundleId: "com.booking.BookingApp", appName: "Booking.com", urlScheme: "booking", appStoreId: 367003839),
+        iOSKnownAppProbe(bundleId: "com.einnovation.temu", appName: "Temu", urlScheme: "temu", appStoreId: 1641486558),
+        iOSKnownAppProbe(bundleId: "zzkko.com.ZZKKO", appName: "SHEIN", urlScheme: "shein", appStoreId: 878577184),
+        iOSKnownAppProbe(bundleId: "com.promptu.ProntoTreno", appName: "Trenitalia", urlScheme: "trenitalia", appStoreId: 331050847),
+        iOSKnownAppProbe(bundleId: "it.telepass", appName: "Telepass", urlScheme: "telepass", appStoreId: 454224356),
+        iOSKnownAppProbe(bundleId: "com.strava.stravaride", appName: "Strava", urlScheme: "strava", appStoreId: 426826309),
         iOSKnownAppProbe(bundleId: "com.google.Authenticator", appName: "Google Authenticator", urlScheme: "googleauthenticator", appStoreId: 388497605),
         iOSKnownAppProbe(bundleId: "com.spotify.client", appName: "Spotify", urlScheme: "spotify", appStoreId: 324684580),
         iOSKnownAppProbe(bundleId: "com.netflix.Netflix", appName: "Netflix", urlScheme: "nflx", appStoreId: 363590051),
         iOSKnownAppProbe(bundleId: "com.amazon.aiv.AIVApp", appName: "Amazon Prime Video", urlScheme: "aiv", appStoreId: 545519333),
         iOSKnownAppProbe(bundleId: "com.disney.disneyplus", appName: "Disney+", urlScheme: "disneyplus", appStoreId: 1446075923),
-        iOSKnownAppProbe(bundleId: "com.dazn.theApp", appName: "DAZN", urlScheme: "dazn", appStoreId: 1119332524),
+        iOSKnownAppProbe(bundleId: "com.dazn.theApp", appName: "DAZN", urlScheme: "dazn", appStoreId: 1129523589),
         iOSKnownAppProbe(bundleId: "com.amazon.AmazonIT", appName: "Amazon Shopping", urlScheme: "com.amazon.mobile.shopping", appStoreId: 297606951),
         iOSKnownAppProbe(bundleId: "com.yourcompany.PPClient", appName: "PayPal", urlScheme: "paypal", appStoreId: 283646709),
         iOSKnownAppProbe(bundleId: "com.revolut.revolut", appName: "Revolut", urlScheme: "revolut", appStoreId: 932493382),
-        iOSKnownAppProbe(bundleId: "com.satispay.consumer", appName: "Satispay", urlScheme: "satispay", appStoreId: 934438340),
+        iOSKnownAppProbe(bundleId: "com.satispay.customer.p2p", appName: "Satispay", urlScheme: "satispay", appStoreId: 790287076),
         iOSKnownAppProbe(bundleId: "com.microsoft.Office.Outlook", appName: "Microsoft Outlook", urlScheme: "ms-outlook", appStoreId: 951937596),
         iOSKnownAppProbe(bundleId: "com.microsoft.skype.teams", appName: "Microsoft Teams", urlScheme: "msteams", appStoreId: 1113153706),
         iOSKnownAppProbe(bundleId: "us.zoom.videomeetings", appName: "Zoom Workplace", urlScheme: "zoomus", appStoreId: 546505307),
@@ -135,57 +164,172 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "tv.twitch", appName: "Twitch", urlScheme: "twitch", appStoreId: 460177396),
         iOSKnownAppProbe(bundleId: "com.waze.iphone", appName: "Waze", urlScheme: "waze", appStoreId: 323229106),
         iOSKnownAppProbe(bundleId: "com.ubercab.UberClient", appName: "Uber", urlScheme: "uber", appStoreId: 368677368),
-        iOSKnownAppProbe(bundleId: "it.subito.iphone", appName: "Subito", urlScheme: "subito", appStoreId: 385368449),
-        iOSKnownAppProbe(bundleId: "fr.vinted", appName: "Vinted", urlScheme: "vinted", appStoreId: 999479354),
+        iOSKnownAppProbe(bundleId: "com.subito.subito", appName: "Subito", urlScheme: "subito", appStoreId: 450775137),
+        iOSKnownAppProbe(bundleId: "lt.manodrabuziai.fr", appName: "Vinted", urlScheme: "vinted", appStoreId: 632064380),
         iOSKnownAppProbe(bundleId: "com.airbnb.app", appName: "Airbnb", urlScheme: "airbnb", appStoreId: 401626263),
         iOSKnownAppProbe(bundleId: "com.openai.chat", appName: "ChatGPT", urlScheme: "chatgpt", appStoreId: 6448311069),
         iOSKnownAppProbe(bundleId: "com.shazam.Shazam", appName: "Shazam", urlScheme: "shazam", appStoreId: 284993459),
         iOSKnownAppProbe(bundleId: "com.canva.canvaeditor", appName: "Canva", urlScheme: "canva", appStoreId: 897446215),
         iOSKnownAppProbe(bundleId: "com.ebay.iphone", appName: "eBay", urlScheme: "ebay", appStoreId: 282614216),
-        iOSKnownAppProbe(bundleId: "it.pagopa.app.io", appName: "IO", urlScheme: "ioit", appStoreId: 1505842859),
-        iOSKnownAppProbe(bundleId: "posteitaliane.posteapp.appposteid", appName: "PosteID", urlScheme: "posteid", appStoreId: 1078512138),
+        iOSKnownAppProbe(bundleId: "it.pagopa.app.io", appName: "IO", urlScheme: "ioit", appStoreId: 1501681835),
+        iOSKnownAppProbe(bundleId: "it.poste.postebuy2", appName: "PosteID", urlScheme: "posteid", appStoreId: 649492675),
         iOSKnownAppProbe(bundleId: "com.getdropbox.Dropbox", appName: "Dropbox", urlScheme: "dbapi-2", appStoreId: 327630330),
         iOSKnownAppProbe(bundleId: "com.tinyspeck.chatlyio", appName: "Slack", urlScheme: "slack", appStoreId: 618783545)
     ]
 
-    /// Suggerimenti rapidi italiani ed europei (SPID/CIE, Banche, Pagamenti, Trasporti, Domotica e Utility) aggiungibili con 1 tocco.
-    static let italianQuickSuggestions: [InstalledAppRecord] = [
-        InstalledAppRecord(packageName: "it.pagopa.app.io", appName: "IO", appStoreId: 1505842859, urlScheme: "ioit"),
-        InstalledAppRecord(packageName: "it.ipzs.cieid", appName: "CieID", appStoreId: 1517873615),
-        InstalledAppRecord(packageName: "posteitaliane.posteapp.appposteid", appName: "PosteID", appStoreId: 1078512138, urlScheme: "posteid"),
-        InstalledAppRecord(packageName: "it.aruba.pec.mobile", appName: "Aruba PEC"),
-        InstalledAppRecord(packageName: "com.intesasanpaolo.mobile", appName: "Intesa Sanpaolo Mobile"),
-        InstalledAppRecord(packageName: "it.unicredit.mobile", appName: "UniCredit Mobile Banking"),
-        InstalledAppRecord(packageName: "posteitaliane.posteapp.appbpol", appName: "BancoPosta"),
-        InstalledAppRecord(packageName: "posteitaliane.posteapp.apppostepay", appName: "Postepay"),
-        InstalledAppRecord(packageName: "com.fineco.it", appName: "Fineco"),
-        InstalledAppRecord(packageName: "it.bancomat.pay", appName: "BANCOMAT"),
-        InstalledAppRecord(packageName: "it.icbpi.mobile", appName: "Nexi Pay"),
-        InstalledAppRecord(packageName: "net.klarna.app", appName: "Klarna"),
-        InstalledAppRecord(packageName: "it.hype.app", appName: "HYPE"),
-        InstalledAppRecord(packageName: "com.trenitalia.app", appName: "Trenitalia"),
-        InstalledAppRecord(packageName: "it.ntvspa.italo", appName: "Italo Treno"),
-        InstalledAppRecord(packageName: "com.ryanair.cheapflights", appName: "Ryanair"),
-        InstalledAppRecord(packageName: "com.easypark.iphone", appName: "EasyPark"),
-        InstalledAppRecord(packageName: "it.mooneygo.app", appName: "MooneyGo"),
-        InstalledAppRecord(packageName: "it.telepass.tpy", appName: "Telepass"),
-        InstalledAppRecord(packageName: "com.deliveroo.orderapp", appName: "Deliveroo"),
-        InstalledAppRecord(packageName: "com.glovo.app", appName: "Glovo"),
-        InstalledAppRecord(packageName: "com.einnovation.temu", appName: "Temu"),
-        InstalledAppRecord(packageName: "com.brave.ios.browser", appName: "Brave"),
-        InstalledAppRecord(packageName: "com.microsoft.msedge", appName: "Microsoft Edge"),
-        InstalledAppRecord(packageName: "ch.protonmail.vpn", appName: "Proton VPN"),
-        InstalledAppRecord(packageName: "com.google.calendar", appName: "Google Calendar"),
-        InstalledAppRecord(packageName: "com.ookla.speedtest", appName: "Speedtest"),
-        InstalledAppRecord(packageName: "com.teamviewer.rc", appName: "TeamViewer"),
-        InstalledAppRecord(packageName: "it.a2a.mya2a", appName: "MyA2A"),
-        InstalledAppRecord(packageName: "cloud.shelly.smartcontrol", appName: "Shelly Smart Control"),
-        InstalledAppRecord(packageName: "com.ezviz.ezviz", appName: "EZVIZ"),
-        InstalledAppRecord(packageName: "com.dreame.smartlife", appName: "Dreamehome"),
-        InstalledAppRecord(packageName: "com.preply.tutor", appName: "Preply"),
-        InstalledAppRecord(packageName: "com.canva.canvaeditor", appName: "Canva"),
-        InstalledAppRecord(packageName: "com.lemon.lvoverseas", appName: "CapCut")
+    /// Categorie curate italiane ed europee con Bundle ID e App Store ID verificati su App Store Italia,
+    /// selezionabili con 1 tocco in `SenderAppsSelectionSheet` (zero attese e zero fotocamera).
+    static let curatedCategories: [AppQuickCategory] = [
+        AppQuickCategory(
+            id: "banks_payments",
+            title: "Banche & Pagamenti",
+            iconName: "building.columns.fill",
+            apps: [
+                InstalledAppRecord(packageName: "com.intesasanpaolo.ibiphone", appName: "Intesa Sanpaolo Mobile", appStoreId: 597360475, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.internet.unicredit.iphoneapp", appName: "UniCredit Mobile Banking", appStoreId: 396670008, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.poste.spim", appName: "Poste Italiane", appStoreId: 781421802, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.intesasanpaolo.isybank.mobile", appName: "Isybank", appStoreId: 1666218772, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.fineco.fineco", appName: "Fineco", appStoreId: 405225581, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.bbva.italy", appName: "BBVA Italia", appStoreId: 1536949050, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.bper.mobilebanking", appName: "BPER Banca", appStoreId: 554965344, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.bancamediolanum.imedfullclient", appName: "Banca Mediolanum", appStoreId: 412610547, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.caitalia.apphub", appName: "Crédit Agricole Italia", appStoreId: 1502700297, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.hype.it", appName: "HYPE", appStoreId: 943405905, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.cartasi.mobile.iPhone", appName: "Nexi Pay", appStoreId: 518695175, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.bancomat.pay.user", appName: "BANCOMAT", appStoreId: 1467760256, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.revolut.revolut", appName: "Revolut", appStoreId: 932493382, urlScheme: "revolut", detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.satispay.customer.p2p", appName: "Satispay", appStoreId: 790287076, urlScheme: "satispay", detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.yourcompany.PPClient", appName: "PayPal", appStoreId: 283646709, urlScheme: "paypal", detectionSource: "Categoria Banche")
+            ]
+        ),
+        AppQuickCategory(
+            id: "spid_office",
+            title: "SPID, CIE & Ufficio",
+            iconName: "person.text.rectangle.fill",
+            apps: [
+                InstalledAppRecord(packageName: "it.pagopa.app.io", appName: "IO", appStoreId: 1501681835, urlScheme: "ioit", detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.ipzs.cieID", appName: "CieID", appStoreId: 1504644677, urlScheme: "cieid", detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.poste.postebuy2", appName: "PosteID", appStoreId: 649492675, urlScheme: "posteid", detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.aruba.mobilepec", appName: "Aruba PEC", appStoreId: 973510245, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "com.adobe.scan.ios", appName: "Adobe Scan", appStoreId: 1199564834, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "com.intsig.CamScanner", appName: "CamScanner", appStoreId: 388624839, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "com.microsoft.Office.Word", appName: "Microsoft Word", appStoreId: 586447913, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.microsoft.Office.Excel", appName: "Microsoft Excel", appStoreId: 586683407, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.microsoft.skydrive", appName: "Microsoft OneDrive", appStoreId: 477537958, detectionSource: "Categoria Ufficio")
+            ]
+        ),
+        AppQuickCategory(
+            id: "transport_travel",
+            title: "Trasporti & Viaggi",
+            iconName: "tram.fill",
+            apps: [
+                InstalledAppRecord(packageName: "com.promptu.ProntoTreno", appName: "Trenitalia", appStoreId: 331050847, urlScheme: "trenitalia", detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.accenture.ntvapp", appName: "Italo Treno", appStoreId: 804056898, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "it.telepass", appName: "Telepass", appStoreId: 454224356, urlScheme: "telepass", detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "net.pluservice.myCicero", appName: "MooneyGo", appStoreId: 595700208, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "net.easypark.app", appName: "EasyPark", appStoreId: 449594317, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.ryanair.cheapflights", appName: "Ryanair", appStoreId: 504270602, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.booking.BookingApp", appName: "Booking.com", appStoreId: 367003839, urlScheme: "booking", detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.airbnb.app", appName: "Airbnb", appStoreId: 401626263, urlScheme: "airbnb", detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.ubercab.UberClient", appName: "Uber", appStoreId: 368677368, urlScheme: "uber", detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.waze.iphone", appName: "Waze", appStoreId: 323229106, urlScheme: "waze", detectionSource: "Categoria Trasporti")
+            ]
+        ),
+        AppQuickCategory(
+            id: "shopping_food",
+            title: "Shopping & Cibo",
+            iconName: "bag.fill",
+            apps: [
+                InstalledAppRecord(packageName: "com.amazon.AmazonIT", appName: "Amazon Shopping", appStoreId: 297606951, urlScheme: "com.amazon.mobile.shopping", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.glovo.glovo", appName: "Glovo", appStoreId: 951812684, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.deliveroo.orderapp", appName: "Deliveroo", appStoreId: 1001501844, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.justeat.JUSTEAT", appName: "Just Eat", appStoreId: 566347057, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.einnovation.temu", appName: "Temu", appStoreId: 1641486558, urlScheme: "temu", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "zzkko.com.ZZKKO", appName: "SHEIN", appStoreId: 878577184, urlScheme: "shein", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.subito.subito", appName: "Subito", appStoreId: 450775137, urlScheme: "subito", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "lt.manodrabuziai.fr", appName: "Vinted", appStoreId: 632064380, urlScheme: "vinted", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.ebay.iphone", appName: "eBay", appStoreId: 282614216, urlScheme: "ebay", detectionSource: "Categoria Shopping")
+            ]
+        ),
+        AppQuickCategory(
+            id: "photo_video_sport",
+            title: "Foto, Video & Sport",
+            iconName: "camera.aperture",
+            apps: [
+                InstalledAppRecord(packageName: "com.lemon.lvoverseas", appName: "CapCut", appStoreId: 1500855883, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.camerasideas.InstaShot", appName: "InShot", appStoreId: 997362197, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.adobe.lrmobilephone", appName: "Lightroom", appStoreId: 878783582, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.niksoftware.snapseedforipad", appName: "Snapseed", appStoreId: 439438619, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.picsart.studio", appName: "Picsart", appStoreId: 587366035, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "co.visualsupply.cam", appName: "VSCO", appStoreId: 588013838, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.bigwinepot.nwdn.international", appName: "Remini", appStoreId: 1470373330, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.lightricks.Facetune2", appName: "Facetune", appStoreId: 1149994032, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.dr1ven.eraser", appName: "Photoroom", appStoreId: 1455009060, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.frontrow.vlog", appName: "VN Video Editor", appStoreId: 1343581380, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.strava.stravaride", appName: "Strava", appStoreId: 426826309, urlScheme: "strava", detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.garmin.connect.mobile", appName: "Garmin Connect", appStoreId: 583446403, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.gopro.GoPro", appName: "GoPro Quik", appStoreId: 561350520, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.dji.golite", appName: "DJI Fly", appStoreId: 1479649251, detectionSource: "Categoria Foto & Video")
+            ]
+        ),
+        AppQuickCategory(
+            id: "operators_home",
+            title: "Operatori, Utenze & Casa",
+            iconName: "house.fill",
+            apps: [
+                InstalledAppRecord(packageName: "it.telecomitalia.119SelfService", appName: "MyTIM", appStoreId: 378783815, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "com.vodafone.my190", appName: "My Vodafone", appStoreId: 365804068, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "it.wind.mywind", appName: "WINDTRE", appStoreId: 492519547, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "com.enel.energia", appName: "Enel Energia", appStoreId: 767368903, detectionSource: "Categoria Utenze"),
+                InstalledAppRecord(packageName: "com.eni.EniAutoletturaGas", appName: "Eni Plenitude", appStoreId: 454695340, detectionSource: "Categoria Utenze"),
+                InstalledAppRecord(packageName: "com.tplink.tapo", appName: "TP-Link Tapo", appStoreId: 1472718009, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.hikvision.ezviz", appName: "EZVIZ", appStoreId: 886947564, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "cloud.shelly.app", appName: "Shelly Smart Control", appStoreId: 1660045967, detectionSource: "Categoria Casa")
+            ]
+        ),
+        AppQuickCategory(
+            id: "streaming_ai_tools",
+            title: "Streaming, TV, AI & Sicurezza",
+            iconName: "tv.fill",
+            apps: [
+                InstalledAppRecord(packageName: "it.rainet.ipad.raitv", appName: "RaiPlay", appStoreId: 501323740, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "it.mediaset.video.iphone", appName: "Mediaset Infinity", appStoreId: 412625083, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "it.sky.skygoitalia", appName: "Sky Go", appStoreId: 454435005, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.nowtv.it", appName: "NOW", appStoreId: 1377753603, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.google.gemini", appName: "Google Gemini", appStoreId: 6477489729, detectionSource: "Categoria AI"),
+                InstalledAppRecord(packageName: "com.anthropic.claude", appName: "Claude", appStoreId: 6473753684, detectionSource: "Categoria AI"),
+                InstalledAppRecord(packageName: "ai.perplexity.app", appName: "Perplexity", appStoreId: 1668000334, detectionSource: "Categoria AI"),
+                InstalledAppRecord(packageName: "com.nordvpn.NordVPN", appName: "NordVPN", appStoreId: 905953485, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "ch.protonmail.protonmail", appName: "Proton Mail", appStoreId: 979659905, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.duolingo.DuolingoMobile", appName: "Duolingo", appStoreId: 570060128, detectionSource: "Categoria Studio"),
+                InstalledAppRecord(packageName: "org.whispersystems.signal", appName: "Signal", appStoreId: 874139669, detectionSource: "Categoria Messaggi"),
+                InstalledAppRecord(packageName: "com.viber", appName: "Viber", appStoreId: 382617920, detectionSource: "Categoria Messaggi")
+            ]
+        ),
+        AppQuickCategory(
+            id: "google_essentials",
+            title: "Google (solo per iPhone)",
+            iconName: "g.circle.fill",
+            isGoogleAndroidPreinstalledCategory: true,
+            apps: [
+                InstalledAppRecord(packageName: "com.google.ios.youtube", appName: "YouTube", appStoreId: 544007664, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.Gmail", appName: "Gmail", appStoreId: 422689480, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.Maps", appName: "Google Maps", appStoreId: 585027354, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.chrome.ios", appName: "Google Chrome", appStoreId: 535886823, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.Drive", appName: "Google Drive", appStoreId: 507874739, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.photos", appName: "Google Foto", appStoreId: 962194608, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.GoogleMobile", appName: "Google", appStoreId: 284815942, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.calendar", appName: "Google Calendar", appStoreId: 909319292, detectionSource: "Categoria Google")
+            ]
+        )
     ]
+
+    /// Suggerimenti rapidi italiani derivati senza duplicazioni dalle categorie curate.
+    static var italianQuickSuggestions: [InstalledAppRecord] {
+        curatedCategories
+            .filter { !$0.isGoogleAndroidPreinstalledCategory }
+            .flatMap(\.apps)
+    }
 
     /// Mappa le etichette corte o troncate mostrate sotto le icone della schermata Home iOS al titolo completo su App Store Italia.
     private static let homeScreenShortAliases: [String: String] = [
@@ -467,7 +611,8 @@ enum iOSInstalledAppsScanner {
                         appName: probe.appName,
                         appStoreId: probe.appStoreId,
                         iconUrl: nil,
-                        urlScheme: probe.urlScheme
+                        urlScheme: probe.urlScheme,
+                        detectionSource: "Verificata su iPhone"
                     )
                 )
             }
@@ -475,8 +620,47 @@ enum iOSInstalledAppsScanner {
         return detected
     }
 
+    /// Scansione istantanea completa senza attese né fotocamera:
+    /// 1) 48 schemi verificati (`canOpenURL`)
+    /// 2) App già salvate da categorie / ricerca manuale
+    /// 3) Indizi deterministici da Album Foto e prefissi file in libreria Foto (se il permesso Foto è già concesso)
+    static func detectAllAppsInstantAsync() async -> (apps: [InstalledAppRecord], verifiedProbesCount: Int, photoDiscoveredCount: Int) {
+        let probesOnly = await MainActor.run { scanLocallyInstalledProbesOnly() }
+        let savedCustom = await MainActor.run { filterFalsePositiveProbesOnSender(loadSavedCustomApps()) }
+        let photoCluesRaw = await Task.detached(priority: .userInitiated) {
+            iOSPhotoMetadataAppDetector.scanAuthorizedPhotoLibraryClues()
+        }.value
+        let photoClues = await MainActor.run { filterFalsePositiveProbesOnSender(photoCluesRaw) }
+
+        var merged = probesOnly
+        var seenBundles = Set(merged.map { $0.packageName.lowercased() })
+        var seenStoreIds = Set(merged.compactMap(\.appStoreId))
+        var photoCount = 0
+
+        for clue in photoClues {
+            let bundleKey = clue.packageName.lowercased()
+            if seenBundles.contains(bundleKey) { continue }
+            if let sid = clue.appStoreId, seenStoreIds.contains(sid) { continue }
+            seenBundles.insert(bundleKey)
+            if let sid = clue.appStoreId { seenStoreIds.insert(sid) }
+            merged.append(clue)
+            photoCount += 1
+        }
+
+        for extra in savedCustom {
+            let bundleKey = extra.packageName.lowercased()
+            if seenBundles.contains(bundleKey) { continue }
+            if let sid = extra.appStoreId, seenStoreIds.contains(sid) { continue }
+            seenBundles.insert(bundleKey)
+            if let sid = extra.appStoreId { seenStoreIds.insert(sid) }
+            merged.append(extra)
+        }
+
+        return (merged, probesOnly.count, photoCount)
+    }
+
     /// Rileva istantaneamente tutte le app verificabili tramite gli schemi `Info.plist`
-    /// unendole alle eventuali app importate dal Resoconto Privacy Apple o aggiunte manualmente dall'utente.
+    /// unendole alle eventuali app aggiunte da Foto, categorie rapide o ricerca App Store.
     @MainActor
     static func scanLocallyInstalledApps() -> [InstalledAppRecord] {
         var detected = scanLocallyInstalledProbesOnly()
@@ -1435,7 +1619,7 @@ enum iOSAppStoreCatalogResolver {
         "com.amazon.mshop.android.shopping": "com.amazon.AmazonIT",
         "com.paypal.android.p2pmobile": "com.yourcompany.PPClient",
         "com.revolut.revolut": "com.revolut.revolut",
-        "com.satispay.customer": "com.satispay.consumer",
+        "com.satispay.customer": "com.satispay.customer.p2p",
         "com.microsoft.office.outlook": "com.microsoft.Office.Outlook",
         "com.microsoft.teams": "com.microsoft.skype.teams",
         "us.zoom.videomeetings": "us.zoom.videomeetings",
@@ -1449,16 +1633,22 @@ enum iOSAppStoreCatalogResolver {
         "tv.twitch.android.app": "tv.twitch",
         "com.waze": "com.waze.iphone",
         "com.ubercab": "com.ubercab.UberClient",
-        "it.subito": "it.subito.iphone",
-        "fr.vinted": "fr.vinted",
+        "it.subito": "com.subito.subito",
+        "fr.vinted": "lt.manodrabuziai.fr",
         "com.airbnb.android": "com.airbnb.app",
         "com.openai.chatgpt": "com.openai.chat",
         "com.shazam.android": "com.shazam.Shazam",
         "com.canva.editor": "com.canva.canvaeditor",
         "com.ebay.mobile": "com.ebay.iphone",
         "it.pagopa.app.io": "it.pagopa.app.io",
-        "posteitaliane.posteapp.appposteid": "posteitaliane.posteapp.appposteid",
+        "it.ipzs.cieid": "it.ipzs.cieID",
+        "posteitaliane.posteapp.appposteid": "it.poste.postebuy2",
         "com.einnovation.temu": "com.einnovation.temu",
+        "com.zzkko": "zzkko.com.ZZKKO",
+        "com.booking": "com.booking.BookingApp",
+        "com.lynxspa.prontotreno": "com.promptu.ProntoTreno",
+        "it.telepass.prod.telepasspyng": "it.telepass",
+        "com.strava": "com.strava.stravaride",
         "com.brave.browser": "com.brave.ios.browser",
         "com.microsoft.emmx": "com.microsoft.msedge",
         "ch.protonvpn.android": "ch.protonmail.vpn",
@@ -1466,8 +1656,18 @@ enum iOSAppStoreCatalogResolver {
         "org.zwanoo.android.speedtest": "com.ookla.speedtest",
         "com.teamviewer.teamviewer.market.mobile": "com.teamviewer.rc",
         "com.lemon.lvoverseas": "com.lemon.lvoverseas",
+        "com.camerasideas.instashot": "com.camerasideas.InstaShot",
+        "com.niksoftware.snapseed": "com.niksoftware.snapseedforipad",
+        "com.adobe.lrmobile": "com.adobe.lrmobilephone",
+        "com.picsart.studio": "com.picsart.studio",
+        "com.vsco.cam": "co.visualsupply.cam",
+        "com.bigwinepot.nwdn.international": "com.bigwinepot.nwdn.international",
         "com.dropbox.android": "com.getdropbox.Dropbox",
-        "com.Slack": "com.tinyspeck.chatlyio"
+        "com.Slack": "com.tinyspeck.chatlyio",
+        "com.latuabancaperandroid": "com.intesasanpaolo.ibiphone",
+        "com.unicredit": "com.internet.unicredit.iphoneapp",
+        "com.posteitaliane.spim": "it.poste.spim",
+        "com.fineco.it": "com.fineco.fineco"
     ]
 
     /// Risolve un elenco di `bundleId` esatti su App Store Italia (`/lookup?bundleId=...`) senza mai indovinare o alterare nomi.
@@ -2910,5 +3110,296 @@ final class LiveCameraAppScannerViewModel: NSObject, ObservableObject {
                 self.onLiveAppsChanged?(self.discoveredApps)
             }
         }
+    }
+}
+
+// MARK: - Rilevamento Extra-50 da Album Foto, Nomi File e Metadati EXIF / QuickTime (Zero Nuovi Permessi)
+
+/// Regola deterministica per individuare un'app reale installata/usata su iPhone a partire da indizi locali
+/// nella libreria Foto (titolo album creato dall'app, prefisso file univoco o tag Software EXIF/TIFF/QuickTime).
+struct PhotoClueAppRule: Sendable {
+    let bundleId: String
+    let appName: String
+    let appStoreId: Int?
+    let urlScheme: String?
+    let exactAlbumTitles: [String]
+    let filenamePrefixes: [String]
+    let softwareTagTokens: [String]
+}
+
+/// Rilevatore istantaneo extra-50 basato sui permessi Foto già concessi:
+/// 1) Album creati automaticamente dalle app in Foto (`PHAssetCollection`) con data ultimo utilizzo
+/// 2) Prefissi univoci di file media salvati da editor / action-cam / messaggistica
+/// 3) Tag Software EXIF/TIFF/PNG e QuickTime letti a costo zero durante il trasferimento di foto e video
+enum iOSPhotoMetadataAppDetector {
+    static let rules: [PhotoClueAppRule] = [
+        PhotoClueAppRule(
+            bundleId: "net.whatsapp.WhatsApp", appName: "WhatsApp Messenger", appStoreId: 310633997, urlScheme: "whatsapp-consumer",
+            exactAlbumTitles: ["whatsapp"], filenamePrefixes: [], softwareTagTokens: ["whatsapp"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "net.whatsapp.WhatsAppSMB", appName: "WhatsApp Business", appStoreId: 1386412985, urlScheme: "whatsapp-smb",
+            exactAlbumTitles: ["whatsapp business"], filenamePrefixes: [], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.burbn.instagram", appName: "Instagram", appStoreId: 389801252, urlScheme: "instagram",
+            exactAlbumTitles: ["instagram"], filenamePrefixes: [], softwareTagTokens: ["instagram"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "ph.telegra.Telegraph", appName: "Telegram Messenger", appStoreId: 686449807, urlScheme: "tg",
+            exactAlbumTitles: ["telegram"], filenamePrefixes: [], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.toyopagroup.picaboo", appName: "Snapchat", appStoreId: 447188370, urlScheme: "snapchat",
+            exactAlbumTitles: ["snapchat"], filenamePrefixes: ["snapchat-"], softwareTagTokens: ["snapchat"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.zhiliaoapp.musically", appName: "TikTok", appStoreId: 835599320, urlScheme: "tiktok",
+            exactAlbumTitles: ["tiktok"], filenamePrefixes: ["tiktok_"], softwareTagTokens: ["tiktok"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.lemon.lvoverseas", appName: "CapCut", appStoreId: 1500855883, urlScheme: nil,
+            exactAlbumTitles: ["capcut", "capcut projects"], filenamePrefixes: ["capcut", "lv_0_"], softwareTagTokens: ["capcut"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.camerasideas.InstaShot", appName: "InShot", appStoreId: 997362197, urlScheme: nil,
+            exactAlbumTitles: ["inshot"], filenamePrefixes: ["inshot_"], softwareTagTokens: ["inshot"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.niksoftware.snapseedforipad", appName: "Snapseed", appStoreId: 439438619, urlScheme: nil,
+            exactAlbumTitles: ["snapseed"], filenamePrefixes: ["snapseed"], softwareTagTokens: ["snapseed"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.adobe.lrmobilephone", appName: "Lightroom", appStoreId: 878783582, urlScheme: nil,
+            exactAlbumTitles: ["lightroom", "adobe lightroom"], filenamePrefixes: ["lightroom", "lr_"], softwareTagTokens: ["lightroom", "adobe lightroom"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.picsart.studio", appName: "Picsart", appStoreId: 587366035, urlScheme: nil,
+            exactAlbumTitles: ["picsart"], filenamePrefixes: ["picsart_"], softwareTagTokens: ["picsart"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "co.visualsupply.cam", appName: "VSCO", appStoreId: 588013838, urlScheme: nil,
+            exactAlbumTitles: ["vsco", "vsco cam"], filenamePrefixes: ["vsco"], softwareTagTokens: ["vsco"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.bigwinepot.nwdn.international", appName: "Remini", appStoreId: 1470373330, urlScheme: nil,
+            exactAlbumTitles: ["remini"], filenamePrefixes: ["remini"], softwareTagTokens: ["remini"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.lightricks.Facetune2", appName: "Facetune", appStoreId: 1149994032, urlScheme: nil,
+            exactAlbumTitles: ["facetune", "facetune2"], filenamePrefixes: ["facetune"], softwareTagTokens: ["facetune"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.dr1ven.eraser", appName: "Photoroom", appStoreId: 1455009060, urlScheme: nil,
+            exactAlbumTitles: ["photoroom"], filenamePrefixes: ["photoroom"], softwareTagTokens: ["photoroom"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.frontrow.vlog", appName: "VN Video Editor", appStoreId: 1343581380, urlScheme: nil,
+            exactAlbumTitles: ["vn", "vn video editor"], filenamePrefixes: ["vn202", "vn201"], softwareTagTokens: ["vlognow", "vn video"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.canva.canvaeditor", appName: "Canva", appStoreId: 897446215, urlScheme: "canva",
+            exactAlbumTitles: ["canva"], filenamePrefixes: [], softwareTagTokens: ["canva"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.viber", appName: "Viber", appStoreId: 382617920, urlScheme: nil,
+            exactAlbumTitles: ["viber"], filenamePrefixes: ["viber_image_", "viber_video_"], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "org.whispersystems.signal", appName: "Signal", appStoreId: 874139669, urlScheme: nil,
+            exactAlbumTitles: ["signal"], filenamePrefixes: ["signal-20"], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.dji.golite", appName: "DJI Fly", appStoreId: 1479649251, urlScheme: nil,
+            exactAlbumTitles: ["dji fly", "dji mimo", "dji album", "dji"], filenamePrefixes: ["dji_fly_", "dji_mimo_"], softwareTagTokens: ["dji fly", "dji mimo", "dji "]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.gopro.GoPro", appName: "GoPro Quik", appStoreId: 561350520, urlScheme: nil,
+            exactAlbumTitles: ["gopro", "gopro quik", "quik"], filenamePrefixes: ["gopr", "gh01", "gx01"], softwareTagTokens: ["gopro"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.strava.stravaride", appName: "Strava", appStoreId: 426826309, urlScheme: "strava",
+            exactAlbumTitles: ["strava"], filenamePrefixes: ["strava"], softwareTagTokens: ["strava"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.tplink.tapo", appName: "TP-Link Tapo", appStoreId: 1472718009, urlScheme: nil,
+            exactAlbumTitles: ["tapo", "tp-link tapo"], filenamePrefixes: ["tapo_"], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.hikvision.ezviz", appName: "EZVIZ", appStoreId: 886947564, urlScheme: nil,
+            exactAlbumTitles: ["ezviz"], filenamePrefixes: ["ezviz_"], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.adobe.scan.ios", appName: "Adobe Scan", appStoreId: 1199564834, urlScheme: nil,
+            exactAlbumTitles: ["adobe scan"], filenamePrefixes: ["adobe scan"], softwareTagTokens: ["adobe scan"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.intsig.CamScanner", appName: "CamScanner", appStoreId: 388624839, urlScheme: nil,
+            exactAlbumTitles: ["camscanner"], filenamePrefixes: ["camscanner"], softwareTagTokens: ["camscanner"]
+        ),
+        PhotoClueAppRule(
+            bundleId: "com.reddit.Reddit", appName: "Reddit", appStoreId: 1064216828, urlScheme: "reddit",
+            exactAlbumTitles: ["reddit"], filenamePrefixes: [], softwareTagTokens: []
+        ),
+        PhotoClueAppRule(
+            bundleId: "pinterest", appName: "Pinterest", appStoreId: 429047995, urlScheme: "pinterest",
+            exactAlbumTitles: ["pinterest"], filenamePrefixes: [], softwareTagTokens: []
+        )
+    ]
+
+    static func formatSourceLabel(base: String, date: Date?, now: Date = Date()) -> String {
+        guard let date else { return base }
+        let days = max(0, Int(now.timeIntervalSince(date) / 86_400.0))
+        if days == 0 {
+            return "\(base) • oggi"
+        } else if days <= 90 {
+            return "\(base) • \(days)g fa"
+        } else {
+            return "\(base) • oltre 90g fa"
+        }
+    }
+
+    private static func record(from rule: PhotoClueAppRule, source: String) -> InstalledAppRecord {
+        InstalledAppRecord(
+            packageName: rule.bundleId,
+            appName: rule.appName,
+            appStoreId: rule.appStoreId,
+            iconUrl: nil,
+            urlScheme: rule.urlScheme,
+            detectionSource: source
+        )
+    }
+
+    static func matchApp(forAlbumTitle title: String, latestDate: Date? = nil, now: Date = Date()) -> InstalledAppRecord? {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        for rule in rules where rule.exactAlbumTitles.contains(normalized) {
+            return record(from: rule, source: formatSourceLabel(base: "da Album Foto", date: latestDate, now: now))
+        }
+        return nil
+    }
+
+    static func matchApp(forMediaFilename fileName: String, assetDate: Date? = nil, now: Date = Date()) -> InstalledAppRecord? {
+        let baseName = URL(fileURLWithPath: fileName).lastPathComponent.lowercased()
+        guard !baseName.isEmpty else { return nil }
+        // Ignora subito nomi generici della fotocamera o registrazioni di sistema
+        if baseName.hasPrefix("img_") || baseName.hasPrefix("vid_") || baseName.hasPrefix("rpreplay_") || baseName.hasPrefix("screenshot") {
+            return nil
+        }
+        for rule in rules where rule.filenamePrefixes.contains(where: { baseName.hasPrefix($0) }) {
+            return record(from: rule, source: formatSourceLabel(base: "da Foto", date: assetDate, now: now))
+        }
+        return nil
+    }
+
+    static func matchApp(forSoftwareTag software: String, fileDate: Date? = nil, now: Date = Date()) -> InstalledAppRecord? {
+        let lower = software.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return nil }
+        for rule in rules where rule.softwareTagTokens.contains(where: { lower.contains($0) }) {
+            return record(from: rule, source: formatSourceLabel(base: "da Metadati Foto", date: fileDate, now: now))
+        }
+        return nil
+    }
+
+    /// Scansiona istantaneamente (senza chiedere nuovi permessi e senza decodificare file pesanti)
+    /// gli Album utente e gli ultimi ~600 file del Rullino se il permesso Foto è già attivo.
+    static func scanAuthorizedPhotoLibraryClues(maxFilenameScanCount: Int = 600, now: Date = Date()) -> [InstalledAppRecord] {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return [] }
+
+        var found: [InstalledAppRecord] = []
+        var seenBundles = Set<String>()
+
+        func appendIfNew(_ candidate: InstalledAppRecord?) {
+            guard let candidate else { return }
+            let key = candidate.packageName.lowercased()
+            guard !seenBundles.contains(key) else { return }
+            seenBundles.insert(key)
+            found.append(candidate)
+        }
+
+        // 1. Album creati automaticamente dalle app in Foto (~10 ms)
+        let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
+        let latestOpts = PHFetchOptions()
+        latestOpts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        latestOpts.fetchLimit = 1
+
+        collections.enumerateObjects { collection, _, _ in
+            guard let title = collection.localizedTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else { return }
+            // Verifica che la regola esista prima ancora di interrogare gli asset nell'album
+            guard let previewRule = matchApp(forAlbumTitle: title) else { return }
+            let newestInAlbum = PHAsset.fetchAssets(in: collection, options: latestOpts)
+            guard let firstAsset = newestInAlbum.firstObject else { return }
+            let datedRecord = matchApp(forAlbumTitle: title, latestDate: firstAsset.creationDate, now: now) ?? previewRule
+            appendIfNew(datedRecord)
+        }
+
+        // 2. Prefissi file univoci sugli asset più recenti (soli metadati SQLite Photos, nessuna lettura disco)
+        if maxFilenameScanCount > 0 {
+            let fetchOpts = PHFetchOptions()
+            fetchOpts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            fetchOpts.fetchLimit = maxFilenameScanCount
+            let assets = PHAsset.fetchAssets(with: fetchOpts)
+            assets.enumerateObjects { asset, _, _ in
+                guard let primary = PHAssetResource.assetResources(for: asset).first else { return }
+                let fname = primary.originalFilename
+                if let matched = matchApp(forMediaFilename: fname, assetDate: asset.creationDate, now: now) {
+                    appendIfNew(matched)
+                }
+            }
+        }
+
+        return found
+    }
+
+    static func extractSoftwareTagFromImageFile(at fileURL: URL) -> String? {
+        let opts = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, opts),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, opts) as? [String: Any] else {
+            return nil
+        }
+        if let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
+           let sw = (tiff[kCGImagePropertyTIFFSoftware as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !sw.isEmpty {
+            return sw
+        }
+        if let png = props[kCGImagePropertyPNGDictionary as String] as? [String: Any],
+           let sw = (png["Software"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !sw.isEmpty {
+            return sw
+        }
+        return nil
+    }
+
+    static func extractSoftwareTagFromVideoFile(at fileURL: URL) async -> String? {
+        let asset = AVURLAsset(url: fileURL)
+        guard let common = try? await asset.load(.commonMetadata) else { return nil }
+        for item in common {
+            guard item.commonKey == .commonKeySoftware || item.commonKey == .commonKeyCreator else { continue }
+            if let str = (try? await item.load(.stringValue))?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !str.isEmpty {
+                return str
+            }
+        }
+        return nil
+    }
+
+    /// Analizza a costo zero l'header del file appena esportato durante il trasferimento di foto e video
+    /// per ricavare il tag `Software` EXIF/TIFF/QuickTime o il prefisso nome file senza rallentare l'invio.
+    static func detectAppFromExportedMediaFile(
+        at fileURL: URL,
+        originalFilename: String,
+        isVideo: Bool,
+        creationDate: Date?,
+        now: Date = Date()
+    ) async -> InstalledAppRecord? {
+        let softwareTag: String? = isVideo
+            ? await extractSoftwareTagFromVideoFile(at: fileURL)
+            : extractSoftwareTagFromImageFile(at: fileURL)
+        if let softwareTag, let matched = matchApp(forSoftwareTag: softwareTag, fileDate: creationDate, now: now) {
+            return matched
+        }
+        return matchApp(forMediaFilename: originalFilename, assetDate: creationDate, now: now)
     }
 }

@@ -263,6 +263,7 @@ struct InstalledAppRecord: Codable, Identifiable, Equatable, Sendable {
     var appStoreId: Int? = nil
     var iconUrl: String? = nil
     var urlScheme: String? = nil
+    var detectionSource: String? = nil
 }
 
 struct ManifestItem: Codable, Identifiable, Sendable {

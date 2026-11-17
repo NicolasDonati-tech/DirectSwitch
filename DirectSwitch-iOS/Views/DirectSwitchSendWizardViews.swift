@@ -17,7 +17,6 @@ enum iOSDocumentPickerMode: String, Identifiable {
     case files
     case receiverDestinations
     case receiverFallbackRoot
-    case appPrivacyReport
 
     var id: String { rawValue }
 }
@@ -57,10 +56,6 @@ final class iOSNativeDocumentPickerPresenter: NSObject, UIDocumentPickerDelegate
         case .files:
             contentTypes = [.item]
             asCopy = false
-        case .appPrivacyReport:
-            let ndjsonType = UTType(filenameExtension: "ndjson") ?? .plainText
-            contentTypes = [ndjsonType, .json, .plainText, .data]
-            asCopy = true
         case .positions, .folders, .receiverDestinations, .receiverFallbackRoot:
             contentTypes = [.folder]
             asCopy = false
@@ -533,7 +528,8 @@ struct SendCategoriesStepView: View {
     let totalDetectedAppsCount: Int
     let selectedAppsPreview: [InstalledAppRecord]
     let verifiedLocalAppsCount: Int
-    let isImportingPrivacyReport: Bool
+    let photoDetectedAppsCount: Int
+    let selectedBundleIdsSet: Set<String>
     let appImportStatusNote: String?
 
     @Binding var includeContacts: Bool
@@ -546,7 +542,7 @@ struct SendCategoriesStepView: View {
     @Binding var includeWhatsApp: Bool
 
     var onScanExactCounts: () -> Void
-    var onImportAppPrivacyReport: () -> Void
+    var onToggleQuickCategory: (AppQuickCategory) -> Void
     var onResetAppsToZero: (() -> Void)? = nil
     var onManageApps: () -> Void
     var onAddFolders: () -> Void
@@ -833,105 +829,11 @@ struct SendCategoriesStepView: View {
                 }
                 .appleCard(padding: 0)
 
-                // Visibile ESCLUSIVAMENTE quando la spunta «App scaricate» è attiva in blu (zero screenshot e zero fotocamera)
+                // Visibile ESCLUSIVAMENTE quando la spunta «App scaricate» è attiva in blu (rilevamento istantaneo + categorie 1 tocco)
                 if includeApps {
-                    VStack(alignment: .leading, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 9) {
-                            HStack(spacing: 8) {
-                                Image(systemName: verifiedLocalAppsCount > 0 ? "checkmark.shield.fill" : "square.grid.2x2.fill")
-                                    .font(.system(size: 16, weight: .bold))
-                                    .foregroundColor(AppleTheme.green)
-                                Text("Rilevamento App esatto (senza screenshot)")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                Spacer()
-                                InfoCircleButton(
-                                    title: "Come rileva le tue App iOS",
-                                    message: "Apple iOS blocca per privacy la lettura automatica dell'elenco completo delle app di terze parti, consentendo il controllo diretto solo per gli schemi principali verificati (max 50 su iOS).\n\nPer trasferire anche tutte le altre app senza mai fare screenshot e con zero errori o app inventate:\n1. Apri Impostazioni iPhone → Privacy e sicurezza → Resoconto sulla privacy delle app.\n2. Tocca Esporta resoconto (.ndjson) e condividilo con DirectSwitch (oppure toccane l'importazione qui sotto).\n3. In alternativa cerca o spunta manualmente le app mancanti dall'elenco verificato App Store."
-                                )
-                            }
-
-                            Text("**\(verifiedLocalAppsCount)** app rilevate automaticamente su questo iPhone (\(selectedAppsCount) totali selezionate), con zero nomi inventati.")
-                                .font(.system(size: 12.5))
-                                .foregroundColor(AppleTheme.textSecondary)
-
-                            ApplePrimaryButton(
-                                title: isImportingPrivacyReport
-                                    ? "Lettura bundle ID ufficiali..."
-                                    : "Importa tutte le App da Resoconto Privacy (.ndjson)",
-                                icon: "doc.badge.gearshape.fill",
-                                color: AppleTheme.blue,
-                                isDisabled: isImportingPrivacyReport,
-                                action: onImportAppPrivacyReport
-                            )
-
-                            Text("Impostazioni iPhone → Privacy e sicurezza → Resoconto sulla privacy delle app → Esporta → DirectSwitch.")
-                                .font(.system(size: 11.5))
-                                .foregroundColor(AppleTheme.textTertiary)
-
-                            if let note = appImportStatusNote, !note.isEmpty {
-                                Text(note)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(note.hasPrefix("⚠") ? AppleTheme.orange : AppleTheme.green)
-                            }
-                        }
-                        .padding(12)
-                        .background(AppleTheme.cardSelected)
-                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-
-                        Divider()
-
-                        // Elenco App selezionate pronte al trasferimento
-                        VStack(alignment: .leading, spacing: 9) {
-                            HStack(spacing: 8) {
-                                Text("App pronte al trasferimento (\(selectedAppsCount))")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(AppleTheme.textPrimary)
-                                Spacer()
-                                if let resetAction = onResetAppsToZero, totalDetectedAppsCount > verifiedLocalAppsCount {
-                                    Button(action: resetAction) {
-                                        HStack(spacing: 3) {
-                                            Image(systemName: "arrow.counterclockwise")
-                                                .font(.system(size: 10, weight: .bold))
-                                            Text("Solo rilevate")
-                                                .font(.system(size: 11, weight: .semibold))
-                                        }
-                                        .foregroundColor(AppleTheme.orange)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-
-                            if !selectedAppsPreview.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(selectedAppsPreview.prefix(12)) { app in
-                                            AppIconThumbnailView(iconUrl: app.iconUrl, size: 34)
-                                        }
-                                        if selectedAppsCount > 12 {
-                                            Text("+\(selectedAppsCount - 12)")
-                                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                                .foregroundColor(AppleTheme.blue)
-                                                .frame(width: 34, height: 34)
-                                                .background(AppleTheme.cardSelected)
-                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                        }
-                                    }
-                                }
-                            }
-
-                            AppleSecondaryButton(
-                                title: selectedAppsCount > 0
-                                    ? "Vedi, cerca o modifica App (\(selectedAppsCount))"
-                                    : "Scegli App dall'elenco ufficiale",
-                                icon: "square.grid.2x2.fill",
-                                tint: AppleTheme.blue,
-                                action: onManageApps
-                            )
-                        }
-                    }
-                    .appleCard(padding: 14)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    appsDetectionAndPreviewCard
+                        .appleCard(padding: 14)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
                 // Visibile ESCLUSIVAMENTE quando la spunta «Documenti, Cartelle e Password» è attiva in blu
@@ -1186,6 +1088,157 @@ struct SendCategoriesStepView: View {
                 onScanExactCounts()
             }
         }
+    }
+
+    private var visibleQuickCategories: [AppQuickCategory] {
+        iOSInstalledAppsScanner.curatedCategories.filter {
+            !isCrossOs || !$0.isGoogleAndroidPreinstalledCategory
+        }
+    }
+
+    @ViewBuilder
+    private var appsDetectionAndPreviewCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(AppleTheme.green)
+                    Text("Rilevamento istantaneo (zero foto)")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Spacer()
+                    InfoCircleButton(
+                        title: "Come rileva le tue App iOS",
+                        message: "DirectSwitch controlla subito fino a 50 schemi iOS verificati senza attese (priorità alle app assenti su Android) e riconosce automaticamente ulteriori app reali dai titoli Album Foto e dai metadati dei file nel Rullino.\n\nPer eventuali banche, SPID, trasporti o servizi italiani aggiuntivi, usa i pulsanti per categoria con 1 tocco qui sotto oppure cerca il nome esatto."
+                    )
+                }
+
+                if photoDetectedAppsCount > 0 {
+                    Text("**\(verifiedLocalAppsCount)** verificate da iOS + **\(photoDetectedAppsCount)** trovate da Album/Foto (**\(selectedAppsCount)** totali pronte).")
+                        .font(.system(size: 12.5))
+                        .foregroundColor(AppleTheme.textSecondary)
+                } else {
+                    Text("**\(verifiedLocalAppsCount)** app verificate automaticamente su questo iPhone (\(selectedAppsCount) totali pronte), senza screenshot né attese.")
+                        .font(.system(size: 12.5))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+
+                if isCrossOs {
+                    Text("App Google di sistema (Gmail, Maps, Chrome, YouTube, Drive) escluse perché già su Android.")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(AppleTheme.textTertiary)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Aggiunta rapida per categoria (1 tocco):")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(AppleTheme.textPrimary)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach(visibleQuickCategories) { category in
+                                quickCategoryChip(category)
+                            }
+                        }
+                    }
+                }
+
+                if let note = appImportStatusNote, !note.isEmpty {
+                    Text(note)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(note.hasPrefix("⚠") ? AppleTheme.orange : AppleTheme.green)
+                }
+            }
+            .padding(12)
+            .background(AppleTheme.cardSelected)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 8) {
+                    Text("App pronte al trasferimento (\(selectedAppsCount))")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Spacer()
+                    if let resetAction = onResetAppsToZero, totalDetectedAppsCount > verifiedLocalAppsCount {
+                        Button(action: resetAction) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.counterclockwise")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("Solo rilevate")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(AppleTheme.orange)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if !selectedAppsPreview.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(selectedAppsPreview.prefix(12)) { app in
+                                AppIconThumbnailView(iconUrl: app.iconUrl, size: 34)
+                            }
+                            if selectedAppsCount > 12 {
+                                Text("+\(selectedAppsCount - 12)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundColor(AppleTheme.blue)
+                                    .frame(width: 34, height: 34)
+                                    .background(AppleTheme.cardSelected)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                        }
+                    }
+                }
+
+                AppleSecondaryButton(
+                    title: selectedAppsCount > 0
+                        ? "Vedi, cerca o modifica App (\(selectedAppsCount))"
+                        : "Scegli App dall'elenco ufficiale",
+                    icon: "square.grid.2x2.fill",
+                    tint: AppleTheme.blue,
+                    action: onManageApps
+                )
+            }
+        }
+    }
+
+    private func quickCategoryChip(_ category: AppQuickCategory) -> some View {
+        let matchedCount = category.apps.filter {
+            selectedBundleIdsSet.contains($0.packageName.lowercased())
+        }.count
+        let isAllCategorySelected = matchedCount == category.apps.count && !category.apps.isEmpty
+        return Button(action: {
+            onToggleQuickCategory(category)
+        }) {
+            HStack(spacing: 5) {
+                Image(systemName: isAllCategorySelected ? "checkmark.circle.fill" : category.iconName)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(category.title)
+                    .font(.system(size: 12, weight: .semibold))
+                if matchedCount > 0 {
+                    Text("\(matchedCount)")
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.white.opacity(0.28))
+                        .clipShape(Capsule())
+                }
+            }
+            .foregroundColor(isAllCategorySelected ? .white : AppleTheme.blue)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(isAllCategorySelected ? AppleTheme.blue : AppleTheme.cardSurface)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(isAllCategorySelected ? AppleTheme.blue : AppleTheme.blue.opacity(0.28), lineWidth: 0.9)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private func badgeForCount(_ count: Int?, unit: String) -> String? {

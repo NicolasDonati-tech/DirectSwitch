@@ -48,16 +48,20 @@ struct DirectSwitchMainView: View {
     @State private var includeApps: Bool = true
     @State private var includeWhatsApp: Bool = true
 
-    // Catalogo App verificate sull'iPhone che invia + Importazione esatta da Resoconto Privacy Apple
+    // Catalogo App rilevate su questo iPhone (schemi verificati + Foto/Album + Categorie rapide)
     @State private var senderAppsCatalog: [InstalledAppRecord] = []
     @State private var verifiedLocalAppsCount: Int = 0
+    @State private var photoDetectedAppsCount: Int = 0
     @State private var deselectedSenderAppIds: Set<String> = []
     @State private var showSenderAppsSheet: Bool = false
-    @State private var isImportingPrivacyReport: Bool = false
     @State private var appImportStatusNote: String? = nil
 
     private var selectedSenderApps: [InstalledAppRecord] {
         senderAppsCatalog.filter { !deselectedSenderAppIds.contains($0.id) }
+    }
+
+    private var selectedSenderBundleIdsSet: Set<String> {
+        Set(selectedSenderApps.map { $0.packageName.lowercased() })
     }
 
     // File e archivi WhatsApp allegati + pre-controllo posizioni su iPhone
@@ -225,7 +229,8 @@ struct DirectSwitchMainView: View {
                                     totalDetectedAppsCount: senderAppsCatalog.count,
                                     selectedAppsPreview: selectedSenderApps,
                                     verifiedLocalAppsCount: verifiedLocalAppsCount,
-                                    isImportingPrivacyReport: isImportingPrivacyReport,
+                                    photoDetectedAppsCount: photoDetectedAppsCount,
+                                    selectedBundleIdsSet: selectedSenderBundleIdsSet,
                                     appImportStatusNote: appImportStatusNote,
                                     includeContacts: $includeContacts,
                                     includePhotos: $includePhotos,
@@ -236,9 +241,7 @@ struct DirectSwitchMainView: View {
                                     includeApps: $includeApps,
                                     includeWhatsApp: $includeWhatsApp,
                                     onScanExactCounts: scanExactDeviceCounts,
-                                    onImportAppPrivacyReport: {
-                                        presentDocumentPicker(mode: .appPrivacyReport)
-                                    },
+                                    onToggleQuickCategory: toggleQuickCategoryOnSender,
                                     onResetAppsToZero: resetSenderAppsToVerifiedOnly,
                                     onManageApps: { showSenderAppsSheet = true },
                                     onAddFolders: { presentDocumentPicker(mode: .positions) },
@@ -387,15 +390,20 @@ struct DirectSwitchMainView: View {
         } message: { report in
             Text(precheckAlertMessage(for: report))
         }
+        .onChange(of: transport.photoMetadataDiscoveredApps) { clues in
+            guard !clues.isEmpty else { return }
+            mergeDetectedAppsIntoCatalog(clues)
+        }
         .sheet(isPresented: $showSenderAppsSheet) {
             SenderAppsSelectionSheet(
                 appsCatalog: $senderAppsCatalog,
                 deselectedAppIds: $deselectedSenderAppIds,
                 verifiedLocalAppsCount: verifiedLocalAppsCount,
-                isImportingPrivacyReport: isImportingPrivacyReport,
+                photoDiscoveredAppsCount: photoDetectedAppsCount,
+                isAndroidTarget: pairedTargetPayload?.receiverPlatform == .ANDROID,
                 appImportStatusNote: appImportStatusNote,
-                onImportAppPrivacyReport: {
-                    presentDocumentPicker(mode: .appPrivacyReport)
+                onRescanAutomaticApps: {
+                    refreshSenderAppsCatalog()
                 },
                 onResetAllCustomApps: {
                     appImportStatusNote = nil
@@ -548,10 +556,6 @@ struct DirectSwitchMainView: View {
                         documentPrecheckReport = precheck
                         isLoadingDocumentPositions = false
                     }
-                case .appPrivacyReport:
-                    if let fileURL = urls.first {
-                        importAppPrivacyReportFromURL(fileURL)
-                    }
                 }
             }
         )
@@ -656,30 +660,94 @@ struct DirectSwitchMainView: View {
     }
 
     private func refreshSenderAppsCatalog() {
-        let probesCount = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly().count
-        verifiedLocalAppsCount = probesCount
-        let detected = iOSInstalledAppsScanner.scanLocallyInstalledApps()
+        let quickProbes = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly()
+        verifiedLocalAppsCount = quickProbes.count
+        let initialDetected = iOSInstalledAppsScanner.scanLocallyInstalledApps()
+        mergeDetectedAppsIntoCatalog(initialDetected)
+
+        Task {
+            let fullScan = await iOSInstalledAppsScanner.detectAllAppsInstantAsync()
+            verifiedLocalAppsCount = fullScan.verifiedProbesCount
+            photoDetectedAppsCount = fullScan.photoDiscoveredCount
+            mergeDetectedAppsIntoCatalog(fullScan.apps)
+
+            let snapshot = senderAppsCatalog
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(snapshot)
+            if !enriched.isEmpty {
+                self.senderAppsCatalog = enriched
+            }
+        }
+    }
+
+    private func mergeDetectedAppsIntoCatalog(_ incoming: [InstalledAppRecord]) {
+        guard !incoming.isEmpty else { return }
         if senderAppsCatalog.isEmpty {
-            senderAppsCatalog = detected
+            senderAppsCatalog = incoming
         } else {
             var merged = senderAppsCatalog
-            for app in detected {
-                let exists = merged.contains {
+            for app in incoming {
+                if let idx = merged.firstIndex(where: {
                     $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
                         || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
-                }
-                if !exists {
+                }) {
+                    // Preserva etichetta sorgente più dettagliata se presente
+                    if merged[idx].detectionSource == nil, let src = app.detectionSource {
+                        merged[idx].detectionSource = src
+                    }
+                    if merged[idx].iconUrl == nil, let icon = app.iconUrl {
+                        merged[idx].iconUrl = icon
+                    }
+                } else {
                     merged.append(app)
                 }
             }
             senderAppsCatalog = merged
         }
-        let snapshot = senderAppsCatalog
-        Task {
-            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(snapshot)
-            if !enriched.isEmpty {
-                self.senderAppsCatalog = enriched
+        photoDetectedAppsCount = senderAppsCatalog.filter {
+            ($0.detectionSource ?? "").hasPrefix("da ")
+        }.count
+    }
+
+    private func toggleQuickCategoryOnSender(_ category: AppQuickCategory) {
+        let allSelected = !category.apps.isEmpty && category.apps.allSatisfy { item in
+            senderAppsCatalog.contains {
+                ($0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
+                    || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId))
+                    && !deselectedSenderAppIds.contains($0.id)
             }
+        }
+        if allSelected {
+            for item in category.apps {
+                if let existing = senderAppsCatalog.first(where: {
+                    $0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId)
+                }) {
+                    deselectedSenderAppIds.insert(existing.id)
+                }
+            }
+            appImportStatusNote = nil
+        } else {
+            var newlyAdded: [InstalledAppRecord] = []
+            for item in category.apps {
+                if let existing = senderAppsCatalog.first(where: {
+                    $0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId)
+                }) {
+                    deselectedSenderAppIds.remove(existing.id)
+                } else {
+                    senderAppsCatalog.append(item)
+                    deselectedSenderAppIds.remove(item.id)
+                    newlyAdded.append(item)
+                }
+            }
+            if !newlyAdded.isEmpty {
+                iOSInstalledAppsScanner.appendCustomApps(newlyAdded)
+                Task {
+                    let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(newlyAdded)
+                    mergeDetectedAppsIntoCatalog(enriched)
+                }
+            }
+            appImportStatusNote = "✓ Categoria «\(category.title)» selezionata (\(category.apps.count) app)."
         }
     }
 
@@ -688,47 +756,8 @@ struct DirectSwitchMainView: View {
         deselectedSenderAppIds.removeAll()
         appImportStatusNote = nil
         senderAppsCatalog = []
+        photoDetectedAppsCount = 0
         refreshSenderAppsCatalog()
-    }
-
-    private func importAppPrivacyReportFromURL(_ url: URL) {
-        guard !isImportingPrivacyReport else { return }
-        isImportingPrivacyReport = true
-        appImportStatusNote = nil
-        Task {
-            let result = await iOSInstalledAppsScanner.importAppsFromAppPrivacyReport(url: url)
-            isImportingPrivacyReport = false
-
-            guard result.rawBundleIdsCount > 0 else {
-                appImportStatusNote = "⚠ File non riconosciuto come Resoconto sulla privacy delle app (.ndjson)."
-                return
-            }
-
-            var newlyAdded = 0
-            for app in result.apps {
-                let exists = senderAppsCatalog.contains {
-                    $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
-                        || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
-                }
-                if !exists {
-                    senderAppsCatalog.append(app)
-                    newlyAdded += 1
-                }
-                deselectedSenderAppIds.remove(app.id)
-            }
-            if !result.apps.isEmpty {
-                iOSInstalledAppsScanner.appendCustomApps(result.apps)
-            }
-
-            if newlyAdded > 0 {
-                appImportStatusNote = "✓ Importate +\(newlyAdded) app esatte da Resoconto Privacy Apple (\(senderAppsCatalog.count) totali)!"
-                sharedVaultToast = "Importate \(newlyAdded) app esatte dal Resoconto Privacy Apple!"
-            } else if !result.apps.isEmpty {
-                appImportStatusNote = "✓ Tutte le \(result.apps.count) app verificate dal Resoconto sono già selezionate."
-            } else {
-                appImportStatusNote = "⚠ Nessuna nuova app di App Store trovata nel file selezionato."
-            }
-        }
     }
 
     private func scanExactDeviceCounts() {
@@ -743,6 +772,8 @@ struct DirectSwitchMainView: View {
             scanSummary = summary
             documentPrecheckReport = precheck
             isScanningDevice = false
+            // Ora che Foto è autorizzata, rileva subito anche eventuali app da Album/Metadati Foto
+            refreshSenderAppsCatalog()
         }
     }
 
@@ -762,13 +793,6 @@ struct DirectSwitchMainView: View {
 
     private func handleIncomingURL(_ incomingURL: URL) {
         if incomingURL.isFileURL {
-            if iOSInstalledAppsScanner.isAppPrivacyReportFile(incomingURL) {
-                importAppPrivacyReportFromURL(incomingURL)
-                if activeStep == .home {
-                    startSendWizard(destination: .newIPhone)
-                }
-                return
-            }
             if let imported = iOSDocumentsSandboxBridge.importIncomingOpenURL(incomingURL) {
                 pickedDocuments.append(imported)
                 sharedVaultToast = "'\(imported.0.fileName)' pronto per la copia"

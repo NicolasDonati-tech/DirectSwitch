@@ -488,33 +488,40 @@ struct AppIconThumbnailView: View {
     }
 }
 
-// MARK: - Sheet Mittente: Rilevamento Deterministico + Importazione Resoconto Privacy + Ricerca Esatta App Store
+// MARK: - Sheet Mittente: Rilevamento Istantaneo (Schemi iOS + Foto/Album) + Categorie 1-Tocco + Ricerca Esatta App Store
 
 struct SenderAppsSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var appsCatalog: [InstalledAppRecord]
     @Binding var deselectedAppIds: Set<String>
     var verifiedLocalAppsCount: Int = 0
-    var isImportingPrivacyReport: Bool = false
+    var photoDiscoveredAppsCount: Int = 0
+    var isAndroidTarget: Bool = false
     var appImportStatusNote: String? = nil
-    var onImportAppPrivacyReport: (() -> Void)? = nil
+    var onRescanAutomaticApps: (() -> Void)? = nil
     var onResetAllCustomApps: (() -> Void)? = nil
 
     @State private var searchQuery: String = ""
     @State private var searchResults: [AppStoreSearchHit] = []
     @State private var isSearching: Bool = false
+    @State private var isRescanning: Bool = false
+    @State private var expandedCategoryIds: Set<String> = ["banks_payments", "spid_office"]
 
     private var selectedCount: Int {
         appsCatalog.filter { !deselectedAppIds.contains($0.id) }.count
     }
 
-    private var availableQuickSuggestions: [InstalledAppRecord] {
-        let existingBundles = Set(appsCatalog.map { $0.packageName.lowercased() })
-        let existingIds = Set(appsCatalog.compactMap(\.appStoreId))
-        return iOSInstalledAppsScanner.italianQuickSuggestions.filter { item in
-            if existingBundles.contains(item.packageName.lowercased()) { return false }
-            if let sid = item.appStoreId, existingIds.contains(sid) { return false }
-            return true
+    private var visibleQuickCategories: [AppQuickCategory] {
+        iOSInstalledAppsScanner.curatedCategories.filter {
+            !isAndroidTarget || !$0.isGoogleAndroidPreinstalledCategory
+        }
+    }
+
+    private func isAppSelected(_ app: InstalledAppRecord) -> Bool {
+        appsCatalog.contains {
+            ($0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId))
+                && !deselectedAppIds.contains($0.id)
         }
     }
 
@@ -526,7 +533,7 @@ struct SenderAppsSelectionSheet: View {
 
                 ScrollView {
                     VStack(spacing: 16) {
-                        // CARD 1: Rilevamento deterministico iOS + Importazione Resoconto Privacy (.ndjson) senza screenshot
+                        // CARD 1: Rilevamento istantaneo iOS (48 schemi + Foto/Album) senza screenshot né attese
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 10) {
                                 AppleSettingsIcon(
@@ -534,47 +541,54 @@ struct SenderAppsSelectionSheet: View {
                                     color: AppleTheme.green
                                 )
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Rilevamento App esatto (zero foto)")
+                                    Text("Rilevamento App automatico")
                                         .font(.system(size: 15, weight: .bold))
                                         .foregroundColor(AppleTheme.textPrimary)
-                                    Text("\(verifiedLocalAppsCount) app rilevate direttamente • importa tutte le altre dal Resoconto Privacy Apple")
+                                    Text("\(verifiedLocalAppsCount) verificate da iOS • \(photoDiscoveredAppsCount) da Album/Foto • spunta per categoria qui sotto")
                                         .font(.system(size: 12))
                                         .foregroundColor(AppleTheme.textSecondary)
                                 }
                                 Spacer()
                                 InfoCircleButton(
-                                    title: "Come importare il 100% delle App senza errori",
-                                    message: "Apple iOS consente il rilevamento automatico istantaneo fino a 50 app verificate.\n\nPer caricare subito tutte le altre app reali installate (con bundle ID esatto, nessuna omonimia e nessun nome inventato):\n1. Apri Impostazioni iPhone → Privacy e sicurezza → Resoconto sulla privacy delle app.\n2. Tocca Esporta resoconto e condividi il file .ndjson in DirectSwitch (oppure toccalo qui sotto)."
+                                    title: "Come funziona senza cavo né attesa",
+                                    message: "1. Verificate su iPhone: controlla istantaneamente fino a 50 schemi iOS prioritari (con priorità alle app assenti su Android).\n2. Album e Metadati Foto: legge automaticamente i titoli degli album e i nomi/tag delle foto già autorizzate (CapCut, Lightroom, Snapseed, InShot, DJI…).\n3. Categorie 1-Tocco & Ricerca: aggiungi con un tocco banche, SPID o app di nicchia dall'elenco App Store verificato."
                                 )
                             }
 
-                            if let importAction = onImportAppPrivacyReport {
+                            if isAndroidTarget {
+                                Text("Le app Google già preinstallate sul nuovo Android (Gmail, Chrome, Maps, YouTube, Drive) non occupano slot utili.")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(AppleTheme.textSecondary)
+                            }
+
+                            if let rescanAction = onRescanAutomaticApps {
                                 Button(action: {
-                                    dismiss()
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                        importAction()
+                                    isRescanning = true
+                                    rescanAction()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                        isRescanning = false
                                     }
                                 }) {
                                     HStack(spacing: 8) {
-                                        if isImportingPrivacyReport {
+                                        if isRescanning {
                                             ProgressView()
                                                 .scaleEffect(0.85)
                                                 .tint(.white)
                                         } else {
-                                            Image(systemName: "doc.badge.gearshape.fill")
+                                            Image(systemName: "arrow.clockwise.circle.fill")
                                                 .font(.system(size: 15, weight: .bold))
                                         }
-                                        Text(isImportingPrivacyReport ? "Importazione in corso..." : "Importa Resoconto Privacy Apple (.ndjson)")
+                                        Text(isRescanning ? "Scansione istantanea..." : "Aggiorna rilevamento istantaneo")
                                             .font(.system(size: 14, weight: .bold))
                                     }
                                     .foregroundColor(.white)
                                     .frame(maxWidth: .infinity)
-                                    .frame(height: 44)
+                                    .frame(height: 42)
                                     .background(AppleTheme.blue)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(isImportingPrivacyReport)
+                                .disabled(isRescanning)
                             }
 
                             if let note = appImportStatusNote, !note.isEmpty {
@@ -620,45 +634,14 @@ struct SenderAppsSelectionSheet: View {
                             }
 
                             if appsCatalog.isEmpty {
-                                Text("Nessuna app selezionata. Importa il Resoconto Privacy Apple o aggiungi manualmente qui sotto.")
+                                Text("Nessuna app selezionata. Scegli una categoria o cerca un'app qui sotto.")
                                     .font(.system(size: 13))
                                     .foregroundColor(AppleTheme.textSecondary)
                                     .padding(.vertical, 6)
                             } else {
                                 VStack(spacing: 0) {
                                     ForEach(Array(appsCatalog.enumerated()), id: \.element.id) { index, app in
-                                        let isSelected = !deselectedAppIds.contains(app.id)
-                                        Button(action: {
-                                            if isSelected {
-                                                deselectedAppIds.insert(app.id)
-                                            } else {
-                                                deselectedAppIds.remove(app.id)
-                                            }
-                                        }) {
-                                            HStack(spacing: 12) {
-                                                AppIconThumbnailView(iconUrl: app.iconUrl, size: 38)
-                                                VStack(alignment: .leading, spacing: 1) {
-                                                    Text(app.appName)
-                                                        .font(.system(size: 15, weight: .medium))
-                                                        .foregroundColor(AppleTheme.textPrimary)
-                                                        .lineLimit(1)
-                                                    if !app.packageName.isEmpty && app.packageName.contains(".") {
-                                                        Text(app.packageName)
-                                                            .font(.system(size: 11))
-                                                            .foregroundColor(AppleTheme.textTertiary)
-                                                            .lineLimit(1)
-                                                    }
-                                                }
-                                                Spacer()
-                                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                                    .font(.system(size: 21))
-                                                    .foregroundColor(isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
-                                            }
-                                            .padding(.vertical, 9)
-                                            .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
-
+                                        senderCatalogAppRow(app)
                                         if index < appsCatalog.count - 1 {
                                             Divider().padding(.leading, 50)
                                         }
@@ -668,9 +651,23 @@ struct SenderAppsSelectionSheet: View {
                         }
                         .appleCard(padding: 14)
 
-                        // CARD 3: Ricerca esatta App Store (con Sviluppatore per evitare omonimie) + Suggerite rapide
+                        // CARD 3: Categorie rapide a 1 tocco (Banche, SPID, Trasporti, Shopping, Foto & Sport, Casa, Streaming)
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Cerca e aggiungi app su App Store")
+                            Text("Sfoglia per Categoria (1 tocco)")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+
+                            VStack(spacing: 8) {
+                                ForEach(visibleQuickCategories) { category in
+                                    quickCategoryAccordionRow(category)
+                                }
+                            }
+                        }
+                        .appleCard(padding: 14)
+
+                        // CARD 4: Ricerca esatta App Store (con Sviluppatore per evitare omonimie)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Cerca altre app su App Store")
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
 
@@ -735,7 +732,9 @@ struct SenderAppsSelectionSheet: View {
                                             }
                                             Spacer()
                                             Button(action: {
-                                                addAppToSenderCatalog(found)
+                                                var tagged = found
+                                                tagged.detectionSource = "Aggiunta da ricerca"
+                                                addAppToSenderCatalog(tagged)
                                             }) {
                                                 HStack(spacing: 4) {
                                                     Image(systemName: alreadyAdded ? "checkmark" : "plus")
@@ -755,36 +754,6 @@ struct SenderAppsSelectionSheet: View {
                                     }
                                 }
                                 .padding(.top, 4)
-                            } else if !availableQuickSuggestions.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(availableQuickSuggestions) { suggestion in
-                                            Button(action: {
-                                                Task {
-                                                    let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata([suggestion])
-                                                    if let first = enriched.first {
-                                                        addAppToSenderCatalog(first)
-                                                    } else {
-                                                        addAppToSenderCatalog(suggestion)
-                                                    }
-                                                }
-                                            }) {
-                                                HStack(spacing: 5) {
-                                                    Image(systemName: "plus.circle.fill")
-                                                        .font(.system(size: 12))
-                                                    Text(suggestion.appName)
-                                                        .font(.system(size: 12, weight: .semibold))
-                                                }
-                                                .foregroundColor(AppleTheme.blue)
-                                                .padding(.horizontal, 10)
-                                                .padding(.vertical, 6)
-                                                .background(AppleTheme.cardSelected)
-                                                .clipShape(Capsule())
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                }
                             }
                         }
                         .appleCard(padding: 14)
@@ -807,6 +776,133 @@ struct SenderAppsSelectionSheet: View {
         .preferredColorScheme(.light)
     }
 
+    private func quickCategoryAccordionRow(_ category: AppQuickCategory) -> some View {
+        let isExpanded = expandedCategoryIds.contains(category.id)
+        let selectedInCategory = category.apps.filter { isAppSelected($0) }.count
+        let allInCategorySelected = selectedInCategory == category.apps.count && !category.apps.isEmpty
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        if isExpanded {
+                            expandedCategoryIds.remove(category.id)
+                        } else {
+                            expandedCategoryIds.insert(category.id)
+                        }
+                    }
+                }) {
+                    HStack(spacing: 9) {
+                        Image(systemName: category.iconName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AppleTheme.blue)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(category.title)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Text("\(selectedInCategory)/\(category.apps.count) selezionate")
+                                .font(.system(size: 11))
+                                .foregroundColor(selectedInCategory > 0 ? AppleTheme.green : AppleTheme.textSecondary)
+                        }
+                        Spacer()
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(AppleTheme.textTertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button(action: {
+                    toggleWholeCategory(category, currentlyAllSelected: allInCategorySelected)
+                }) {
+                    Text(allInCategorySelected ? "Togli" : "Tutte")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundColor(allInCategorySelected ? AppleTheme.orange : AppleTheme.blue)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(allInCategorySelected ? AppleTheme.orange.opacity(0.12) : AppleTheme.cardSelected)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isExpanded {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        ForEach(category.apps) { item in
+                            let checked = isAppSelected(item)
+                            Button(action: {
+                                toggleSingleCategoryApp(item, isCurrentlySelected: checked)
+                            }) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: checked ? "checkmark.circle.fill" : "plus.circle.fill")
+                                        .font(.system(size: 12))
+                                    Text(item.appName)
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundColor(checked ? .white : AppleTheme.blue)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(checked ? AppleTheme.green : AppleTheme.cardSelected)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+            }
+        }
+        .padding(10)
+        .background(AppleTheme.inputSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func senderCatalogAppRow(_ app: InstalledAppRecord) -> some View {
+        let isSelected = !deselectedAppIds.contains(app.id)
+        let subtitle = (app.detectionSource?.isEmpty == false)
+            ? app.detectionSource!
+            : (app.packageName.contains(".") ? app.packageName : "")
+        let badgeColor: Color = {
+            if subtitle.hasPrefix("Verificata") { return AppleTheme.green }
+            if subtitle.hasPrefix("da ") { return AppleTheme.teal }
+            return AppleTheme.textTertiary
+        }()
+
+        return Button(action: {
+            if isSelected {
+                deselectedAppIds.insert(app.id)
+            } else {
+                deselectedAppIds.remove(app.id)
+            }
+        }) {
+            HStack(spacing: 12) {
+                AppIconThumbnailView(iconUrl: app.iconUrl, size: 38)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(app.appName)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(AppleTheme.textPrimary)
+                        .lineLimit(1)
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(badgeColor)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 21))
+                    .foregroundColor(isSelected ? AppleTheme.blue : AppleTheme.textTertiary)
+            }
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private func triggerSearch() {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
@@ -818,27 +914,76 @@ struct SenderAppsSelectionSheet: View {
         }
     }
 
+    private func toggleSingleCategoryApp(_ app: InstalledAppRecord, isCurrentlySelected: Bool) {
+        if isCurrentlySelected {
+            if let existing = appsCatalog.first(where: {
+                $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                    || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+            }) {
+                deselectedAppIds.insert(existing.id)
+            }
+        } else {
+            addAppsToSenderCatalog([app])
+        }
+    }
+
+    private func toggleWholeCategory(_ category: AppQuickCategory, currentlyAllSelected: Bool) {
+        if currentlyAllSelected {
+            for item in category.apps {
+                if let existing = appsCatalog.first(where: {
+                    $0.packageName.caseInsensitiveCompare(item.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == item.appStoreId)
+                }) {
+                    deselectedAppIds.insert(existing.id)
+                }
+            }
+        } else {
+            addAppsToSenderCatalog(category.apps)
+        }
+    }
+
     private func addAppToSenderCatalog(_ app: InstalledAppRecord) {
-        let exists = appsCatalog.contains {
-            $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
-                || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+        addAppsToSenderCatalog([app])
+    }
+
+    private func addAppsToSenderCatalog(_ newApps: [InstalledAppRecord]) {
+        var addedList: [InstalledAppRecord] = []
+        for app in newApps {
+            if let existing = appsCatalog.first(where: {
+                $0.packageName.caseInsensitiveCompare(app.packageName) == .orderedSame
+                    || ($0.appStoreId != nil && $0.appStoreId == app.appStoreId)
+            }) {
+                deselectedAppIds.remove(existing.id)
+            } else {
+                appsCatalog.append(app)
+                deselectedAppIds.remove(app.id)
+                addedList.append(app)
+            }
         }
-        if !exists {
-            appsCatalog.append(app)
+        guard !addedList.isEmpty else { return }
+        iOSInstalledAppsScanner.appendCustomApps(addedList)
+        Task {
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(addedList)
+            for rich in enriched {
+                if let idx = appsCatalog.firstIndex(where: {
+                    $0.packageName.caseInsensitiveCompare(rich.packageName) == .orderedSame
+                        || ($0.appStoreId != nil && $0.appStoreId == rich.appStoreId)
+                }) {
+                    appsCatalog[idx] = rich
+                }
+            }
         }
-        deselectedAppIds.remove(app.id)
-        iOSInstalledAppsScanner.appendCustomApps([app])
     }
 
     private func resetToVerifiedInstalledOnly() {
         iOSInstalledAppsScanner.clearSavedCustomApps()
         deselectedAppIds.removeAll()
         onResetAllCustomApps?()
-        let base = iOSInstalledAppsScanner.scanLocallyInstalledApps()
-        appsCatalog = base
         searchResults = []
         Task {
-            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(base)
+            let scan = await iOSInstalledAppsScanner.detectAllAppsInstantAsync()
+            appsCatalog = scan.apps
+            let enriched = await iOSAppStoreCatalogResolver.enrichAppsWithStoreMetadata(scan.apps)
             if !enriched.isEmpty {
                 appsCatalog = enriched
             }

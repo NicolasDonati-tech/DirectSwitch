@@ -178,6 +178,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var contactsAlreadyPresentCount: Int = 0
     @Published var receivedInstalledApps: [InstalledAppRecord] = []
     @Published var sentInstalledAppsCount: Int = 0
+    @Published var photoMetadataDiscoveredApps: [InstalledAppRecord] = []
     @Published var activeTransferScope: ActiveTransferScope = ActiveTransferScope()
     @Published var visualStepProgress: Double = 0.0
     @Published var errorMessage: String? = nil
@@ -1824,6 +1825,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 contactsAlreadyPresentCount = 0
                 receivedInstalledApps = []
                 sentInstalledAppsCount = 0
+                photoMetadataDiscoveredApps = []
             }
             isCompleted = false
             pendingNativeWhatsAppMigration = false
@@ -2169,6 +2171,20 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     }
                     defer { try? FileManager.default.removeItem(at: plainTempURL) }
 
+                    // Rilevamento extra-50 a costo zero dai tag EXIF/TIFF/QuickTime del file già esportato
+                    let isVideoMedia = (entry.item.category == .VIDEOS)
+                    let mediaDate = entry.asset.creationDate
+                    if let photoClue = await iOSPhotoMetadataAppDetector.detectAppFromExportedMediaFile(
+                        at: plainTempURL,
+                        originalFilename: entry.item.fileName,
+                        isVideo: isVideoMedia,
+                        creationDate: mediaDate
+                    ) {
+                        await MainActor.run {
+                            self.recordPhotoMetadataAppClue(photoClue)
+                        }
+                    }
+
                     if isIosLiveTarget {
                         var recordedLive = false
                         if let liveTempURL = await iOSPhotoKitMigrator.exportLivePairedVideoToTempFile(entry.asset) {
@@ -2395,6 +2411,19 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
             errorMessage = error.localizedDescription
         }
+    }
+
+    @MainActor
+    private func recordPhotoMetadataAppClue(_ rawClue: InstalledAppRecord) {
+        let verified = iOSInstalledAppsScanner.filterFalsePositiveProbesOnSender([rawClue])
+        guard let clue = verified.first else { return }
+        let alreadyRecorded = photoMetadataDiscoveredApps.contains {
+            $0.packageName.caseInsensitiveCompare(clue.packageName) == .orderedSame
+                || ($0.appStoreId != nil && $0.appStoreId == clue.appStoreId)
+        }
+        guard !alreadyRecorded else { return }
+        photoMetadataDiscoveredApps.append(clue)
+        iOSInstalledAppsScanner.appendCustomApps([clue])
     }
 
     private nonisolated static func makeUploadSession() -> URLSession {

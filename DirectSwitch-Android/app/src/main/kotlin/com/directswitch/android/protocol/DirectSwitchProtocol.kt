@@ -268,7 +268,8 @@ data class InstalledAppRecord(
     val appName: String,
     val appStoreId: Long? = null,
     val iconUrl: String? = null,
-    val urlScheme: String? = null
+    val urlScheme: String? = null,
+    val detectionSource: String? = null
 )
 
 @Serializable
