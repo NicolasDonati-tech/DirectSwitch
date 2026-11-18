@@ -437,27 +437,44 @@ fun DirectSwitchMainScreen(
     fun updateCategoriesAndTriggerPreloads(next: CategorySelectionState) {
         val prev = categories
         categories = next
+        // Raccoglie TUTTI i permessi mancanti in un'unica richiesta di sistema: Android ne mostra una sola alla volta,
+        // quindi più richieste parallele (es. "Seleziona tutto") farebbero perdere i precaricamenti delle altre voci.
+        val missingPerms = LinkedHashSet<String>()
+        val pendingActions = mutableListOf<() -> Unit>()
+        fun schedule(granted: Boolean, perms: List<String>, action: () -> Unit) {
+            if (granted) action() else {
+                missingPerms.addAll(perms)
+                pendingActions.add(action)
+            }
+        }
         if (!prev.contacts && next.contacts) {
-            if (ContactsSmartMerger.hasReadPermission(context)) startContactsPreload()
-            else requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)) { startContactsPreload() }
+            schedule(
+                ContactsSmartMerger.hasReadPermission(context),
+                listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
+            ) { startContactsPreload() }
         }
         if (!prev.photos && next.photos) {
             val photoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
-            if (MediaExifScannerAndImporter.hasPhotoPermission(context)) startPhotosPreload()
-            else requestSpecificPermissionsThen(listOf(photoPerm)) { startPhotosPreload() }
+            schedule(MediaExifScannerAndImporter.hasPhotoPermission(context), listOf(photoPerm)) { startPhotosPreload() }
         }
         if (!prev.videos && next.videos) {
             val videoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
-            if (MediaExifScannerAndImporter.hasVideoPermission(context)) startVideosPreload()
-            else requestSpecificPermissionsThen(listOf(videoPerm)) { startVideosPreload() }
+            schedule(MediaExifScannerAndImporter.hasVideoPermission(context), listOf(videoPerm)) { startVideosPreload() }
         }
         if (!prev.calendars && next.calendars) {
-            if (CalendarMigrator.hasReadPermission(context)) refreshCalendarsSync()
-            else requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)) { refreshCalendarsSync() }
+            schedule(
+                CalendarMigrator.hasReadPermission(context),
+                listOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)
+            ) { refreshCalendarsSync() }
         }
         if (!prev.sms && next.sms) {
-            if (SmsSystemScanner.hasReadPermission(context)) refreshSmsSync()
-            else requestSpecificPermissionsThen(listOf(Manifest.permission.READ_SMS)) { refreshSmsSync() }
+            schedule(SmsSystemScanner.hasReadPermission(context), listOf(Manifest.permission.READ_SMS)) { refreshSmsSync() }
+        }
+        if (missingPerms.isNotEmpty()) {
+            requestSpecificPermissionsThen(missingPerms.toList()) {
+                // Ogni azione verifica di nuovo il proprio permesso e non fa nulla se l'utente lo ha negato
+                pendingActions.forEach { it() }
+            }
         }
         if (!prev.documents && next.documents) {
             scope.launch {

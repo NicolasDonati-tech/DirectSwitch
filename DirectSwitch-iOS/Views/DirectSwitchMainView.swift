@@ -763,10 +763,14 @@ struct DirectSwitchMainView: View {
         contactsPreload.isLoading = true
         contactsPreload.isCompleted = false
         categoryTaskQueue.enqueue {
+            contactsPreload.isLoading = true
+            contactsPreload.isCompleted = false
             _ = await iOSContactsSmartMerger.requestAccessIfNeeded()
             refreshAuthorizedSummary()
             let total = await iOSContactsSmartMerger.preloadContactsCountWithProgress { loaded, tot in
                 Task { @MainActor in
+                    // Ignora aggiornamenti tardivi arrivati dopo il completamento (evita tendina bloccata su "Precaricamento")
+                    guard contactsPreload.isLoading else { return }
                     contactsPreload = ContactsPreloadState(
                         loadedCount: loaded,
                         totalCount: tot,
@@ -789,10 +793,13 @@ struct DirectSwitchMainView: View {
         photosPreload.isLoading = true
         photosPreload.isCompleted = false
         categoryTaskQueue.enqueue {
+            photosPreload.isLoading = true
+            photosPreload.isCompleted = false
             _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
             refreshAuthorizedSummary()
             let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .image) { loaded, tot, live, albums, bytes in
                 Task { @MainActor in
+                    guard photosPreload.isLoading else { return }
                     photosPreload = PhotosPreloadState(
                         loadedCount: loaded,
                         totalCount: tot,
@@ -824,10 +831,13 @@ struct DirectSwitchMainView: View {
         videosPreload.isLoading = true
         videosPreload.isCompleted = false
         categoryTaskQueue.enqueue {
+            videosPreload.isLoading = true
+            videosPreload.isCompleted = false
             _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
             refreshAuthorizedSummary()
             let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .video) { loaded, tot, _, _, bytes in
                 Task { @MainActor in
+                    guard videosPreload.isLoading else { return }
                     videosPreload = VideosPreloadState(
                         loadedCount: loaded,
                         totalCount: tot,
