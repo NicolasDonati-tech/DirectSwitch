@@ -145,8 +145,10 @@ final class DirectSwitchTests: XCTestCase {
                 senderHasPro: false,
                 receiverHasPro: false
             ),
-            .CROSS_OS_PREVIEW
+            .CROSS_OS_PRO_UNLOCKED
         )
+        XCTAssertTrue(LicensePolicyEvaluator.allowsFullCategories(.CROSS_OS_PREVIEW))
+        XCTAssertTrue(LicensePolicyEvaluator.allowsCalendars(.CROSS_OS_PREVIEW))
 
         var sampleItems: [ManifestItem] = []
         for i in 0..<30 {
@@ -179,9 +181,10 @@ final class DirectSwitchTests: XCTestCase {
             )
         )
         let (allowed, gated) = LicensePolicyEvaluator.filterItemsForTier(sampleItems, tier: .CROSS_OS_PREVIEW)
-        XCTAssertEqual(allowed.count, 26)
+        XCTAssertEqual(allowed.count, 32)
+        XCTAssertTrue(allowed.contains(where: { $0.id == "doc_1" }))
         XCTAssertTrue(allowed.contains(where: { $0.id == "wa_1" }))
-        XCTAssertEqual(gated, 6)
+        XCTAssertEqual(gated, 0)
     }
 
     func testPhoneNormalizerAndPhotoMimeMapping() {
@@ -1444,5 +1447,74 @@ final class DirectSwitchTests: XCTestCase {
 
         // A trasferimento completato sparisce
         XCTAssertNil(tracker.update(progressFraction: 1.0, isCompleted: true, at: 2_100.0))
+    }
+
+    func testSynchronizedStageModelsAndMediaFallbackNaming() throws {
+        for stage in [
+            TransferSessionStage.waitingPairing,
+            .pairedWaitingSelection,
+            .preparing,
+            .transferring,
+            .completed
+        ] {
+            let encoded = try JSONEncoder().encode(stage)
+            let decoded = try JSONDecoder().decode(TransferSessionStage.self, from: encoded)
+            XCTAssertEqual(decoded, stage)
+        }
+
+        let ack = PairAckRequest(
+            sessionId: "sess_sync_1",
+            senderName: "iPhone 15 Pro",
+            senderPlatform: .IOS
+        )
+        let decodedAck = try JSONDecoder().decode(PairAckRequest.self, from: JSONEncoder().encode(ack))
+        XCTAssertEqual(decodedAck, ack)
+
+        let prepReq = TransferPrepareRequest(
+            sessionId: "sess_sync_1",
+            senderName: "iPhone 15 Pro",
+            senderPlatform: .IOS,
+            transferScope: ActiveTransferScope(contacts: true, photos: true, videos: true, documents: true)
+        )
+        let decodedPrep = try JSONDecoder().decode(TransferPrepareRequest.self, from: JSONEncoder().encode(prepReq))
+        XCTAssertEqual(decodedPrep, prepReq)
+
+        let item = TransferPreparationItem(
+            id: "contacts",
+            icon: "person.crop.circle.fill",
+            title: "Rubrica contatti",
+            unitSingular: "contatto",
+            unitPlural: "contatti",
+            targetCount: 802,
+            isReady: true
+        )
+        XCTAssertEqual(item.formattedCount(1), "1 contatto")
+        XCTAssertEqual(item.formattedCount(802), "802 contatti")
+
+        let heicFallback = MediaFallbackNaming.reconcileFileNameAndMime(
+            fileName: "IMG_001.HEIC",
+            originalMime: "image/heic",
+            actualExtension: "jpg"
+        )
+        XCTAssertEqual(heicFallback.fileName, "IMG_001.jpg")
+        XCTAssertEqual(heicFallback.mimeType, "image/jpeg")
+        XCTAssertEqual(heicFallback.effectiveExt, "jpg")
+
+        let movFallback = MediaFallbackNaming.reconcileFileNameAndMime(
+            fileName: "CLIP_4K.MOV",
+            originalMime: "video/quicktime",
+            actualExtension: ".MP4"
+        )
+        XCTAssertEqual(movFallback.fileName, "CLIP_4K.mp4")
+        XCTAssertEqual(movFallback.mimeType, "video/mp4")
+        XCTAssertEqual(movFallback.effectiveExt, "mp4")
+
+        let sameJpeg = MediaFallbackNaming.reconcileFileNameAndMime(
+            fileName: "PHOTO_02.JPG",
+            originalMime: "image/jpeg",
+            actualExtension: "jpeg"
+        )
+        XCTAssertEqual(sameJpeg.fileName, "PHOTO_02.JPG")
+        XCTAssertEqual(sameJpeg.mimeType, "image/jpeg")
     }
 }

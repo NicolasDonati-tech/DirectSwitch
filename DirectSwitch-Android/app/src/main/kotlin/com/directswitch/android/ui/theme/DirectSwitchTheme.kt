@@ -233,9 +233,9 @@ fun AppleSettingsIcon(
 fun AppleTopNavigationBar(
     title: String,
     showBackButton: Boolean,
-    isProUnlocked: Boolean,
+    isProUnlocked: Boolean = true,
     onBack: () -> Unit,
-    onTapPassBadge: () -> Unit
+    onTapPassBadge: (() -> Unit)? = null
 ) {
     Column(
         modifier = Modifier
@@ -243,13 +243,12 @@ fun AppleTopNavigationBar(
             .background(DirectSwitchTheme.headerBg)
             .statusBarsPadding()
     ) {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(50.dp)
                 .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            contentAlignment = Alignment.CenterStart
         ) {
             if (showBackButton) {
                 Row(
@@ -274,7 +273,9 @@ fun AppleTopNavigationBar(
 
                 Text(
                     text = title,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 84.dp),
                     textAlign = TextAlign.Center,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -284,7 +285,6 @@ fun AppleTopNavigationBar(
                 )
             } else {
                 Row(
-                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -296,32 +296,6 @@ fun AppleTopNavigationBar(
                         color = DirectSwitchTheme.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            Surface(
-                onClick = onTapPassBadge,
-                shape = RoundedCornerShape(20.dp),
-                color = DirectSwitchTheme.premiumSurface,
-                border = BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Verified,
-                        contentDescription = null,
-                        tint = DirectSwitchTheme.premiumAmber,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Text(
-                        text = if (isProUnlocked) "Premium Attivo" else "Premium Direct",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = DirectSwitchTheme.premiumGold
                     )
                 }
             }
@@ -580,33 +554,12 @@ fun CleanCategoryToggleRow(
         ) {
             AppleSettingsIcon(icon = icon, color = iconColor)
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = title,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = DirectSwitchTheme.textPrimary
-                    )
-                    if (premiumBadge) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(DirectSwitchTheme.premiumSurface)
-                                .border(0.8.dp, DirectSwitchTheme.premiumBorder, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 6.dp, vertical = 1.dp)
-                        ) {
-                            Text(
-                                text = "PREMIUM",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = DirectSwitchTheme.premiumGold
-                            )
-                        }
-                    }
-                }
+                Text(
+                    text = title,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = DirectSwitchTheme.textPrimary
+                )
                 if (!subtitle.isNullOrBlank()) {
                     Text(
                         text = subtitle,

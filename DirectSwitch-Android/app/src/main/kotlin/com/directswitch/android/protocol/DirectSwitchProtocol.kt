@@ -321,6 +321,41 @@ data class TransferCompletionReport(
     val elapsedMillis: Long
 )
 
+/** Fasi sincronizzate tra vecchio e nuovo telefono stile "Passa a iOS". */
+enum class TransferSessionStage {
+    WAITING_PAIRING,
+    PAIRED_WAITING_SELECTION,
+    PREPARING,
+    TRANSFERRING,
+    COMPLETED
+}
+
+@Serializable
+data class PairAckRequest(
+    val sessionId: String,
+    val senderName: String,
+    val senderPlatform: DevicePlatform
+)
+
+@Serializable
+data class TransferPrepareRequest(
+    val sessionId: String,
+    val senderName: String,
+    val senderPlatform: DevicePlatform,
+    val transferScope: ActiveTransferScope
+)
+
+data class TransferPreparationItem(
+    val id: String,
+    val title: String,
+    val unitSingular: String,
+    val unitPlural: String,
+    val targetCount: Int = 0,
+    val isReady: Boolean = false
+) {
+    fun formattedCount(value: Int): String = if (value == 1) "1 $unitSingular" else "$value $unitPlural"
+}
+
 object DirectSwitchJson {
     val instance: Json = Json {
         ignoreUnknownKeys = true
@@ -329,20 +364,15 @@ object DirectSwitchJson {
 }
 
 /**
- * Valutatore della policy di licenza Intra-OS (sempre gratuito) e Cross-OS (Single-Side Unlock).
+ * Policy completamente gratuita e illimitata per ogni trasferimento (Intra-OS e Cross-OS iPhone ↔ Android).
  */
 object LicensePolicyEvaluator {
     const val CROSS_OS_PREVIEW_MEDIA_LIMIT = 25
 
-    /**
-     * In modalità `CROSS_OS_PREVIEW` passano sempre gratuitamente la Rubrica Contatti, le Chat WhatsApp e i primi 25 media;
-     * le categorie estese (Calendari, SMS, Documenti illimitati, App) richiedono `INTRA_OS_FREE` o `CROSS_OS_PRO_UNLOCKED`.
-     */
-    fun allowsFullCategories(tier: SessionLicenseTier): Boolean =
-        tier != SessionLicenseTier.CROSS_OS_PREVIEW
+    fun allowsFullCategories(tier: SessionLicenseTier): Boolean = true
 
     /** Alias mantenuto per compatibilità con i chiamanti e i test esistenti. */
-    fun allowsCalendars(tier: SessionLicenseTier): Boolean = allowsFullCategories(tier)
+    fun allowsCalendars(tier: SessionLicenseTier): Boolean = true
 
     fun resolveTier(
         senderPlatform: DevicePlatform,
@@ -355,39 +385,13 @@ object LicensePolicyEvaluator {
         if (senderPlatform == receiverPlatform) {
             return SessionLicenseTier.INTRA_OS_FREE
         }
-        val anySidePro = senderHasPro || receiverHasPro || senderHasCloudSavePro || receiverHasCloudSavePro
-        return if (anySidePro) {
-            SessionLicenseTier.CROSS_OS_PRO_UNLOCKED
-        } else {
-            SessionLicenseTier.CROSS_OS_PREVIEW
-        }
+        return SessionLicenseTier.CROSS_OS_PRO_UNLOCKED
     }
 
     fun filterItemsForTier(
         items: List<ManifestItem>,
         tier: SessionLicenseTier
-    ): Pair<List<ManifestItem>, Int> {
-        if (tier == SessionLicenseTier.INTRA_OS_FREE || tier == SessionLicenseTier.CROSS_OS_PRO_UNLOCKED) {
-            return items to 0
-        }
-        val allowed = mutableListOf<ManifestItem>()
-        var previewMediaUsed = 0
-        var gatedCount = 0
-        for (item in items) {
-            if (item.category == TransferCategory.CONTACTS || item.category == TransferCategory.WHATSAPP_VAULT) {
-                allowed.add(item)
-            } else if (
-                (item.category == TransferCategory.PHOTOS || item.category == TransferCategory.VIDEOS) &&
-                previewMediaUsed < CROSS_OS_PREVIEW_MEDIA_LIMIT
-            ) {
-                allowed.add(item)
-                previewMediaUsed++
-            } else {
-                gatedCount++
-            }
-        }
-        return allowed to gatedCount
-    }
+    ): Pair<List<ManifestItem>, Int> = items to 0
 }
 
 object PhoneNormalizer {
@@ -849,5 +853,48 @@ class TenPercentSteppedEtaTracker(
         if (sec < 60) return "Meno di un minuto rimanente"
         val mins = kotlin.math.round(sec.toDouble() / 60.0).toInt().coerceAtLeast(1)
         return "Circa $mins min rimanenti"
+    }
+}
+
+/** Riallinea estensione e MIME quando un elemento iCloud esportato via cache locale cambia contenitore (es. HEIC -> JPG o MOV -> MP4). */
+object MediaFallbackNaming {
+    fun reconcileFileNameAndMime(
+        fileName: String,
+        originalMime: String,
+        actualExtension: String?
+    ): Triple<String, String, String> {
+        val cleanExt = actualExtension.orEmpty().trim().trimStart('.').lowercase()
+        val dotIdx = fileName.lastIndexOf('.')
+        val origExt = if (dotIdx > 0 && dotIdx < fileName.length - 1) {
+            fileName.substring(dotIdx + 1).lowercase()
+        } else {
+            ""
+        }
+        if (cleanExt.isEmpty() || cleanExt == origExt) {
+            return Triple(fileName, originalMime, origExt)
+        }
+        val isJpegAlias = (origExt == "jpg" || origExt == "jpeg") && (cleanExt == "jpg" || cleanExt == "jpeg")
+        if (isJpegAlias) {
+            return Triple(fileName, originalMime, origExt)
+        }
+        val compatPairs = setOf(
+            "heic" to "jpg", "heic" to "jpeg",
+            "heif" to "jpg", "heif" to "jpeg",
+            "dng" to "jpg", "png" to "jpg",
+            "mov" to "mp4", "mp4" to "mov"
+        )
+        if ((origExt to cleanExt) !in compatPairs && origExt.isNotEmpty()) {
+            return Triple(fileName, originalMime, origExt)
+        }
+        val stem = if (dotIdx > 0) fileName.substring(0, dotIdx) else fileName.ifBlank { "media" }
+        val updatedName = "$stem.$cleanExt"
+        val updatedMime = when (cleanExt) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "mp4" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            else -> originalMime
+        }
+        return Triple(updatedName, updatedMime, cleanExt)
     }
 }

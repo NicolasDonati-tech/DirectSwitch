@@ -181,6 +181,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var sentInstalledAppsCount: Int = 0
     @Published var photoMetadataDiscoveredApps: [InstalledAppRecord] = []
     @Published var activeTransferScope: ActiveTransferScope = ActiveTransferScope()
+    @Published var sessionStage: TransferSessionStage = .waitingPairing
+    @Published var preparationItems: [TransferPreparationItem] = []
+    @Published var arePreparationItemsReady: Bool = false
     @Published var visualStepProgress: Double = 0.0
     @Published var errorMessage: String? = nil
     @Published var activePairingPin: String = ""
@@ -223,6 +226,41 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var senderProgressAccounting: TransferProgressAccounting? = nil
     private var senderActiveUploadedIds: Set<String> = []
     private var senderSucceededDocURLs: [URL] = []
+    private var preparationAnimDone: Bool = false
+    private var preparationAnimWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markPreparationAnimationCompleted() {
+        preparationAnimDone = true
+        let waiters = preparationAnimWaiters
+        preparationAnimWaiters.removeAll()
+        for cont in waiters {
+            cont.resume()
+        }
+    }
+
+    private func waitForPreparationAnimation(maxMillis: UInt64 = 1_100) async {
+        guard !preparationAnimDone else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                guard !self.preparationAnimDone else { return }
+                await withCheckedContinuation { cont in
+                    if self.preparationAnimDone {
+                        cont.resume()
+                    } else {
+                        self.preparationAnimWaiters.append(cont)
+                    }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: maxMillis * 1_000_000)
+                await MainActor.run {
+                    self.markPreparationAnimationCompleted()
+                }
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
 
     private func refreshReceiverDestinationSession() {
         receiverDestSession?.close()
@@ -339,6 +377,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         remoteScannedApps = []
         remoteScannerCompleted = false
         activeTransferScope = ActiveTransferScope()
+        sessionStage = .waitingPairing
+        preparationItems = []
+        arePreparationItemsReady = false
+        preparationAnimDone = false
         visualStepProgress = 0.0
         activeRunIsResume = false
         errorMessage = nil
@@ -567,6 +609,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         remoteScannedApps = []
         remoteScannerCompleted = false
         activeTransferScope = ActiveTransferScope()
+        sessionStage = .waitingPairing
+        preparationItems = []
+        arePreparationItemsReady = false
+        preparationAnimDone = false
         visualStepProgress = 0.0
         activeRunIsResume = false
         errorMessage = nil
@@ -645,6 +691,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         senderUploadedBytesBySession.removeValue(forKey: sessionId)
         cleanupPendingLiveVideos()
         activeTransferScope = scope
+        sessionStage = scope.isWhatsAppOnly ? .transferring : .preparing
+        arePreparationItemsReady = false
+        preparationAnimDone = false
+        preparationItems = Self.buildInitialPreparationItems(for: scope)
         visualStepProgress = 0.0
         peerName = receiverName
         peerPlatform = receiverPlatform
@@ -1067,12 +1117,138 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
             pinPairingConsumed = true
+            peerName = req.senderName
+            isSessionConnected = true
+            sessionStage = .pairedWaitingSelection
+            statusLabel = "Collegato a \(req.senderName)! Prosegui sull'altro telefono."
             sendEncryptedJson(connection: connection, status: 200, plainJson: snapshot.toCompactJson(), key: pinKey)
             return
         }
 
         guard let key = symmetricKey else {
             sendPlainJson(connection: connection, status: 401, json: #"{"error":"no_session_key"}"#)
+            return
+        }
+
+        if method == "POST" && path == "/v1/pair-ack" {
+            guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                  let reqData = plainJson.data(using: .utf8),
+                  let req = try? JSONDecoder().decode(PairAckRequest.self, from: reqData),
+                  req.sessionId == activeSessionId else {
+                sendPlainJson(connection: connection, status: 401, json: #"{"error":"pair_ack_unauthorized"}"#)
+                return
+            }
+            if isCompleted {
+                cleanupPendingLiveVideos()
+                manifestItems.removeAll()
+                completedItemIds.removeAll()
+                skippedItemIds.removeAll()
+                completedItems = 0
+                totalItems = 0
+                transferredBytes = 0
+                transferredBytesCount = 0
+                totalBytesCount = 0
+                speedMegabytesPerSec = 0.0
+                etaLabel = nil
+                etaTracker.reset()
+                receiverProgressAccounting = nil
+                mergedContacts = 0
+                contactsAlreadyPresentCount = 0
+                importedCalendars = 0
+                importedReminders = 0
+                importedSms = 0
+                savedLivePhotos = 0
+                skippedDuplicates = 0
+                gatedPreviewCount = 0
+                failedItemsCount = 0
+                receivedInstalledApps = []
+                sentInstalledAppsCount = 0
+                receivedDocumentFolders = [:]
+                receivedPasswordsCsvCount = 0
+                isCompleted = false
+                pendingNativeWhatsAppMigration = false
+                requestedWhatsAppMigration = false
+                currentItemName = ""
+            }
+            peerName = req.senderName
+            peerPlatform = req.senderPlatform
+            errorMessage = nil
+            isSessionConnected = true
+            sessionStage = .pairedWaitingSelection
+            statusLabel = "Collegato a \(req.senderName)! Prosegui sull'altro telefono."
+            sendEncryptedJson(connection: connection, status: 200, plainJson: #"{"ok":true}"#, key: key)
+            return
+        }
+
+        if method == "POST" && path == "/v1/pair-reset" {
+            guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                  let reqData = plainJson.data(using: .utf8),
+                  let dict = try? JSONDecoder().decode([String: String].self, from: reqData),
+                  dict["sessionId"] == activeSessionId else {
+                sendPlainJson(connection: connection, status: 401, json: #"{"error":"pair_reset_unauthorized"}"#)
+                return
+            }
+            if sessionStage == .pairedWaitingSelection {
+                peerName = ""
+                peerPlatform = nil
+                pinPairingConsumed = false
+                isSessionConnected = false
+                sessionStage = .waitingPairing
+                statusLabel = "In ascolto — Inquadra il QR o inserisci il PIN \(activePairingPin)"
+            }
+            sendEncryptedJson(connection: connection, status: 200, plainJson: #"{"ok":true}"#, key: key)
+            return
+        }
+
+        if method == "POST" && path == "/v1/prepare" {
+            guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                  let reqData = plainJson.data(using: .utf8),
+                  let req = try? JSONDecoder().decode(TransferPrepareRequest.self, from: reqData),
+                  req.sessionId == activeSessionId else {
+                sendPlainJson(connection: connection, status: 401, json: #"{"error":"prepare_unauthorized"}"#)
+                return
+            }
+            cleanupPendingLiveVideos()
+            manifestItems.removeAll()
+            completedItemIds.removeAll()
+            skippedItemIds.removeAll()
+            completedItems = 0
+            totalItems = 0
+            transferredBytes = 0
+            transferredBytesCount = 0
+            totalBytesCount = 0
+            speedMegabytesPerSec = 0.0
+            etaLabel = nil
+            speedMeter = SlidingTransferSpeedMeter()
+            etaTracker.reset()
+            receiverProgressAccounting = nil
+            visualStepProgress = 0.0
+            mergedContacts = 0
+            contactsAlreadyPresentCount = 0
+            importedCalendars = 0
+            importedReminders = 0
+            importedSms = 0
+            savedLivePhotos = 0
+            receivedPasswordsCsvCount = 0
+            receivedDocumentFolders = [:]
+            skippedDuplicates = 0
+            gatedPreviewCount = 0
+            failedItemsCount = 0
+            receivedInstalledApps = []
+            sentInstalledAppsCount = 0
+            isCompleted = false
+            pendingNativeWhatsAppMigration = false
+            requestedWhatsAppMigration = req.transferScope.whatsApp
+            currentItemName = ""
+            errorMessage = nil
+            peerName = req.senderName
+            peerPlatform = req.senderPlatform
+            activeTransferScope = req.transferScope
+            isSessionConnected = true
+            isTransferring = true
+            sessionStage = req.transferScope.isWhatsAppOnly ? .transferring : .preparing
+            statusLabel = "Sto preparando la ricezione da \(req.senderName)..."
+            sendEncryptedJson(connection: connection, status: 200, plainJson: #"{"ok":true}"#, key: key)
             return
         }
 
@@ -1209,11 +1385,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 isSessionConnected = true
                 isTransferring = true
                 errorMessage = nil
+                if !activeTransferScope.isWhatsAppOnly {
+                    sessionStage = .preparing
+                }
             } else {
                 errorMessage = "Spazio su iPhone insufficiente (meno di 250 MB liberi)."
             }
             statusLabel = allowProceedToManifest
-                ? "Connesso in modo sicuro a \(req.senderName)!"
+                ? "Sto preparando la ricezione da \(req.senderName)..."
                 : "Spazio su iPhone insufficiente per completare il trasferimento."
 
             let resp = HandshakeResponse(
@@ -1319,7 +1498,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
             activeTransferScope = manifest.transferScope ?? ActiveTransferScope.inferred(from: manifest)
-            visualStepProgress = acceptedItems.isEmpty ? 0.75 : 0.05
+            visualStepProgress = 0.0
+            statusLabel = acceptedItems.isEmpty
+                ? "Finalizzazione dati ricevuti..."
+                : "Pronto per la ricezione (\(acceptedItems.count) elementi)..."
             if fullAllowed {
                 if let incomingApps = manifest.installedAppsPayload {
                     receivedInstalledApps = incomingApps
@@ -1349,8 +1531,37 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             return
         }
 
+        if method == "POST" && path == "/v1/begin-transfer" {
+            if !body.isEmpty {
+                guard let plainJson = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                      let dict = try? JSONDecoder().decode([String: String].self, from: Data(plainJson.utf8)),
+                      dict["sessionId"] == activeSessionId else {
+                    sendPlainJson(connection: connection, status: 401, json: #"{"error":"begin_unauthorized"}"#)
+                    return
+                }
+            }
+            if !isCompleted && sessionStage != .completed {
+                sessionStage = .transferring
+                if let acc = receiverProgressAccounting {
+                    etaTracker.reset(initialFraction: acc.progressFraction)
+                    etaLabel = etaTracker.currentLabel(
+                        isCompleted: false,
+                        hasTransferableItems: acc.initialTotalItems > 0
+                    )
+                }
+                statusLabel = totalItems > 0
+                    ? "Copia su questo iPhone..."
+                    : "Finalizzazione trasferimento..."
+            }
+            sendEncryptedJson(connection: connection, status: 200, plainJson: #"{"ok":true}"#, key: key)
+            return
+        }
+
         // Componente video accoppiata (.MOV) di una Live Photo iPhone -> iPhone
         if method == "PUT" && path.hasPrefix("/v1/item-live-video/") {
+            if sessionStage != .transferring && !isCompleted {
+                sessionStage = .transferring
+            }
             let itemId = String(path.dropFirst("/v1/item-live-video/".count))
             guard let item = manifestItems[itemId], let encryptedFileURL = bodyFileURL else {
                 sendPlainJson(connection: connection, status: 404, json: #"{"error":"item_not_found"}"#)
@@ -1402,6 +1613,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         }
 
         if method == "PUT" && path.hasPrefix("/v1/item/") {
+            if sessionStage != .transferring && !isCompleted {
+                sessionStage = .transferring
+            }
             let itemId = String(path.dropFirst("/v1/item/".count))
             let pairedLiveURL = pendingLiveVideoTempURLs.removeValue(forKey: itemId)
             defer {
@@ -1414,7 +1628,29 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
 
-            let safeExt = URL(fileURLWithPath: item.fileName).pathExtension
+            let reconciledMedia = (item.category == .PHOTOS || item.category == .VIDEOS)
+                ? MediaFallbackNaming.reconcileFileNameAndMime(
+                    fileName: item.fileName,
+                    originalMime: item.mimeType,
+                    actualExtension: headers["x-ds-actual-ext"]
+                )
+                : (item.fileName, item.mimeType, URL(fileURLWithPath: item.fileName).pathExtension.lowercased())
+            let effectiveItem = ManifestItem(
+                id: item.id,
+                category: item.category,
+                fileName: reconciledMedia.fileName,
+                relativeAlbumOrFolder: item.relativeAlbumOrFolder,
+                sizeBytes: item.sizeBytes,
+                capturedEpochMillis: item.capturedEpochMillis,
+                dedupKey: item.dedupKey,
+                mimeType: reconciledMedia.mimeType,
+                isFavorite: item.isFavorite,
+                latitude: item.latitude,
+                longitude: item.longitude,
+                isLivePhoto: item.isLivePhoto,
+                livePhotoVideoFileName: item.livePhotoVideoFileName
+            )
+            let safeExt = URL(fileURLWithPath: effectiveItem.fileName).pathExtension
             let tempPlainURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ds_dec_\(UUID().uuidString)\(safeExt.isEmpty ? "" : ".\(safeExt)")")
             defer { try? FileManager.default.removeItem(at: tempPlainURL) }
@@ -1437,9 +1673,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             let savedOk: Bool
             var saveErrorCode: String? = nil
-            if item.category == .PHOTOS || item.category == .VIDEOS {
+            if effectiveItem.category == .PHOTOS || effectiveItem.category == .VIDEOS {
                 let res = await iOSPhotoKitMigrator.saveMediaFileToLibraryWithReason(
-                    item: item,
+                    item: effectiveItem,
                     fileURL: tempPlainURL,
                     pairedLiveVideoURL: pairedLiveURL
                 )
@@ -1449,12 +1685,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     savedLivePhotos += 1
                 }
             } else {
-                let isPasswordsCsv = iOSDocumentsSandboxBridge.isPasswordsCsvFile(item.fileName)
+                let isPasswordsCsv = iOSDocumentsSandboxBridge.isPasswordsCsvFile(effectiveItem.fileName)
                 if receiverDestSession == nil {
                     refreshReceiverDestinationSession()
                 }
                 let saveResult = iOSDocumentsSandboxBridge.saveDocumentFileToDestination(
-                    item: item,
+                    item: effectiveItem,
                     sourceFileURL: tempPlainURL,
                     session: receiverDestSession
                 )
@@ -1546,6 +1782,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             etaLabel = nil
             visualStepProgress = 1.0
             pendingNativeWhatsAppMigration = requestedWhatsAppMigration
+            sessionStage = .completed
             isCompleted = true
             statusLabel = "Trasferimento su iPhone completato!"
             iOSBackgroundTransferKeepAlive.shared.endActiveSession(
@@ -1752,6 +1989,76 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         )
     }
 
+    private func buildCandidateIps(for payload: QrPairingPayload) -> [String] {
+        var ips = payload.ips
+        for b in discoveredBeacons where b.sessionId == payload.sessionId || b.receiverName == payload.receiverName {
+            for ip in b.ips where !ips.contains(ip) {
+                ips.insert(ip, at: 0)
+            }
+        }
+        return ips
+    }
+
+    /// Conferma subito al ricevente (via PIN o QR) che l'accoppiamento è riuscito, così può passare alla schermata "Prosegui sull'altro telefono".
+    func sendPairAck(qrPayload: QrPairingPayload) async {
+        _ = await joinAndroidHotspotIfPresent(payload: qrPayload)
+        guard let reachableIp = await findReachableIp(ips: buildCandidateIps(for: qrPayload), port: qrPayload.port),
+              let key = try? DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qrPayload.sessionKeyHex) else {
+            return
+        }
+        let req = PairAckRequest(
+            sessionId: qrPayload.sessionId,
+            senderName: UIDevice.current.name,
+            senderPlatform: .IOS
+        )
+        _ = try? await postEncryptedJson(url: "http://\(reachableIp):\(qrPayload.port)/v1/pair-ack", payload: req, key: key)
+    }
+
+    func sendPairReset(qrPayload: QrPairingPayload) async {
+        guard let reachableIp = await findReachableIp(ips: buildCandidateIps(for: qrPayload), port: qrPayload.port),
+              let key = try? DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qrPayload.sessionKeyHex) else {
+            return
+        }
+        _ = try? await postEncryptedJson(
+            url: "http://\(reachableIp):\(qrPayload.port)/v1/pair-reset",
+            payload: ["sessionId": qrPayload.sessionId],
+            key: key
+        )
+    }
+
+    private static func buildInitialPreparationItems(for scope: ActiveTransferScope) -> [TransferPreparationItem] {
+        var rows: [TransferPreparationItem] = []
+        if scope.contacts {
+            rows.append(TransferPreparationItem(id: "contacts", icon: "person.crop.circle.fill", title: "Rubrica contatti", unitSingular: "contatto", unitPlural: "contatti"))
+        }
+        if scope.photos {
+            rows.append(TransferPreparationItem(id: "photos", icon: "photo.fill", title: "Foto e Live Photos", unitSingular: "foto", unitPlural: "foto"))
+        }
+        if scope.videos {
+            rows.append(TransferPreparationItem(id: "videos", icon: "video.fill", title: "Video originali", unitSingular: "video", unitPlural: "video"))
+        }
+        if scope.calendars {
+            rows.append(TransferPreparationItem(id: "calendars", icon: "calendar", title: "Calendari", unitSingular: "evento", unitPlural: "eventi"))
+        }
+        if scope.reminders {
+            rows.append(TransferPreparationItem(id: "reminders", icon: "checklist", title: "Promemoria", unitSingular: "promemoria", unitPlural: "promemoria"))
+        }
+        if scope.documents {
+            rows.append(TransferPreparationItem(id: "documents", icon: "doc.fill", title: "Documenti e File", unitSingular: "file", unitPlural: "file"))
+        }
+        if scope.apps {
+            rows.append(TransferPreparationItem(id: "apps", icon: "square.grid.2x2.fill", title: "App scaricate", unitSingular: "app", unitPlural: "app"))
+        }
+        return rows
+    }
+
+    private func updatePreparationItem(id: String, targetCount: Int, isReady: Bool) {
+        if let idx = preparationItems.firstIndex(where: { $0.id == id }) {
+            preparationItems[idx].targetCount = max(0, targetCount)
+            preparationItems[idx].isReady = isReady
+        }
+    }
+
     /// Unisce due elenchi di `InstalledAppRecord` evitando duplicati per `packageName` o `appStoreId`.
     nonisolated static func mergeUniqueApps(_ primary: [InstalledAppRecord], _ secondary: [InstalledAppRecord]) -> [InstalledAppRecord] {
         var merged = primary
@@ -1893,6 +2200,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             isSessionConnected = true
             isTransferring = true
             isBackgroundKeepAliveActive = true
+            sessionStage = (isResume || transferScope.isWhatsAppOnly) ? .transferring : .preparing
+            if !isResume && !transferScope.isWhatsAppOnly {
+                preparationAnimDone = false
+                arePreparationItemsReady = false
+                preparationItems = Self.buildInitialPreparationItems(for: transferScope)
+            } else {
+                arePreparationItemsReady = true
+                preparationAnimDone = true
+                preparationItems = []
+            }
             currentItemName = ""
             peerName = qrPayload.receiverName
             peerPlatform = qrPayload.receiverPlatform
@@ -1940,7 +2257,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             statusLabel = previouslySentIds.isEmpty
                 ? (transferScope.isWhatsAppOnly
                     ? "Connessione con \(qrPayload.receiverName) per il passaggio WhatsApp..."
-                    : "Connessione diretta con \(qrPayload.receiverName)...")
+                    : "Sto preparando il trasferimento verso \(qrPayload.receiverName)...")
                 : "Ripresa canale diretto verso \(qrPayload.receiverName)..."
 
             var candidateIps = qrPayload.ips
@@ -1955,6 +2272,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 if !previouslySentIds.isEmpty {
                     canResumeInterruptedTransfer = true
                 }
+                sessionStage = .transferring
+                markPreparationAnimationCompleted()
                 errorMessage = hotspotFallbackHint
                     ?? "Impossibile collegarsi a \(qrPayload.receiverName). Assicurati che DirectSwitch sia aperta sull'altro telefono e che «Rete locale» sia attiva nelle Impostazioni."
                 return
@@ -1964,24 +2283,51 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             var baseUrl = "http://\(activeIp):\(qrPayload.port)"
             let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qrPayload.sessionKeyHex)
 
+            if !isResume && !transferScope.isWhatsAppOnly {
+                let prepReq = TransferPrepareRequest(
+                    sessionId: qrPayload.sessionId,
+                    senderName: UIDevice.current.name,
+                    senderPlatform: .IOS,
+                    transferScope: transferScope
+                )
+                _ = try? await postEncryptedJson(url: "\(baseUrl)/v1/prepare", payload: prepReq, key: key)
+            }
+
             if includeContacts && previouslySentIds.isEmpty { _ = await iOSContactsSmartMerger.requestAccessIfNeeded() }
             if includeCalendars && previouslySentIds.isEmpty { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
             if includeReminders && previouslySentIds.isEmpty { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
 
             let nowCutoff = Date()
             let contacts = (includeContacts && previouslySentIds.isEmpty) ? iOSContactsSmartMerger.readAllContacts() : []
+            if includeContacts && !isResume {
+                updatePreparationItem(id: "contacts", targetCount: contacts.count, isReady: true)
+            }
             let calendars = (includeCalendars && previouslySentIds.isEmpty)
                 ? iOSCalendarMigrator.readEvents(upToDate: calendarsUpToTodayOnly ? nowCutoff : nil)
                 : []
+            if includeCalendars && !isResume {
+                updatePreparationItem(id: "calendars", targetCount: calendars.count, isReady: true)
+            }
             let reminders = (includeReminders && previouslySentIds.isEmpty)
                 ? await iOSRemindersMigrator.readReminders(upToDate: remindersUpToTodayOnly ? nowCutoff : nil)
                 : []
+            if includeReminders && !isResume {
+                updatePreparationItem(id: "reminders", targetCount: reminders.count, isReady: true)
+            }
             let scanResult = await iOSPhotoKitMigrator.scanLibraryAssetsDetailed(
                 includePhotos: includePhotos,
                 includeVideos: includeVideos
             )
             let scannedAssets = scanResult.items
             iCloudOptimizedSkippedHint = scanResult.iCloudOptimizedCount
+            if includePhotos && !isResume {
+                let pCount = scannedAssets.filter { $0.item.category == .PHOTOS }.count
+                updatePreparationItem(id: "photos", targetCount: pCount, isReady: true)
+            }
+            if includeVideos && !isResume {
+                let vCount = scannedAssets.filter { $0.item.category == .VIDEOS }.count
+                updatePreparationItem(id: "videos", targetCount: vCount, isReady: true)
+            }
 
             let collectedDocs = iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
                 explicitPicked: pickedDocuments,
@@ -1989,6 +2335,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 includeWhatsAppVault: includeWhatsAppVault
             )
             let filteredPickedDocs = collectedDocs.items
+            if includeDocuments && !isResume {
+                let dCount = filteredPickedDocs.filter { $0.0.category == .DOCUMENTS }.count
+                updatePreparationItem(id: "documents", targetCount: dCount, isReady: true)
+            }
             let activeDocSecurityScopes = collectedDocs.activeSecurityScopes
             defer {
                 for scopedURL in activeDocSecurityScopes {
@@ -2024,6 +2374,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             licenseTier = hsResp.licenseTier
 
             guard hsResp.accepted && hsResp.hasEnoughSpace else {
+                sessionStage = .transferring
+                markPreparationAnimationCompleted()
                 errorMessage = hsResp.statusMessage.isEmpty
                     ? "Spazio di archiviazione insufficiente su \(hsResp.receiverName)."
                     : hsResp.statusMessage
@@ -2031,14 +2383,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
             didAuthenticateSession = true
-            if !transferScope.isWhatsAppOnly {
-                visualStepProgress = 0.25
-            }
 
             let fullCategoriesAllowed = LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
             let wantNativeWa = includeWhatsAppVault
             let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && includeApps && !installedApps.isEmpty) ? installedApps : nil
             sentInstalledAppsCount = appsToSend?.count ?? 0
+            if includeApps && !isResume {
+                updatePreparationItem(id: "apps", targetCount: appsToSend?.count ?? 0, isReady: true)
+            }
             let manifest = TransferManifest(
                 sessionId: qrPayload.sessionId,
                 senderPlatform: .IOS,
@@ -2092,21 +2444,33 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             senderActiveUploadedIds = initialUploadedIds
             senderSucceededDocURLs = []
             speedMeter = SlidingTransferSpeedMeter()
-            etaTracker.reset(initialFraction: initialAccounting.progressFraction)
-            etaLabel = etaTracker.currentLabel(
-                isCompleted: false,
-                hasTransferableItems: initialAccounting.initialTotalItems > 0
-            )
 
             completedItems = initialAccounting.succeededItemsCount
             totalItems = initialAccounting.initialTotalItems
             transferredBytesCount = initialAccounting.transferredBytes
             totalBytesCount = initialAccounting.totalBytesForProgress
+            visualStepProgress = 0.0
 
-            if !transferScope.isWhatsAppOnly && totalItems == 0 {
-                statusLabel = "Sincronizzazione in corso..."
-                visualStepProgress = 0.72
-                try? await Task.sleep(nanoseconds: 280_000_000)
+            if !isResume && !transferScope.isWhatsAppOnly {
+                arePreparationItemsReady = true
+                await waitForPreparationAnimation(maxMillis: 1_100)
+                _ = try? await postEncryptedJson(
+                    url: "\(baseUrl)/v1/begin-transfer",
+                    payload: ["sessionId": qrPayload.sessionId],
+                    key: key
+                )
+            }
+
+            etaTracker.reset(initialFraction: initialAccounting.progressFraction)
+            etaLabel = etaTracker.currentLabel(
+                isCompleted: false,
+                hasTransferableItems: initialAccounting.initialTotalItems > 0
+            )
+            sessionStage = .transferring
+            if totalItems > 0 {
+                statusLabel = "Copia su \(hsResp.receiverName) in corso..."
+            } else {
+                statusLabel = "Sincronizzazione completata!"
             }
 
             let uploadSession = Self.makeUploadSession()
@@ -2188,6 +2552,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 let recoveredBase = "http://\(recoveredIp):\(qrPayload.port)"
                                 _ = try? await self.postEncryptedJson(url: "\(recoveredBase)/v1/handshake", payload: reconnectHandshakeReq, key: key)
                                 _ = try? await self.postEncryptedJson(url: "\(recoveredBase)/v1/manifest", payload: manifest, key: key)
+                                _ = try? await self.postEncryptedJson(url: "\(recoveredBase)/v1/begin-transfer", payload: ["sessionId": qrPayload.sessionId], key: key)
                                 return recoveredIp
                             }
                             quickAttempt = 0
@@ -2534,8 +2899,13 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             visualStepProgress = 1.0
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
             pendingNativeWhatsAppMigration = wantNativeWa
+            sessionStage = .completed
             isCompleted = true
         } catch {
+            if sessionStage == .preparing {
+                sessionStage = .transferring
+            }
+            markPreparationAnimationCompleted()
             if didAuthenticateSession || !(senderUploadedIdsBySession[qrPayload.sessionId] ?? []).isEmpty {
                 canResumeInterruptedTransfer = true
             }
@@ -2654,6 +3024,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         putReq.setValue("close", forHTTPHeaderField: "Connection")
         putReq.setValue("\(plainBytes)", forHTTPHeaderField: "X-DS-Plain-Length")
         putReq.setValue(sha256Hex, forHTTPHeaderField: "X-DS-Sha256")
+        let actualExt = plainFileURL.pathExtension.lowercased()
+        let itemExt = URL(fileURLWithPath: itemLabel).pathExtension.lowercased()
+        if !actualExt.isEmpty && actualExt != itemExt && actualExt != "bin" && actualExt != "tmp" {
+            putReq.setValue(actualExt, forHTTPHeaderField: "X-DS-Actual-Ext")
+        }
         if encSize > 0 {
             putReq.setValue("\(encSize)", forHTTPHeaderField: "Content-Length")
         }

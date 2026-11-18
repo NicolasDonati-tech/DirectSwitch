@@ -391,15 +391,52 @@ struct RemoteAppScannerStatusResponse: Codable, Equatable, Sendable {
     var discoveredApps: [InstalledAppRecord] = []
 }
 
+/// Fasi sincronizzate tra vecchio e nuovo telefono stile "Passa a iOS":
+/// Attesa collegamento -> Prosegui sull'altro telefono -> Preparazione -> 0%..100% -> Completato.
+enum TransferSessionStage: String, Codable, Equatable, Sendable {
+    case waitingPairing
+    case pairedWaitingSelection
+    case preparing
+    case transferring
+    case completed
+}
+
+struct PairAckRequest: Codable, Equatable, Sendable {
+    let sessionId: String
+    let senderName: String
+    let senderPlatform: DevicePlatform
+}
+
+struct TransferPrepareRequest: Codable, Equatable, Sendable {
+    let sessionId: String
+    let senderName: String
+    let senderPlatform: DevicePlatform
+    let transferScope: ActiveTransferScope
+}
+
+struct TransferPreparationItem: Identifiable, Equatable, Sendable {
+    let id: String
+    let icon: String
+    let title: String
+    let unitSingular: String
+    let unitPlural: String
+    var targetCount: Int = 0
+    var isReady: Bool = false
+
+    func formattedCount(_ value: Int) -> String {
+        value == 1 ? "1 \(unitSingular)" : "\(value) \(unitPlural)"
+    }
+}
+
 enum LicensePolicyEvaluator {
     static let crossOsPreviewMediaLimit = 25
 
     static func allowsFullCategories(_ tier: SessionLicenseTier) -> Bool {
-        tier != .CROSS_OS_PREVIEW
+        true
     }
 
     static func allowsCalendars(_ tier: SessionLicenseTier) -> Bool {
-        allowsFullCategories(tier)
+        true
     }
 
     static func resolveTier(
@@ -413,30 +450,11 @@ enum LicensePolicyEvaluator {
         if senderPlatform == receiverPlatform {
             return .INTRA_OS_FREE
         }
-        if senderHasPro || receiverHasPro || senderHasCloudSavePro || receiverHasCloudSavePro {
-            return .CROSS_OS_PRO_UNLOCKED
-        }
-        return .CROSS_OS_PREVIEW
+        return .CROSS_OS_PRO_UNLOCKED
     }
 
     static func filterItemsForTier(_ items: [ManifestItem], tier: SessionLicenseTier) -> ([ManifestItem], Int) {
-        if tier == .INTRA_OS_FREE || tier == .CROSS_OS_PRO_UNLOCKED {
-            return (items, 0)
-        }
-        var allowed: [ManifestItem] = []
-        var previewUsed = 0
-        var gated = 0
-        for item in items {
-            if item.category == .CONTACTS || item.category == .WHATSAPP_VAULT {
-                allowed.append(item)
-            } else if (item.category == .PHOTOS || item.category == .VIDEOS) && previewUsed < crossOsPreviewMediaLimit {
-                allowed.append(item)
-                previewUsed += 1
-            } else {
-                gated += 1
-            }
-        }
-        return (allowed, gated)
+        (items, 0)
     }
 }
 
@@ -941,5 +959,46 @@ struct TenPercentSteppedEtaTracker: Sendable {
         }
         let mins = max(1, Int((Double(sec) / 60.0).rounded()))
         return "Circa \(mins) min rimanenti"
+    }
+}
+
+/// Riallinea estensione e MIME quando un elemento iCloud esportato via cache locale cambia contenitore (es. HEIC -> JPG o MOV -> MP4).
+enum MediaFallbackNaming {
+    static func reconcileFileNameAndMime(
+        fileName: String,
+        originalMime: String,
+        actualExtension: String?
+    ) -> (fileName: String, mimeType: String, effectiveExt: String) {
+        let cleanExt = (actualExtension ?? "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+            .lowercased()
+        let origExt = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+        guard !cleanExt.isEmpty, cleanExt != origExt else {
+            return (fileName, originalMime, origExt)
+        }
+        let compatPairs: [(String, String)] = [
+            ("heic", "jpg"), ("heic", "jpeg"), ("heif", "jpg"), ("heif", "jpeg"),
+            ("dng", "jpg"), ("png", "jpg"), ("mov", "mp4"), ("mp4", "mov")
+        ]
+        let isImageEquiv = ["jpg", "jpeg"].contains(origExt) && ["jpg", "jpeg"].contains(cleanExt)
+        guard !isImageEquiv else {
+            return (fileName, originalMime, origExt)
+        }
+        guard compatPairs.contains(where: { $0.0 == origExt && $0.1 == cleanExt }) || origExt.isEmpty else {
+            return (fileName, originalMime, origExt)
+        }
+        let stem = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+        let baseStem = stem.isEmpty ? "media" : stem
+        let updatedName = "\(baseStem).\(cleanExt)"
+        let updatedMime: String = {
+            switch cleanExt {
+            case "jpg", "jpeg": return "image/jpeg"
+            case "png": return "image/png"
+            case "mp4": return "video/mp4"
+            case "mov": return "video/quicktime"
+            default: return originalMime
+            }
+        }()
+        return (updatedName, updatedMime, cleanExt)
     }
 }

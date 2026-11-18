@@ -44,6 +44,8 @@ import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.ManifestResponse
+import com.directswitch.android.protocol.MediaFallbackNaming
+import com.directswitch.android.protocol.PairAckRequest
 import com.directswitch.android.protocol.PinPairingRequest
 import com.directswitch.android.protocol.QrPairingPayload
 import com.directswitch.android.protocol.SessionLicenseTier
@@ -52,7 +54,11 @@ import com.directswitch.android.protocol.TenPercentSteppedEtaTracker
 import com.directswitch.android.protocol.TransferCategory
 import com.directswitch.android.protocol.TransferCompletionReport
 import com.directswitch.android.protocol.TransferManifest
+import com.directswitch.android.protocol.TransferPreparationItem
+import com.directswitch.android.protocol.TransferPrepareRequest
 import com.directswitch.android.protocol.TransferProgressAccounting
+import com.directswitch.android.protocol.TransferSessionStage
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -114,6 +120,9 @@ data class LiveTransferProgress(
     val receivedInstalledApps: List<InstalledAppRecord> = emptyList(),
     val receivedDocumentFolders: Map<String, Int> = emptyMap(),
     val activeTransferScope: ActiveTransferScope = ActiveTransferScope(),
+    val sessionStage: TransferSessionStage = TransferSessionStage.WAITING_PAIRING,
+    val preparationItems: List<TransferPreparationItem> = emptyList(),
+    val arePreparationItemsReady: Boolean = false,
     val isCompleted: Boolean = false,
     val pendingNativeWhatsAppMigration: Boolean = false,
     val gatedPreviewCount: Int = 0,
@@ -512,8 +521,121 @@ class DirectSwitchTransferServer(
                         writeJsonResponse(output, 401, """{"error":"Sessione PIN non valida"}""")
                         return
                     }
+                    _progress.value = _progress.value.copy(
+                        phaseLabel = "Collegato a ${req.senderName}! Prosegui sull'altro telefono.",
+                        peerDeviceName = req.senderName,
+                        sessionStage = TransferSessionStage.PAIRED_WAITING_SELECTION
+                    )
                     val sealedPayload = DirectSwitchCrypto.sealJsonEnvelope(snapshot.toCompactJson(), pinKey)
                     writeRawEncryptedResponse(output, 200, sealedPayload)
+                }
+
+                method == "POST" && pathOnly == "/v1/pair-ack" -> {
+                    if (activeSessionId.isBlank()) {
+                        writeJsonResponse(output, 403, """{"error":"Sessione ricevente non attiva"}""")
+                        return
+                    }
+                    if (contentLength <= 0L || contentLength > 64L * 1024L) {
+                        writeJsonResponse(output, 400, """{"error":"Richiesta non valida"}""")
+                        return
+                    }
+                    val encryptedBody = readFixedBytes(input, contentLength.toInt())
+                    val plainJson = try {
+                        DirectSwitchCrypto.openJsonEnvelope(encryptedBody, sessionAesKey)
+                    } catch (_: Throwable) {
+                        writeJsonResponse(output, 401, """{"error":"Conferma non autenticata"}""")
+                        return
+                    }
+                    val req = runCatching {
+                        DirectSwitchJson.instance.decodeFromString<PairAckRequest>(plainJson)
+                    }.getOrNull()
+                    if (req == null || req.sessionId != activeSessionId) {
+                        writeJsonResponse(output, 401, """{"error":"SessionId non valido"}""")
+                        return
+                    }
+                    if (_progress.value.isCompleted) {
+                        manifestMap.clear()
+                        completedIds.clear()
+                        skippedIds.clear()
+                        docFolderCounts.clear()
+                        transferredBytesCounter.set(0L)
+                        completedFilesCounter.set(0)
+                        synchronized(rxProgressLock) {
+                            rxProgressAccounting = null
+                            rxSpeedMeter = SlidingTransferSpeedMeter()
+                            rxEtaTracker.reset()
+                        }
+                    }
+                    _progress.value = LiveTransferProgress(
+                        phaseLabel = "Collegato a ${req.senderName}! Prosegui sull'altro telefono.",
+                        peerDeviceName = req.senderName,
+                        peerPlatform = req.senderPlatform,
+                        sessionStage = TransferSessionStage.PAIRED_WAITING_SELECTION
+                    )
+                    writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
+                }
+
+                method == "POST" && pathOnly == "/v1/pair-reset" -> {
+                    if (activeSessionId.isNotBlank() && contentLength > 0L && contentLength <= 64L * 1024L) {
+                        val encryptedBody = readFixedBytes(input, contentLength.toInt())
+                        runCatching { DirectSwitchCrypto.openJsonEnvelope(encryptedBody, sessionAesKey) }.onSuccess {
+                            if (_progress.value.sessionStage == TransferSessionStage.PAIRED_WAITING_SELECTION) {
+                                pinPairingConsumed.set(false)
+                                _progress.value = LiveTransferProgress(
+                                    phaseLabel = "In ascolto — Inquadra il QR o inserisci il PIN ${_activePairingPin.value}",
+                                    sessionStage = TransferSessionStage.WAITING_PAIRING
+                                )
+                            }
+                        }
+                    }
+                    writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
+                }
+
+                method == "POST" && pathOnly == "/v1/prepare" -> {
+                    if (activeSessionId.isBlank()) {
+                        writeJsonResponse(output, 403, """{"error":"Sessione ricevente non attiva"}""")
+                        return
+                    }
+                    if (contentLength <= 0L || contentLength > 128L * 1024L) {
+                        writeJsonResponse(output, 400, """{"error":"Payload prepare non valido"}""")
+                        return
+                    }
+                    val encryptedBody = readFixedBytes(input, contentLength.toInt())
+                    val plainJson = try {
+                        DirectSwitchCrypto.openJsonEnvelope(encryptedBody, sessionAesKey)
+                    } catch (_: Throwable) {
+                        writeJsonResponse(output, 401, """{"error":"Prepare non autenticato"}""")
+                        return
+                    }
+                    val req = DirectSwitchJson.instance.decodeFromString<TransferPrepareRequest>(plainJson)
+                    if (req.sessionId != activeSessionId) {
+                        writeJsonResponse(output, 401, """{"error":"SessionId non valido"}""")
+                        return
+                    }
+                    manifestMap.clear()
+                    completedIds.clear()
+                    skippedIds.clear()
+                    docFolderCounts.clear()
+                    transferredBytesCounter.set(0L)
+                    completedFilesCounter.set(0)
+                    requestedWhatsAppMigration.set(req.transferScope.whatsApp)
+                    synchronized(rxProgressLock) {
+                        rxProgressAccounting = null
+                        rxSpeedMeter = SlidingTransferSpeedMeter()
+                        rxEtaTracker.reset()
+                    }
+                    _progress.value = LiveTransferProgress(
+                        phaseLabel = "Sto preparando la ricezione da ${req.senderName}...",
+                        peerDeviceName = req.senderName,
+                        peerPlatform = req.senderPlatform,
+                        activeTransferScope = req.transferScope,
+                        sessionStage = if (req.transferScope.isWhatsAppOnly) {
+                            TransferSessionStage.TRANSFERRING
+                        } else {
+                            TransferSessionStage.PREPARING
+                        }
+                    )
+                    writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
                 }
 
                 method == "POST" && pathOnly == "/v1/handshake" -> {
@@ -555,12 +677,18 @@ class DirectSwitchTransferServer(
                     transferStartMillis = System.currentTimeMillis()
                     handshakeCompleted.set(enoughSpace)
 
+                    val nextScope = req.transferScope ?: _progress.value.activeTransferScope
                     _progress.value = _progress.value.copy(
-                        phaseLabel = "Connesso in modo sicuro a ${req.senderName}!",
+                        phaseLabel = "Sto preparando la ricezione da ${req.senderName}...",
                         peerDeviceName = req.senderName,
                         peerPlatform = req.senderPlatform,
                         licenseTier = activeTier,
-                        activeTransferScope = req.transferScope ?: _progress.value.activeTransferScope
+                        activeTransferScope = nextScope,
+                        sessionStage = if (nextScope.isWhatsAppOnly) {
+                            TransferSessionStage.TRANSFERRING
+                        } else {
+                            TransferSessionStage.PREPARING
+                        }
                     )
 
                     val resp = HandshakeResponse(
@@ -661,7 +789,7 @@ class DirectSwitchTransferServer(
                         )
                     }
                     _progress.value = _progress.value.copy(
-                        phaseLabel = "Ricezione file in streaming cifrato...",
+                        phaseLabel = if (acceptedItems.isEmpty()) "Finalizzazione dati ricevuti..." else "Pronto per la ricezione (${acceptedItems.size} elementi)...",
                         totalItems = acceptedItems.size,
                         totalBytes = totalBytesToReceive,
                         etaLabel = initialEtaLabel,
@@ -685,6 +813,42 @@ class DirectSwitchTransferServer(
                         gatedByCrossOsPreviewCount = gatedCount
                     )
                     writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(resp))
+                }
+
+                method == "POST" && pathOnly == "/v1/begin-transfer" -> {
+                    if (!handshakeCompleted.get()) {
+                        writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
+                        return
+                    }
+                    if (contentLength > 0L) {
+                        val encryptedBody = readFixedBytes(input, contentLength.toInt())
+                        try {
+                            DirectSwitchCrypto.openJsonEnvelope(encryptedBody, sessionAesKey)
+                        } catch (_: Throwable) {
+                            writeJsonResponse(output, 401, """{"error":"Begin non autenticato"}""")
+                            return
+                        }
+                    }
+                    if (!_progress.value.isCompleted) {
+                        val initialEtaLabel = synchronized(rxProgressLock) {
+                            val acc = rxProgressAccounting
+                            if (acc != null) {
+                                rxEtaTracker.reset(initialFraction = acc.progressFraction)
+                                rxEtaTracker.currentLabel(
+                                    isCompleted = false,
+                                    hasTransferableItems = acc.initialTotalItems > 0
+                                )
+                            } else {
+                                _progress.value.etaLabel
+                            }
+                        }
+                        _progress.value = _progress.value.copy(
+                            phaseLabel = if (_progress.value.totalItems > 0) "Copia diretta cifrata in corso..." else "Finalizzazione...",
+                            sessionStage = TransferSessionStage.TRANSFERRING,
+                            etaLabel = initialEtaLabel
+                        )
+                    }
+                    writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
                 }
 
                 method == "PUT" && pathOnly.startsWith("/v1/item/") -> {
@@ -721,10 +885,20 @@ class DirectSwitchTransferServer(
                             return
                         }
 
-                        val sanitizedFileName = File(item.fileName).name
+                        val baseSanitizedFileName = File(item.fileName).name
                             .replace(Regex("[\\\\/:*?\"<>|]"), "_")
                             .ifBlank { "file_${safeTempId}" }
-                        val safeItem = item.copy(fileName = sanitizedFileName)
+                        val reconciledMedia = if (item.category == TransferCategory.PHOTOS || item.category == TransferCategory.VIDEOS) {
+                            MediaFallbackNaming.reconcileFileNameAndMime(
+                                fileName = baseSanitizedFileName,
+                                originalMime = item.mimeType,
+                                actualExtension = headers["x-ds-actual-ext"]
+                            )
+                        } else {
+                            Triple(baseSanitizedFileName, item.mimeType, "")
+                        }
+                        val sanitizedFileName = reconciledMedia.first
+                        val safeItem = item.copy(fileName = sanitizedFileName, mimeType = reconciledMedia.second)
 
                         val subFolder = if (safeItem.category == TransferCategory.WHATSAPP_VAULT) {
                             val cleanWaRel = PublicDownloadsSaver.sanitizedRelativeSegments(safeItem.relativeAlbumOrFolder)
@@ -796,6 +970,7 @@ class DirectSwitchTransferServer(
                             totalBytes = reconciledTotalBytes,
                             speedMegabytesPerSec = speedMbs,
                             etaLabel = etaStr,
+                            sessionStage = TransferSessionStage.TRANSFERRING,
                             receivedDocumentFolders = docFolderCounts.toMap()
                         )
                         writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes,"sha256":"$actualSha256"}""")
@@ -865,6 +1040,7 @@ class DirectSwitchTransferServer(
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Trasferimento completato con successo!",
                         etaLabel = null,
+                        sessionStage = TransferSessionStage.COMPLETED,
                         isCompleted = true,
                         pendingNativeWhatsAppMigration = requestedWhatsAppMigration.get()
                     )
@@ -1099,8 +1275,81 @@ class DirectSwitchTransferClient(private val context: Context) {
     private val _progress = MutableStateFlow(LiveTransferProgress())
     val progress: StateFlow<LiveTransferProgress> = _progress
 
+    @Volatile
+    private var prepAnimDeferred: CompletableDeferred<Unit>? = null
+
+    fun markPreparationAnimationCompleted() {
+        prepAnimDeferred?.complete(Unit)
+    }
+
     fun resetProgress() {
+        prepAnimDeferred?.complete(Unit)
+        prepAnimDeferred = null
         _progress.value = LiveTransferProgress()
+    }
+
+    suspend fun sendPairAck(qrPayload: QrPairingPayload) = withContext(Dispatchers.IO) {
+        val channel = resolveChannel(
+            candidateIps = qrPayload.ips,
+            port = qrPayload.port,
+            wifiSsid = qrPayload.wifiSsid,
+            wifiPass = qrPayload.wifiPass
+        ) ?: return@withContext
+        try {
+            val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
+            val ack = PairAckRequest(
+                sessionId = qrPayload.sessionId,
+                senderName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
+                senderPlatform = DevicePlatform.ANDROID
+            )
+            runCatching {
+                postEncryptedJson(
+                    client = channel.client,
+                    url = "http://${channel.reachableIp}:${qrPayload.port}/v1/pair-ack",
+                    plainJson = DirectSwitchJson.instance.encodeToString(ack),
+                    aesKey = sessionAesKey
+                )
+            }
+        } finally {
+            channel.cleanup()
+        }
+    }
+
+    suspend fun sendPairReset(qrPayload: QrPairingPayload) = withContext(Dispatchers.IO) {
+        val channel = resolveChannel(qrPayload.ips, qrPayload.port, null, null) ?: return@withContext
+        try {
+            val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
+            runCatching {
+                postEncryptedJson(
+                    client = channel.client,
+                    url = "http://${channel.reachableIp}:${qrPayload.port}/v1/pair-reset",
+                    plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                    aesKey = sessionAesKey
+                )
+            }
+        } finally {
+            channel.cleanup()
+        }
+    }
+
+    private fun buildInitialPreparationItems(
+        scope: ActiveTransferScope,
+        includeSms: Boolean
+    ): List<TransferPreparationItem> = buildList {
+        if (scope.contacts) add(TransferPreparationItem("contacts", "Rubrica contatti", "contatto", "contatti"))
+        if (scope.photos) add(TransferPreparationItem("photos", "Foto e Album", "foto", "foto"))
+        if (scope.videos) add(TransferPreparationItem("videos", "Video originali", "video", "video"))
+        if (scope.calendars) add(TransferPreparationItem("calendars", "Calendari", "evento", "eventi"))
+        if (includeSms) add(TransferPreparationItem("sms", "Messaggi SMS", "messaggio", "messaggi"))
+        if (scope.documents) add(TransferPreparationItem("documents", "Documenti e File", "file", "file"))
+        if (scope.apps) add(TransferPreparationItem("apps", "App scaricate", "app", "app"))
+    }
+
+    private fun updatePreparationItem(id: String, targetCount: Int, isReady: Boolean) {
+        val updated = _progress.value.preparationItems.map { item ->
+            if (item.id == id) item.copy(targetCount = targetCount.coerceAtLeast(0), isReady = isReady) else item
+        }
+        _progress.value = _progress.value.copy(preparationItems = updated)
     }
 
     /**
@@ -1165,62 +1414,122 @@ class DirectSwitchTransferClient(private val context: Context) {
     ): Result<TransferCompletionReport> = withContext(Dispatchers.IO) {
         var boundChannel: BoundHttpChannel? = null
         DirectSwitchKeepAliveService.start(context, "Invio dati verso ${qrPayload.receiverName}...")
+        val senderScope = ActiveTransferScope(
+            contacts = includeContacts,
+            photos = includePhotos,
+            videos = includeVideos,
+            calendars = includeCalendars,
+            documents = includeDocuments,
+            apps = includeInstalledApps,
+            whatsApp = includeWhatsAppVault
+        )
+        val initialPrepItems = if (senderScope.isWhatsAppOnly) {
+            emptyList()
+        } else {
+            buildInitialPreparationItems(senderScope, includeSms)
+        }
+        val prepDeferred = CompletableDeferred<Unit>()
+        prepAnimDeferred = prepDeferred
         try {
-            _progress.value = LiveTransferProgress(phaseLabel = "Ricerca canale diretto più veloce verso ${qrPayload.receiverName}...")
+            _progress.value = LiveTransferProgress(
+                phaseLabel = if (senderScope.isWhatsAppOnly) {
+                    "Connessione con ${qrPayload.receiverName}..."
+                } else {
+                    "Sto preparando il trasferimento verso ${qrPayload.receiverName}..."
+                },
+                peerDeviceName = qrPayload.receiverName,
+                peerPlatform = qrPayload.receiverPlatform,
+                activeTransferScope = senderScope,
+                sessionStage = if (senderScope.isWhatsAppOnly) {
+                    TransferSessionStage.TRANSFERRING
+                } else {
+                    TransferSessionStage.PREPARING
+                },
+                preparationItems = initialPrepItems,
+                arePreparationItemsReady = senderScope.isWhatsAppOnly
+            )
 
             val channel = resolveChannel(
                 candidateIps = qrPayload.ips,
                 port = qrPayload.port,
                 wifiSsid = qrPayload.wifiSsid,
                 wifiPass = qrPayload.wifiPass
-            ) ?: return@withContext Result.failure(
-                IllegalStateException(
-                    if (qrPayload.receiverPlatform == DevicePlatform.IOS) {
-                        "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che sull'iPhone sia attiva Impostazioni → App → DirectSwitch → Rete locale e che entrambi i telefoni siano sulla stessa Wi-Fi."
-                    } else {
-                        "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che entrambi i telefoni siano sulla stessa Wi-Fi o accetta la connessione all'Hotspot DirectSwitch."
-                    }
+            ) ?: run {
+                val msg = if (qrPayload.receiverPlatform == DevicePlatform.IOS) {
+                    "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che sull'iPhone sia attiva Impostazioni → App → DirectSwitch → Rete locale e che entrambi i telefoni siano sulla stessa Wi-Fi."
+                } else {
+                    "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che entrambi i telefoni siano sulla stessa Wi-Fi o accetta la connessione all'Hotspot DirectSwitch."
+                }
+                _progress.value = _progress.value.copy(
+                    sessionStage = TransferSessionStage.TRANSFERRING,
+                    errorMessage = msg
                 )
-            )
+                return@withContext Result.failure(IllegalStateException(msg))
+            }
             boundChannel = channel
             val activeClient = channel.client
 
             val baseUrl = "http://${channel.reachableIp}:${qrPayload.port}"
             val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
 
-            // 1. Raccolta dati locali selezionati
-            val senderScope = ActiveTransferScope(
-                contacts = includeContacts,
-                photos = includePhotos,
-                videos = includeVideos,
-                calendars = includeCalendars,
-                documents = includeDocuments,
-                apps = includeInstalledApps,
-                whatsApp = includeWhatsAppVault
-            )
+            if (!senderScope.isWhatsAppOnly) {
+                val prepReq = TransferPrepareRequest(
+                    sessionId = qrPayload.sessionId,
+                    senderName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
+                    senderPlatform = DevicePlatform.ANDROID,
+                    transferScope = senderScope
+                )
+                runCatching {
+                    postEncryptedJson(
+                        client = activeClient,
+                        url = "$baseUrl/v1/prepare",
+                        plainJson = DirectSwitchJson.instance.encodeToString(prepReq),
+                        aesKey = sessionAesKey
+                    )
+                }
+            }
+
+            // 1. Raccolta dati locali selezionati con conteggio progressivo per la schermata di preparazione
             val endOfTodayCutoff = CalendarMigrator.endOfDayMillis()
             val contacts = if (includeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
+            if (includeContacts) updatePreparationItem("contacts", contacts.size, isReady = true)
+
+            val photoEntries = if (includePhotos) {
+                MediaExifScannerAndImporter.scanMediaEntries(context, includePhotos = true, includeVideos = false)
+            } else emptyList()
+            if (includePhotos) updatePreparationItem("photos", photoEntries.size, isReady = true)
+
+            val videoEntries = if (includeVideos) {
+                MediaExifScannerAndImporter.scanMediaEntries(context, includePhotos = false, includeVideos = true)
+            } else emptyList()
+            if (includeVideos) updatePreparationItem("videos", videoEntries.size, isReady = true)
+
             val calendars = if (includeCalendars) {
                 CalendarMigrator.readEvents(context, upToEpochMillis = if (calendarsUpToTodayOnly) endOfTodayCutoff else null)
             } else emptyList()
+            if (includeCalendars) updatePreparationItem("calendars", calendars.size, isReady = true)
+
             val smsList = if (includeSms) {
                 SmsSystemScanner.readAllSms(context, upToEpochMillis = if (smsUpToTodayOnly) endOfTodayCutoff else null)
             } else emptyList()
-            val installedApps = if (includeInstalledApps) {
-                installedAppsOverride ?: InstalledAppsScanner.scanUserInstalledApps(context)
-            } else emptyList()
-            val mediaEntries = MediaExifScannerAndImporter.scanMediaEntries(
-                context = context,
-                includePhotos = includePhotos,
-                includeVideos = includeVideos
-            ) + DocumentsAndWhatsAppScanner.scanDocumentAndWhatsAppEntries(
+            if (includeSms) updatePreparationItem("sms", smsList.size, isReady = true)
+
+            val docEntries = DocumentsAndWhatsAppScanner.scanDocumentAndWhatsAppEntries(
                 context = context,
                 includeDocuments = includeDocuments,
                 includeWhatsAppVault = false
             )
+            if (includeDocuments) updatePreparationItem("documents", docEntries.size, isReady = true)
+
+            val installedApps = if (includeInstalledApps) {
+                installedAppsOverride ?: InstalledAppsScanner.scanUserInstalledApps(context)
+            } else emptyList()
+            if (includeInstalledApps) updatePreparationItem("apps", installedApps.size, isReady = true)
+
+            val mediaEntries = photoEntries + videoEntries + docEntries
             val estimatedBytes = mediaEntries.sumOf { it.manifestItem.sizeBytes }
 
-            // 2. Handshake Cifrato + Verifica Single-Side Pro License + Spazio Disco
+            // 2. Handshake Cifrato + Spazio Disco
             val handshakeReq = HandshakeRequest(
                 sessionId = qrPayload.sessionId,
                 senderName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
@@ -1241,12 +1550,14 @@ class DirectSwitchTransferClient(private val context: Context) {
             if (!handshakeResp.hasEnoughSpace) {
                 val neededMb = (estimatedBytes / (1024 * 1024)).coerceAtLeast(1L)
                 val msg = "Spazio insufficiente su ${handshakeResp.receiverName}: servono circa $neededMb MB liberi."
-                _progress.value = _progress.value.copy(errorMessage = msg)
+                _progress.value = _progress.value.copy(
+                    sessionStage = TransferSessionStage.TRANSFERRING,
+                    errorMessage = msg
+                )
                 return@withContext Result.failure(IllegalStateException(msg))
             }
 
             _progress.value = _progress.value.copy(
-                phaseLabel = "Sincronizzazione Smart Merge (Zero Duplicati)...",
                 peerDeviceName = handshakeResp.receiverName,
                 peerPlatform = handshakeResp.receiverPlatform,
                 licenseTier = handshakeResp.licenseTier,
@@ -1284,11 +1595,27 @@ class DirectSwitchTransferClient(private val context: Context) {
             )
             val speedMeter = SlidingTransferSpeedMeter()
             val etaTracker = TenPercentSteppedEtaTracker()
-            etaTracker.reset(initialFraction = accounting.progressFraction)
             val progressLock = Mutex()
 
+            if (!senderScope.isWhatsAppOnly) {
+                _progress.value = _progress.value.copy(arePreparationItemsReady = true)
+                withTimeoutOrNull(1_100L) {
+                    prepDeferred.await()
+                }
+                runCatching {
+                    postEncryptedJson(
+                        client = activeClient,
+                        url = "$baseUrl/v1/begin-transfer",
+                        plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                        aesKey = sessionAesKey
+                    )
+                }
+            }
+
+            etaTracker.reset(initialFraction = accounting.progressFraction)
             _progress.value = _progress.value.copy(
-                phaseLabel = "Trasferimento diretto cifrato in corso...",
+                phaseLabel = if (entriesToUpload.isNotEmpty()) "Trasferimento diretto cifrato in corso..." else "Sincronizzazione completata!",
+                sessionStage = TransferSessionStage.TRANSFERRING,
                 totalItems = entriesToUpload.size,
                 totalBytes = totalBytes,
                 etaLabel = etaTracker.currentLabel(
@@ -1483,13 +1810,16 @@ class DirectSwitchTransferClient(private val context: Context) {
             _progress.value = _progress.value.copy(
                 phaseLabel = doneLabel,
                 etaLabel = null,
+                sessionStage = TransferSessionStage.COMPLETED,
                 isCompleted = true,
                 failedItemsCount = failedCount,
                 pendingNativeWhatsAppMigration = wantNativeWa
             )
             Result.success(report)
         } catch (t: Throwable) {
+            prepAnimDeferred?.complete(Unit)
             _progress.value = _progress.value.copy(
+                sessionStage = TransferSessionStage.TRANSFERRING,
                 errorMessage = t.localizedMessage ?: "Errore durante il trasferimento"
             )
             Result.failure(t)

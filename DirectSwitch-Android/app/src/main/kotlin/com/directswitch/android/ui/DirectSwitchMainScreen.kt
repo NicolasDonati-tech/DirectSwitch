@@ -21,7 +21,6 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -56,12 +55,12 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PhoneIphone
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Videocam
@@ -88,6 +87,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -114,12 +114,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.migrators.CalendarMigrator
-import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.ContactsPreloadState
 import com.directswitch.android.migrators.ContactsSmartMerger
 import com.directswitch.android.migrators.DateSyncPreloadState
 import com.directswitch.android.migrators.DeviceDataAnalyzer
-import com.directswitch.android.migrators.DirectSwitchBillingManager
 import com.directswitch.android.migrators.DocumentPrecheckReport
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.GoogleSetupBridge
@@ -131,12 +129,12 @@ import com.directswitch.android.migrators.PhotosPreloadState
 import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.VideosPreloadState
-import com.directswitch.android.migrators.findHostActivity
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.QrPairingPayload
-import com.directswitch.android.protocol.SessionLicenseTier
+import com.directswitch.android.protocol.TransferPreparationItem
+import com.directswitch.android.protocol.TransferSessionStage
 import com.directswitch.android.transport.DirectSwitchAutoDiscovery
 import com.directswitch.android.transport.DirectSwitchTransferClient
 import com.directswitch.android.transport.DirectSwitchTransferServer
@@ -163,6 +161,7 @@ import com.google.zxing.ReaderException
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -172,8 +171,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 private enum class WizardStep {
     HOME,
     RECEIVER_WAIT_CODE,
+    RECEIVER_CONNECTED,
     SENDER_CONNECT,
     SENDER_SELECT_CATEGORIES,
+    TRANSFER_PREPARING,
     TRANSFER_PROGRESS,
     QUICK_PORTAL
 }
@@ -200,13 +201,6 @@ fun DirectSwitchMainScreen(
 
     var step by remember { mutableStateOf(WizardStep.HOME) }
     var scanSummary by remember { mutableStateOf<LocalDeviceScanSummary?>(null) }
-    var isProUnlocked by remember {
-        mutableStateOf(
-            CloudSaveEntitlementDetector.isLocalProUnlocked(context) ||
-                CloudSaveEntitlementDetector.hasVerifiedCloudSaveProEntitlement(context)
-        )
-    }
-    val hasCloudSaveInstalled = remember { CloudSaveEntitlementDetector.isCloudSaveInstalled(context) }
 
     val server = remember { DirectSwitchTransferServer(context) }
     val client = remember { DirectSwitchTransferClient(context) }
@@ -249,18 +243,9 @@ fun DirectSwitchMainScreen(
     var isLoadingAppsCatalog by remember { mutableStateOf(false) }
     var isReceiverFlow by remember { mutableStateOf(false) }
 
-    var showProSheet by remember { mutableStateOf(false) }
     var showGoogleBridgeSheet by remember { mutableStateOf(false) }
     var googleBridgeNote by remember { mutableStateOf<String?>(null) }
-    var billingStatusNote by remember { mutableStateOf<String?>(null) }
     var pendingPermissionContinuation by remember { mutableStateOf<(() -> Unit)?>(null) }
-
-    val billingManager = remember {
-        DirectSwitchBillingManager(context) { unlocked, message ->
-            if (unlocked) isProUnlocked = true
-            billingStatusNote = message
-        }
-    }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -524,13 +509,21 @@ fun DirectSwitchMainScreen(
     fun handleBack() {
         when (step) {
             WizardStep.HOME -> Unit
-            WizardStep.RECEIVER_WAIT_CODE, WizardStep.QUICK_PORTAL, WizardStep.TRANSFER_PROGRESS -> resetAndGoHome()
+            WizardStep.RECEIVER_WAIT_CODE,
+            WizardStep.RECEIVER_CONNECTED,
+            WizardStep.TRANSFER_PREPARING,
+            WizardStep.QUICK_PORTAL,
+            WizardStep.TRANSFER_PROGRESS -> resetAndGoHome()
             WizardStep.SENDER_CONNECT -> {
                 showCameraScanner = false
                 autoDiscovery.stopScanning()
                 step = WizardStep.HOME
             }
             WizardStep.SENDER_SELECT_CATEGORIES -> {
+                val previousTarget = pairedTargetPayload
+                if (previousTarget != null) {
+                    scope.launch { client.sendPairReset(previousTarget) }
+                }
                 pairedTargetPayload = null
                 pinInput = ""
                 pinErrorNote = null
@@ -545,7 +538,6 @@ fun DirectSwitchMainScreen(
     }
 
     LaunchedEffect(Unit) {
-        billingManager.connectAndRestorePurchases()
         scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
     }
 
@@ -561,16 +553,65 @@ fun DirectSwitchMainScreen(
         }
     }
 
-    LaunchedEffect(serverProgress.peerDeviceName) {
-        if (step == WizardStep.RECEIVER_WAIT_CODE && serverProgress.peerDeviceName.isNotEmpty()) {
-            isReceiverFlow = true
+    LaunchedEffect(serverProgress.sessionStage, serverProgress.errorMessage, isReceiverFlow, step) {
+        if (!isReceiverFlow && step != WizardStep.RECEIVER_WAIT_CODE && step != WizardStep.RECEIVER_CONNECTED) {
+            return@LaunchedEffect
+        }
+        when (serverProgress.sessionStage) {
+            TransferSessionStage.WAITING_PAIRING -> {
+                if (step == WizardStep.RECEIVER_CONNECTED) {
+                    step = WizardStep.RECEIVER_WAIT_CODE
+                }
+            }
+            TransferSessionStage.PAIRED_WAITING_SELECTION -> {
+                if (step == WizardStep.RECEIVER_WAIT_CODE) {
+                    isReceiverFlow = true
+                    step = WizardStep.RECEIVER_CONNECTED
+                }
+            }
+            TransferSessionStage.PREPARING -> {
+                if (step == WizardStep.RECEIVER_WAIT_CODE || step == WizardStep.RECEIVER_CONNECTED) {
+                    isReceiverFlow = true
+                    step = WizardStep.TRANSFER_PREPARING
+                }
+            }
+            TransferSessionStage.TRANSFERRING, TransferSessionStage.COMPLETED -> {
+                if (step == WizardStep.RECEIVER_WAIT_CODE ||
+                    step == WizardStep.RECEIVER_CONNECTED ||
+                    step == WizardStep.TRANSFER_PREPARING
+                ) {
+                    isReceiverFlow = true
+                    step = WizardStep.TRANSFER_PROGRESS
+                }
+            }
+        }
+        if (serverProgress.errorMessage != null && step == WizardStep.TRANSFER_PREPARING && isReceiverFlow) {
+            step = WizardStep.TRANSFER_PROGRESS
+        }
+    }
+
+    LaunchedEffect(clientProgress.sessionStage, clientProgress.errorMessage, isReceiverFlow, step) {
+        if (isReceiverFlow) return@LaunchedEffect
+        when (clientProgress.sessionStage) {
+            TransferSessionStage.PREPARING -> {
+                if (step == WizardStep.SENDER_SELECT_CATEGORIES) {
+                    step = WizardStep.TRANSFER_PREPARING
+                }
+            }
+            TransferSessionStage.TRANSFERRING, TransferSessionStage.COMPLETED -> {
+                if (step == WizardStep.TRANSFER_PREPARING) {
+                    step = WizardStep.TRANSFER_PROGRESS
+                }
+            }
+            else -> Unit
+        }
+        if (clientProgress.errorMessage != null && step == WizardStep.TRANSFER_PREPARING) {
             step = WizardStep.TRANSFER_PROGRESS
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            billingManager.endConnection()
             autoDiscovery.stopAdvertising()
             autoDiscovery.stopScanning()
             server.stop()
@@ -585,7 +626,12 @@ fun DirectSwitchMainScreen(
         val appsOverride = if (categories.installedApps && detectedAppsCatalog.isNotEmpty()) {
             detectedAppsCatalog.filter { it.packageName !in deselectedAppPackages }
         } else null
-        step = WizardStep.TRANSFER_PROGRESS
+        val isWhatsAppOnly = targetPayload.receiverPlatform != DevicePlatform.IOS &&
+            categories.whatsAppVault &&
+            !categories.contacts && !categories.photos && !categories.videos &&
+            !categories.calendars && !categories.sms && !categories.documents &&
+            !categories.installedApps
+        step = if (isWhatsAppOnly) WizardStep.TRANSFER_PROGRESS else WizardStep.TRANSFER_PREPARING
         scope.launch {
             client.executeTransfer(
                 qrPayload = targetPayload,
@@ -607,8 +653,10 @@ fun DirectSwitchMainScreen(
     val topTitle = when (step) {
         WizardStep.HOME -> "DirectSwitch"
         WizardStep.RECEIVER_WAIT_CODE -> "Ricevi dati"
+        WizardStep.RECEIVER_CONNECTED -> "Collegato"
         WizardStep.SENDER_CONNECT -> "Collega telefono"
         WizardStep.SENDER_SELECT_CATEGORIES -> "Cosa copiare"
+        WizardStep.TRANSFER_PREPARING -> "Preparazione"
         WizardStep.TRANSFER_PROGRESS -> {
             val done = if (isReceiverFlow) serverProgress.isCompleted else clientProgress.isCompleted
             if (done) "Completato" else "Copia dati"
@@ -625,9 +673,7 @@ fun DirectSwitchMainScreen(
         AppleTopNavigationBar(
             title = topTitle,
             showBackButton = step != WizardStep.HOME,
-            isProUnlocked = isProUnlocked,
-            onBack = { handleBack() },
-            onTapPassBadge = { showProSheet = true }
+            onBack = { handleBack() }
         )
 
         Column(
@@ -748,6 +794,13 @@ fun DirectSwitchMainScreen(
                     )
                 }
 
+                WizardStep.RECEIVER_CONNECTED -> {
+                    ReceiverConnectedWizardView(
+                        peerDeviceName = serverProgress.peerDeviceName,
+                        onCancel = { resetAndGoHome() }
+                    )
+                }
+
                 WizardStep.SENDER_CONNECT -> {
                     SenderConnectWizardView(
                         discoveredDevices = discoveredDevices,
@@ -778,6 +831,7 @@ fun DirectSwitchMainScreen(
                                 res.onSuccess { paired ->
                                     autoDiscovery.stopScanning()
                                     pairedTargetPayload = paired
+                                    scope.launch { client.sendPairAck(paired) }
                                     step = WizardStep.SENDER_SELECT_CATEGORIES
                                 }.onFailure { err ->
                                     pinErrorNote = err.localizedMessage ?: "Codice errato o scaduto."
@@ -792,6 +846,7 @@ fun DirectSwitchMainScreen(
                                     autoDiscovery.stopScanning()
                                     pinErrorNote = null
                                     pairedTargetPayload = paired
+                                    scope.launch { client.sendPairAck(paired) }
                                     step = WizardStep.SENDER_SELECT_CATEGORIES
                                 }
                                 .onFailure {
@@ -808,6 +863,7 @@ fun DirectSwitchMainScreen(
                                     autoDiscovery.stopScanning()
                                     pinErrorNote = null
                                     pairedTargetPayload = paired
+                                    scope.launch { client.sendPairAck(paired) }
                                     step = WizardStep.SENDER_SELECT_CATEGORIES
                                 }
                                 .onFailure {
@@ -823,7 +879,6 @@ fun DirectSwitchMainScreen(
                         SenderCategoriesWizardView(
                             pairedPayload = target,
                             summary = scanSummary,
-                            isLocalPro = isProUnlocked,
                             categories = categories,
                             calendarsUpToTodayOnly = calendarsUpToTodayOnly,
                             smsUpToTodayOnly = smsUpToTodayOnly,
@@ -916,8 +971,11 @@ fun DirectSwitchMainScreen(
                                     scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
                                 }
                             },
-                            onOpenProSheet = { showProSheet = true },
                             onChangeDevice = {
+                                val previousTarget = pairedTargetPayload
+                                if (previousTarget != null) {
+                                    scope.launch { client.sendPairReset(previousTarget) }
+                                }
                                 pairedTargetPayload = null
                                 pinInput = ""
                                 autoDiscovery.startScanningForNewDevices()
@@ -949,12 +1007,19 @@ fun DirectSwitchMainScreen(
                     }
                 }
 
+                WizardStep.TRANSFER_PREPARING -> {
+                    TransferPreparationWizardView(
+                        progress = if (isReceiverFlow) serverProgress else clientProgress,
+                        isReceiver = isReceiverFlow,
+                        onPreparationCompleted = { client.markPreparationAnimationCompleted() },
+                        onCancel = { resetAndGoHome() }
+                    )
+                }
+
                 WizardStep.TRANSFER_PROGRESS -> {
                     TransferProgressWizardView(
                         progress = if (isReceiverFlow) serverProgress else clientProgress,
                         isReceiver = isReceiverFlow,
-                        isLocalPro = isProUnlocked,
-                        onOpenProSheet = { showProSheet = true },
                         onFinish = { resetAndGoHome() }
                     )
                 }
@@ -1059,29 +1124,6 @@ fun DirectSwitchMainScreen(
                 }
             }
         )
-    }
-
-    if (showProSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showProSheet = false },
-            sheetState = sheetState,
-            containerColor = DirectSwitchTheme.canvasMid
-        ) {
-            CrossOsProPassSheetContent(
-                isUnlocked = isProUnlocked,
-                hasCloudSave = hasCloudSaveInstalled,
-                billingNote = billingStatusNote,
-                onPurchasePass = { billingManager.launchCrossOsPassPurchase(context.findHostActivity()) },
-                onRestorePurchases = { billingManager.restoreExistingPurchases(userInitiated = true) },
-                onLockForTest = {
-                    CloudSaveEntitlementDetector.setLocalProUnlocked(context, false)
-                    isProUnlocked = false
-                    billingStatusNote = "Modalità Anteprima attivata (rubrica + 25 foto) per test."
-                },
-                onClose = { showProSheet = false }
-            )
-        }
     }
 
     if (showGoogleBridgeSheet) {
@@ -1361,7 +1403,7 @@ private fun ReceiverPairingWizardView(
             )
             Spacer(modifier = Modifier.size(10.dp))
             Text(
-                text = "In attesa dell'altro telefono...",
+                text = "In attesa di collegamento...",
                 fontSize = 14.sp,
                 color = DirectSwitchTheme.textSecondary
             )
@@ -1678,7 +1720,6 @@ private fun SenderConnectWizardView(
 private fun SenderCategoriesWizardView(
     pairedPayload: QrPairingPayload,
     summary: LocalDeviceScanSummary?,
-    isLocalPro: Boolean,
     categories: CategorySelectionState,
     calendarsUpToTodayOnly: Boolean,
     smsUpToTodayOnly: Boolean,
@@ -1714,13 +1755,11 @@ private fun SenderCategoriesWizardView(
     onRemoveSafLocation: (String) -> Unit,
     onRefreshDocumentCheck: () -> Unit,
     onClearPickedDocuments: () -> Unit,
-    onOpenProSheet: () -> Unit,
     onChangeDevice: () -> Unit,
     onStartTransfer: () -> Unit
 ) {
     val wizardContext = LocalContext.current
     val isCrossOs = pairedPayload.receiverPlatform == DevicePlatform.IOS
-    val isFullUnlocked = !isCrossOs || isLocalPro || pairedPayload.receiverHasPro
     val allSelected = categories.contacts && categories.photos && categories.videos &&
         categories.calendars && categories.sms && categories.documents &&
         (isCrossOs || categories.whatsAppVault) && categories.installedApps
@@ -1781,13 +1820,7 @@ private fun SenderCategoriesWizardView(
                     )
                     InfoCircleButton(
                         title = "Stato collegamento",
-                        message = if (!isCrossOs) {
-                            "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati."
-                        } else if (isFullUnlocked) {
-                            "Copia Speculare attiva: clona app, foto, video, documenti e contatti Android ↔ iPhone senza resettare. WhatsApp resta gratuito via QR."
-                        } else {
-                            "Con Copia Speculare sblocchi il clone completo di app, foto originali, video 4K, documenti e contatti tra Android e iPhone già configurati. Le chat WhatsApp restano sempre gratuite tramite procedura guidata QR."
-                        }
+                        message = "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati senza resettare il telefono."
                     )
                 }
             }
@@ -1798,25 +1831,6 @@ private fun SenderCategoriesWizardView(
                 color = DirectSwitchTheme.blue,
                 modifier = Modifier.clickable(onClick = onChangeDevice)
             )
-        }
-
-        if (isCrossOs && !isFullUnlocked) {
-            Surface(
-                onClick = onOpenProSheet,
-                shape = RoundedCornerShape(10.dp),
-                color = DirectSwitchTheme.premiumSurface,
-                border = BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Sblocca trasferimento completo con Premium Direct", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.premiumGold)
-                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.premiumGold)
-                }
-            }
         }
     }
 
@@ -1917,7 +1931,6 @@ private fun SenderCategoriesWizardView(
         iconColor = DirectSwitchTheme.indigo,
         title = "Calendari",
         countBadge = if (activeCalCount > 0) "$activeCalCount eventi" else null,
-        premiumBadge = isCrossOs && !isFullUnlocked,
         checked = categories.calendars,
         onCheckedChange = { onUpdateCategories(categories.copy(calendars = it)) }
     ) {
@@ -1945,7 +1958,6 @@ private fun SenderCategoriesWizardView(
         iconColor = DirectSwitchTheme.green,
         title = "Messaggi SMS",
         countBadge = if (activeSmsCount > 0) "$activeSmsCount messaggi" else null,
-        premiumBadge = isCrossOs && !isFullUnlocked,
         checked = categories.sms,
         onCheckedChange = { onUpdateCategories(categories.copy(sms = it)) }
     ) {
@@ -1976,7 +1988,6 @@ private fun SenderCategoriesWizardView(
         iconColor = DirectSwitchTheme.teal,
         title = "Documenti e Posizioni File",
         countBadge = docsBadge,
-        premiumBadge = isCrossOs && !isFullUnlocked,
         checked = categories.documents,
         onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
     ) {
@@ -2017,7 +2028,6 @@ private fun SenderCategoriesWizardView(
         iconColor = DirectSwitchTheme.blue,
         title = "App scaricate",
         countBadge = if (selectedAppsCount > 0) "$selectedAppsCount app pronte" else null,
-        premiumBadge = isCrossOs && !isFullUnlocked,
         checked = categories.installedApps,
         onCheckedChange = { onUpdateCategories(categories.copy(installedApps = it)) }
     ) {
@@ -2077,8 +2087,6 @@ private fun SenderCategoriesWizardView(
 private fun TransferProgressWizardView(
     progress: LiveTransferProgress,
     isReceiver: Boolean,
-    isLocalPro: Boolean = false,
-    onOpenProSheet: () -> Unit = {},
     onFinish: () -> Unit
 ) {
     val context = LocalContext.current
@@ -2251,12 +2259,29 @@ private fun TransferProgressWizardView(
         }
 
         if (!progress.isCompleted && !progress.etaLabel.isNullOrBlank()) {
-            Text(
-                text = progress.etaLabel,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = DirectSwitchTheme.blue
-            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DirectSwitchTheme.blue.copy(alpha = 0.09f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Schedule,
+                    contentDescription = null,
+                    tint = DirectSwitchTheme.blue,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = progress.etaLabel,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = DirectSwitchTheme.blue
+                )
+            }
         }
     }
 
@@ -2287,10 +2312,6 @@ private fun TransferProgressWizardView(
         if (progress.failedItemsCount > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.Warning, DirectSwitchTheme.orange, "File non disponibili saltati", "${progress.failedItemsCount}")
-        }
-        if (progress.gatedPreviewCount > 0) {
-            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.LockOpen, DirectSwitchTheme.blue, "Extra bloccati (solo 25 gratis Cross-OS)", "${progress.gatedPreviewCount}")
         }
     }
 
@@ -2400,32 +2421,6 @@ private fun TransferProgressWizardView(
             isReceiver = isReceiver,
             peerPlatform = progress.peerPlatform
         )
-    }
-    if (progress.isCompleted && progress.gatedPreviewCount > 0 && !isLocalPro) {
-        DirectSwitchCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, DirectSwitchTheme.premiumBorder, RoundedCornerShape(18.dp)),
-            padding = 14.dp
-        ) {
-            Text(
-                text = "Modalità Anteprima: ${progress.gatedPreviewCount} altri elementi pronti",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = DirectSwitchTheme.textPrimary
-            )
-            Text(
-                text = "Sblocca Premium Direct per trasferire tutte le foto, video originali, calendari, messaggi e documenti.",
-                fontSize = 13.sp,
-                color = DirectSwitchTheme.textSecondary
-            )
-            DirectSwitchPrimaryButton(
-                text = "Sblocca Premium Direct",
-                icon = Icons.Filled.LockOpen,
-                containerColor = DirectSwitchTheme.premiumGold,
-                onClick = onOpenProSheet
-            )
-        }
     }
 
     if (progress.errorMessage != null) {
@@ -2741,117 +2736,265 @@ private fun ReceiverAppsMirrorCard(
     }
 }
 
-// MARK: - Bottom Sheet Premium Direct (Passaggio completo iPhone <-> Android)
+// MARK: - Schermate sincronizzate (Collegato + Preparazione con conteggio rapido -> 0%)
 
 @Composable
-private fun CrossOsProPassSheetContent(
-    isUnlocked: Boolean,
-    hasCloudSave: Boolean,
-    billingNote: String?,
-    onPurchasePass: () -> Unit,
-    onRestorePurchases: () -> Unit,
-    onLockForTest: () -> Unit = {},
-    onClose: () -> Unit
+private fun ReceiverConnectedWizardView(
+    peerDeviceName: String,
+    onCancel: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(DirectSwitchTheme.backgroundBrush)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+            .padding(top = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = DirectSwitchTheme.premiumSurface,
-            border = androidx.compose.foundation.BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f))
+        Box(
+            modifier = Modifier
+                .size(68.dp)
+                .clip(CircleShape)
+                .background(DirectSwitchTheme.green.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = "COPIA SPECULARE iPHONE ↔ ANDROID",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = DirectSwitchTheme.premiumGold,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+            Icon(
+                imageVector = Icons.Filled.CheckCircle,
+                contentDescription = null,
+                tint = DirectSwitchTheme.green,
+                modifier = Modifier.size(40.dp)
             )
         }
+        Text(
+            text = "Collegato!",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = DirectSwitchTheme.textPrimary
+        )
+        Text(
+            text = "Prosegui sull'altro telefono",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = DirectSwitchTheme.blue
+        )
+    }
 
-        DirectSwitchAppleEmblem(size = 64.dp)
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text("Premium Direct", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-                InfoCircleButton(
-                    title = "Perché scegliere Premium Direct",
-                    message = "Le app tradizionali ti costringono a formattare il telefono ai dati di fabbrica o a selezionare a mano singole cartelle e file perdendo ore.\n\nCon la Copia Speculare cloni app, foto, video, documenti e contatti tra telefoni già configurati, lasciando sempre gratuita la procedura guidata QR di WhatsApp."
+    DirectSwitchCard(selected = true) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowForward, color = DirectSwitchTheme.blue)
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.weight(1f)) {
+                Text(
+                    text = peerDeviceName.ifBlank { "Altro telefono collegato" },
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = DirectSwitchTheme.textPrimary
+                )
+                Text(
+                    text = "Scegli sull'altro telefono le categorie da copiare e tocca «Copia le voci selezionate».",
+                    fontSize = 13.sp,
+                    color = DirectSwitchTheme.textSecondary
                 )
             }
+        }
+        HorizontalDivider(color = DirectSwitchTheme.hairline)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp,
+                color = DirectSwitchTheme.blue
+            )
+            Spacer(modifier = Modifier.size(10.dp))
             Text(
-                "Clona app, foto, video, documenti e contatti senza resettare • Chat WhatsApp sempre gratis",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = DirectSwitchTheme.premiumGold,
-                textAlign = TextAlign.Center
+                text = "In attesa della conferma sull'altro telefono...",
+                fontSize = 13.sp,
+                color = DirectSwitchTheme.textSecondary
             )
         }
+    }
 
-        DirectSwitchCard {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.premiumAmber, size = 28.dp)
-                Text("Copia speculare bidirezionale iPhone ↔ Android senza cavi", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AppleSettingsIcon(icon = Icons.Filled.PhoneIphone, color = DirectSwitchTheme.blue, size = 28.dp)
-                Text("Zero reset: perfetto su telefoni già configurati e in uso", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AppleSettingsIcon(icon = Icons.Filled.Image, color = DirectSwitchTheme.orange, size = 28.dp)
-                Text("App, Foto originali, Video 4K, Documenti e Rubrica completa", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AppleSettingsIcon(icon = Icons.Filled.CheckCircle, color = DirectSwitchTheme.teal, size = 28.dp)
-                Text("Chat WhatsApp sempre gratis tramite QR • 1 acquisto = 2 telefoni", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
-            }
-        }
+    DirectSwitchNeutralOutlinedButton(
+        text = "Annulla",
+        onClick = onCancel
+    )
+}
 
-        Text(
-            "Pagamento unico • Nessun abbonamento mensile",
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = DirectSwitchTheme.textSecondary
-        )
+@Composable
+private fun TransferPreparationWizardView(
+    progress: LiveTransferProgress,
+    isReceiver: Boolean,
+    onPreparationCompleted: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val itemIdsKey = remember(progress.preparationItems) {
+        progress.preparationItems.map { it.id }
+    }
+    val animatedCounts = remember(itemIdsKey) { mutableStateMapOf<String, Int>() }
+    var didNotifyCompletion by remember(itemIdsKey) { mutableStateOf(false) }
 
-        if (hasCloudSave && !isUnlocked) {
-            Text("App CloudSave rilevata sul dispositivo", fontSize = 12.sp, color = DirectSwitchTheme.blue)
-        }
-        if (!billingNote.isNullOrBlank()) {
-            Text(billingNote, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.blue)
-        }
-
-        DirectSwitchPrimaryButton(
-            text = if (isUnlocked) "Premium Direct Attivo" else "Sblocca Premium Direct — 9,99 €",
-            onClick = onPurchasePass,
-            enabled = !isUnlocked,
-            containerColor = if (isUnlocked) DirectSwitchTheme.green else DirectSwitchTheme.premiumGold
-        )
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TextButton(onClick = onRestorePurchases) {
-                Text("Ripristina acquisti", color = DirectSwitchTheme.blue, fontWeight = FontWeight.SemiBold)
-            }
-            if (isUnlocked) {
-                TextButton(onClick = onLockForTest) {
-                    Text("Blocca (Test)", color = DirectSwitchTheme.orange, fontWeight = FontWeight.SemiBold)
+    LaunchedEffect(progress.preparationItems, progress.arePreparationItemsReady, isReceiver) {
+        if (isReceiver || progress.preparationItems.isEmpty()) return@LaunchedEffect
+        while (true) {
+            var allReached = true
+            for (item in progress.preparationItems) {
+                val current = animatedCounts[item.id] ?: 0
+                if (current < item.targetCount) {
+                    val remaining = item.targetCount - current
+                    val stepDelta = maxOf(1, (remaining + 4) / 5)
+                    animatedCounts[item.id] = minOf(item.targetCount, current + stepDelta)
+                    allReached = false
+                } else if (!item.isReady) {
+                    allReached = false
                 }
             }
-            TextButton(onClick = onClose) {
-                Text("Chiudi", color = DirectSwitchTheme.textSecondary, fontWeight = FontWeight.SemiBold)
+            if (allReached && progress.arePreparationItemsReady) {
+                if (!didNotifyCompletion) {
+                    didNotifyCompletion = true
+                    delay(180L)
+                    onPreparationCompleted()
+                }
+                break
+            }
+            delay(22L)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        DirectSwitchAppleEmblem(size = 62.dp)
+        Text(
+            text = if (isReceiver) "Sto preparando la ricezione..." else "Sto preparando il trasferimento...",
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = DirectSwitchTheme.textPrimary,
+            textAlign = TextAlign.Center
+        )
+        Text(
+            text = if (isReceiver) {
+                "L'altro telefono sta preparando e verificando i dati selezionati prima di iniziare da 0%."
+            } else {
+                "Conteggio e verifica rapida dei dati selezionati prima di iniziare entrambi da 0%."
+            },
+            fontSize = 13.5.sp,
+            color = DirectSwitchTheme.textSecondary,
+            textAlign = TextAlign.Center
+        )
+    }
+
+    DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
+        if (progress.preparationItems.isEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = DirectSwitchTheme.blue)
+                Spacer(modifier = Modifier.size(10.dp))
+                Text(
+                    text = "Preparazione in corso...",
+                    fontSize = 14.sp,
+                    color = DirectSwitchTheme.textSecondary
+                )
+            }
+        } else {
+            progress.preparationItems.forEachIndexed { index, item ->
+                if (index > 0) {
+                    HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+                }
+                val (icon, iconColor) = preparationCategoryStyle(item.id)
+                val shownCount = if (isReceiver) {
+                    item.targetCount
+                } else {
+                    animatedCounts[item.id] ?: 0
+                }
+                val rowDone = if (isReceiver) {
+                    progress.arePreparationItemsReady
+                } else {
+                    item.isReady && shownCount >= item.targetCount
+                }
+                val statusLabel = when {
+                    isReceiver && !progress.arePreparationItemsReady && item.targetCount == 0 -> "In preparazione..."
+                    !isReceiver && !item.isReady && shownCount == 0 -> "Analisi..."
+                    else -> item.formattedCount(shownCount)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        AppleSettingsIcon(icon = icon, color = iconColor)
+                        Text(
+                            text = item.title,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = DirectSwitchTheme.textPrimary
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = statusLabel,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (rowDone) DirectSwitchTheme.green else DirectSwitchTheme.blue
+                        )
+                        if (rowDone) {
+                            Icon(
+                                imageVector = Icons.Filled.CheckCircle,
+                                contentDescription = null,
+                                tint = DirectSwitchTheme.green,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        } else {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(15.dp),
+                                strokeWidth = 2.dp,
+                                color = DirectSwitchTheme.blue
+                            )
+                        }
+                    }
+                }
             }
         }
-        Spacer(modifier = Modifier.height(8.dp))
     }
+
+    DirectSwitchNeutralOutlinedButton(
+        text = "Annulla",
+        onClick = onCancel
+    )
+}
+
+private fun preparationCategoryStyle(id: String): Pair<ImageVector, Color> = when (id) {
+    "contacts" -> Icons.Filled.Contacts to DirectSwitchTheme.blue
+    "photos" -> Icons.Filled.Image to DirectSwitchTheme.orange
+    "videos" -> Icons.Filled.Videocam to DirectSwitchTheme.red
+    "calendars" -> Icons.Filled.CalendarMonth to DirectSwitchTheme.indigo
+    "sms" -> Icons.Filled.Sms to DirectSwitchTheme.green
+    "documents" -> Icons.Filled.Description to DirectSwitchTheme.teal
+    "apps" -> Icons.Filled.Apps to DirectSwitchTheme.blue
+    else -> Icons.Filled.Folder to DirectSwitchTheme.slate
 }
 
 @Composable

@@ -1315,6 +1315,8 @@ enum iOSPhotoKitMigrator {
         private let lock = NSLock()
         private var resumed = false
         private var imageRequestId: PHImageRequestID? = nil
+        private var degradedData: Data? = nil
+        private var degradedExtension: String = "jpg"
         private let startTime: TimeInterval = Date().timeIntervalSinceReferenceDate
         private var lastActivityTime: TimeInterval = Date().timeIntervalSinceReferenceDate
 
@@ -1322,6 +1324,25 @@ enum iOSPhotoKitMigrator {
             lock.lock()
             imageRequestId = id
             lock.unlock()
+        }
+
+        func saveDegradedData(_ data: Data, fileExtension: String) {
+            guard !data.isEmpty else { return }
+            lock.lock()
+            if data.count >= (degradedData?.count ?? 0) {
+                degradedData = data
+                degradedExtension = fileExtension
+            }
+            lastActivityTime = Date().timeIntervalSinceReferenceDate
+            lock.unlock()
+        }
+
+        func consumeDegradedData() -> (Data, String)? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let data = degradedData, !data.isEmpty else { return nil }
+            degradedData = nil
+            return (data, degradedExtension)
         }
 
         func touchActivity() {
@@ -1373,28 +1394,57 @@ enum iOSPhotoKitMigrator {
                     }
                     return
                 }
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.5) {
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
                     poll()
                 }
             }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + min(2.5, max(0.5, idleTimeout))) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + min(2.0, max(0.4, idleTimeout))) {
                 poll()
             }
         }
     }
 
-    /// Esporta un `PHAsset` su file temporaneo con 4 livelli di resilienza:
-    /// 1) `PHAssetResourceManager` con monitoraggio attivo dell'avanzamento iCloud (non interrompe download attivi in corso),
+    private static func inferImageExtension(fromData data: Data, uti: String?) -> String {
+        let lowerUti = (uti ?? "").lowercased()
+        if lowerUti.contains("heic") { return "heic" }
+        if lowerUti.contains("heif") { return "heif" }
+        if lowerUti.contains("png") { return "png" }
+        if lowerUti.contains("jpeg") || lowerUti.contains("jpg") { return "jpg" }
+        if data.count >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+            return "jpg"
+        }
+        if data.count >= 4 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+            return "png"
+        }
+        return "jpg"
+    }
+
+    private static func writeTempImageData(_ data: Data, ext: String, prefix: String) -> URL? {
+        guard !data.isEmpty else { return nil }
+        let destURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)_\(UUID().uuidString).\(ext)")
+        do {
+            try data.write(to: destURL, options: .atomic)
+            return destURL
+        } catch {
+            try? FileManager.default.removeItem(at: destURL)
+            return nil
+        }
+    }
+
+    /// Esporta un `PHAsset` su file temporaneo con livelli progressivi di resilienza iCloud + cache locale:
+    /// 1) `PHAssetResourceManager` con monitoraggio attivo dell'avanzamento iCloud (non interrompe download attivi),
     /// 2) Risorsa alternativa dell'asset,
-    /// 3) `PHImageManager` (`requestImageDataAndOrientation` per foto / `requestAVAsset` per video da iCloud),
-    /// 4) Copia ad alta risoluzione dalla cache locale di Foto su iPhone se iCloud non è raggiungibile (es. Hotspot offline).
+    /// 3) `PHImageManager` (`requestImageDataAndOrientation` `.current` e fallback `.original`), trattenendo l'eventuale anteprima ricevuta se iCloud cade,
+    /// 4) Estrazione asincrona dalla cache locale di Foto (`.fastFormat` + `.opportunistic`, MAI `isSynchronous = true` che forza `.highQualityFormat`),
+    /// 5) Per i video: `.highQualityFormat` -> `.mediumQualityFormat` -> `.fastFormat`, gestendo anche `AVComposition` (Slow-Mo/modificati).
     static func exportAssetToTempFile(_ asset: PHAsset) async -> URL? {
         if let primary = primaryMediaResource(for: asset) {
             let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
             let maxTimeout: TimeInterval = isLocal
                 ? 60.0
                 : (asset.mediaType == .video ? 420.0 : 180.0)
-            let idleTimeout: TimeInterval = isLocal ? 35.0 : 24.0
+            let idleTimeout: TimeInterval = isLocal ? 35.0 : 25.0
             if let exported = await exportResourceToTempFile(
                 primary,
                 prefix: "ds_exp",
@@ -1404,7 +1454,7 @@ enum iOSPhotoKitMigrator {
             ) {
                 return exported
             }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             let resources = PHAssetResource.assetResources(for: asset)
             let fallbackRes: PHAssetResource? = {
                 if asset.mediaType == .video {
@@ -1428,22 +1478,65 @@ enum iOSPhotoKitMigrator {
         }
 
         if asset.mediaType == .image {
-            if let highQ = await exportImageViaImageManager(
+            if let highCurrent = await exportImageViaImageManager(
                 asset,
                 allowNetwork: true,
                 deliveryMode: .highQualityFormat,
+                version: .current,
                 idleTimeoutSeconds: 22.0,
                 maxTotalSeconds: 150.0
             ) {
-                return highQ
+                return highCurrent
+            }
+            if let highOrig = await exportImageViaImageManager(
+                asset,
+                allowNetwork: true,
+                deliveryMode: .highQualityFormat,
+                version: .original,
+                idleTimeoutSeconds: 18.0,
+                maxTotalSeconds: 90.0
+            ) {
+                return highOrig
             }
             return await exportBestLocalCachedImage(asset)
         } else if asset.mediaType == .video {
-            return await exportVideoViaImageManager(
+            if let highVid = await exportVideoViaImageManager(
                 asset,
                 allowNetwork: true,
+                deliveryMode: .highQualityFormat,
+                version: .current,
                 idleTimeoutSeconds: 25.0,
                 maxTotalSeconds: 360.0
+            ) {
+                return highVid
+            }
+            if let medVid = await exportVideoViaImageManager(
+                asset,
+                allowNetwork: true,
+                deliveryMode: .mediumQualityFormat,
+                version: .current,
+                idleTimeoutSeconds: 20.0,
+                maxTotalSeconds: 180.0
+            ) {
+                return medVid
+            }
+            if let fastNetVid = await exportVideoViaImageManager(
+                asset,
+                allowNetwork: true,
+                deliveryMode: .fastFormat,
+                version: .original,
+                idleTimeoutSeconds: 15.0,
+                maxTotalSeconds: 90.0
+            ) {
+                return fastNetVid
+            }
+            return await exportVideoViaImageManager(
+                asset,
+                allowNetwork: false,
+                deliveryMode: .fastFormat,
+                version: .current,
+                idleTimeoutSeconds: 12.0,
+                maxTotalSeconds: 20.0
             )
         }
         return nil
@@ -1453,6 +1546,7 @@ enum iOSPhotoKitMigrator {
         _ asset: PHAsset,
         allowNetwork: Bool = true,
         deliveryMode: PHImageRequestOptionsDeliveryMode = .highQualityFormat,
+        version: PHImageRequestOptionsVersion = .current,
         idleTimeoutSeconds: TimeInterval = 22.0,
         maxTotalSeconds: TimeInterval = 150.0
     ) async -> URL? {
@@ -1461,31 +1555,41 @@ enum iOSPhotoKitMigrator {
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = allowNetwork
             opts.deliveryMode = deliveryMode
-            opts.version = .current
+            opts.version = version
+            opts.resizeMode = .none
             opts.isSynchronous = false
             opts.progressHandler = { _, _, _, _ in
                 guardBox.touchActivity()
             }
 
             guardBox.startActivityWatchdog(idleTimeout: idleTimeoutSeconds, maxTotalTimeout: maxTotalSeconds) {
-                continuation.resume(returning: nil)
+                if let (fallbackData, fallbackExt) = guardBox.consumeDegradedData(),
+                   let url = Self.writeTempImageData(fallbackData, ext: fallbackExt, prefix: "ds_imgdeg") {
+                    continuation.resume(returning: url)
+                } else {
+                    continuation.resume(returning: nil)
+                }
             }
 
-            let reqId = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, info in
+            let reqId = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, dataUTI, _, info in
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if isDegraded && deliveryMode == .highQualityFormat { return }
-                guard guardBox.tryClaim() else { return }
-                guard let data, !data.isEmpty else {
-                    continuation.resume(returning: nil)
+                if let data, !data.isEmpty, isDegraded && deliveryMode == .highQualityFormat {
+                    let degExt = Self.inferImageExtension(fromData: data, uti: dataUTI)
+                    guardBox.saveDegradedData(data, fileExtension: degExt)
                     return
                 }
-                let destURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("ds_imgmgr_\(UUID().uuidString).jpg")
-                do {
-                    try data.write(to: destURL, options: .atomic)
-                    continuation.resume(returning: destURL)
-                } catch {
-                    try? FileManager.default.removeItem(at: destURL)
+                guard guardBox.tryClaim() else { return }
+                if let data, !data.isEmpty {
+                    let resolvedExt = Self.inferImageExtension(fromData: data, uti: dataUTI)
+                    if let url = Self.writeTempImageData(data, ext: resolvedExt, prefix: "ds_imgmgr") {
+                        continuation.resume(returning: url)
+                        return
+                    }
+                }
+                if let (fallbackData, fallbackExt) = guardBox.consumeDegradedData(),
+                   let url = Self.writeTempImageData(fallbackData, ext: fallbackExt, prefix: "ds_imgdeg") {
+                    continuation.resume(returning: url)
+                } else {
                     continuation.resume(returning: nil)
                 }
             }
@@ -1493,58 +1597,92 @@ enum iOSPhotoKitMigrator {
         }
     }
 
-    /// Recupera la migliore copia già presente nella cache locale di Foto su iPhone quando iCloud non è raggiungibile.
+    /// Recupera la migliore copia già presente nella cache locale di Foto (asincrono con `.fastFormat` / `.opportunistic`,
+    /// evitando `isSynchronous = true` che in PhotoKit forza `.highQualityFormat` e restituisce `nil` sui file solo su iCloud).
     private static func exportBestLocalCachedImage(_ asset: PHAsset) async -> URL? {
-        await Task.detached(priority: .utility) {
+        for version in [PHImageRequestOptionsVersion.current, .unadjusted] {
+            if let fastDataURL = await exportImageViaImageManager(
+                asset,
+                allowNetwork: false,
+                deliveryMode: .fastFormat,
+                version: version,
+                idleTimeoutSeconds: 4.5,
+                maxTotalSeconds: 6.0
+            ) {
+                return fastDataURL
+            }
+        }
+
+        for delivery in [PHImageRequestOptionsDeliveryMode.fastFormat, .opportunistic] {
+            if let renderedURL = await exportCachedUIImageAsync(asset, deliveryMode: delivery) {
+                return renderedURL
+            }
+        }
+        return nil
+    }
+
+    private static func exportCachedUIImageAsync(
+        _ asset: PHAsset,
+        deliveryMode: PHImageRequestOptionsDeliveryMode
+    ) async -> URL? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            let guardBox = AsyncExportResumeGuard()
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = false
-            opts.isSynchronous = true
-            opts.deliveryMode = .highQualityFormat
-            opts.resizeMode = .none
+            opts.isSynchronous = false
+            opts.deliveryMode = deliveryMode
+            opts.resizeMode = .fast
+            opts.version = .current
 
-            var capturedData: Data? = nil
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, _ in
-                if let data, !data.isEmpty {
-                    capturedData = data
-                }
-            }
-            if let raw = capturedData {
-                let destURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("ds_cached_raw_\(UUID().uuidString).jpg")
-                if (try? raw.write(to: destURL, options: .atomic)) != nil {
-                    return destURL
+            guardBox.startActivityWatchdog(idleTimeout: 3.5, maxTotalTimeout: 4.5) {
+                if let (fallbackData, fallbackExt) = guardBox.consumeDegradedData(),
+                   let url = Self.writeTempImageData(fallbackData, ext: fallbackExt, prefix: "ds_cached_ui") {
+                    continuation.resume(returning: url)
+                } else {
+                    continuation.resume(returning: nil)
                 }
             }
 
-            var bestImage: UIImage? = nil
-            PHImageManager.default().requestImage(
+            let targetSize = CGSize(width: 2048, height: 2048)
+            let reqId = PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: PHImageManagerMaximumSize,
-                contentMode: .default,
+                targetSize: targetSize,
+                contentMode: .aspectFit,
                 options: opts
-            ) { img, _ in
-                if let img, img.size.width >= 256, img.size.height >= 256 {
-                    bestImage = img
+            ) { img, info in
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if let img,
+                   img.size.width >= 64,
+                   img.size.height >= 64,
+                   let jpeg = img.jpegData(compressionQuality: 0.92),
+                   !jpeg.isEmpty {
+                    if isDegraded && deliveryMode == .opportunistic {
+                        guardBox.saveDegradedData(jpeg, fileExtension: "jpg")
+                        return
+                    }
+                    guard guardBox.tryClaim() else { return }
+                    continuation.resume(returning: Self.writeTempImageData(jpeg, ext: "jpg", prefix: "ds_cached_ui"))
+                    return
+                }
+                if !isDegraded {
+                    guard guardBox.tryClaim() else { return }
+                    if let (fallbackData, fallbackExt) = guardBox.consumeDegradedData(),
+                       let url = Self.writeTempImageData(fallbackData, ext: fallbackExt, prefix: "ds_cached_ui") {
+                        continuation.resume(returning: url)
+                    } else {
+                        continuation.resume(returning: nil)
+                    }
                 }
             }
-            guard let img = bestImage, let jpeg = img.jpegData(compressionQuality: 0.92), !jpeg.isEmpty else {
-                return nil
-            }
-            let destURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("ds_cached_ui_\(UUID().uuidString).jpg")
-            do {
-                try jpeg.write(to: destURL, options: .atomic)
-                return destURL
-            } catch {
-                try? FileManager.default.removeItem(at: destURL)
-                return nil
-            }
-        }.value
+            guardBox.setImageRequestId(reqId)
+        }
     }
 
     private static func exportVideoViaImageManager(
         _ asset: PHAsset,
         allowNetwork: Bool = true,
+        deliveryMode: PHVideoRequestOptionsDeliveryMode = .highQualityFormat,
+        version: PHVideoRequestOptionsVersion = .current,
         idleTimeoutSeconds: TimeInterval = 25.0,
         maxTotalSeconds: TimeInterval = 360.0
     ) async -> URL? {
@@ -1552,8 +1690,8 @@ enum iOSPhotoKitMigrator {
             let guardBox = AsyncExportResumeGuard()
             let opts = PHVideoRequestOptions()
             opts.isNetworkAccessAllowed = allowNetwork
-            opts.deliveryMode = .highQualityFormat
-            opts.version = .current
+            opts.deliveryMode = deliveryMode
+            opts.version = version
             opts.progressHandler = { _, _, _, _ in
                 guardBox.touchActivity()
             }
@@ -1564,19 +1702,38 @@ enum iOSPhotoKitMigrator {
 
             let reqId = PHImageManager.default().requestAVAsset(forVideo: asset, options: opts) { avAsset, _, _ in
                 guard guardBox.tryClaim() else { return }
-                guard let urlAsset = avAsset as? AVURLAsset else {
+                if let urlAsset = avAsset as? AVURLAsset {
+                    let ext = urlAsset.url.pathExtension.isEmpty ? "mov" : urlAsset.url.pathExtension
+                    let destURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("ds_vidmgr_\(UUID().uuidString).\(ext)")
+                    do {
+                        try FileManager.default.copyItem(at: urlAsset.url, to: destURL)
+                        continuation.resume(returning: destURL)
+                    } catch {
+                        try? FileManager.default.removeItem(at: destURL)
+                        continuation.resume(returning: nil)
+                    }
+                    return
+                }
+                guard let avAsset,
+                      let exportSession = AVAssetExportSession(asset: avAsset, presetName: AVAssetExportPresetHighestQuality)
+                        ?? AVAssetExportSession(asset: avAsset, presetName: AVAssetExportPreset1280x720) else {
                     continuation.resume(returning: nil)
                     return
                 }
-                let ext = urlAsset.url.pathExtension.isEmpty ? "mov" : urlAsset.url.pathExtension
                 let destURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("ds_vidmgr_\(UUID().uuidString).\(ext)")
-                do {
-                    try FileManager.default.copyItem(at: urlAsset.url, to: destURL)
-                    continuation.resume(returning: destURL)
-                } catch {
-                    try? FileManager.default.removeItem(at: destURL)
-                    continuation.resume(returning: nil)
+                    .appendingPathComponent("ds_vidcomp_\(UUID().uuidString).mp4")
+                try? FileManager.default.removeItem(at: destURL)
+                exportSession.outputURL = destURL
+                exportSession.outputFileType = .mp4
+                exportSession.shouldOptimizeForNetworkUse = false
+                exportSession.exportAsynchronously {
+                    if exportSession.status == .completed && FileManager.default.fileExists(atPath: destURL.path) {
+                        continuation.resume(returning: destURL)
+                    } else {
+                        try? FileManager.default.removeItem(at: destURL)
+                        continuation.resume(returning: nil)
+                    }
                 }
             }
             guardBox.setImageRequestId(reqId)

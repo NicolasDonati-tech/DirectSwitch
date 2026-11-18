@@ -186,41 +186,43 @@ extension View {
     }
 }
 
-// MARK: - Barra superiore Apple HIG (logo piccolo + DirectSwitch a sinistra nella Home, Premium Direct a destra)
+// MARK: - Barra superiore Apple HIG (pulita, senza badge a pagamento)
 
 struct AppleTopNavigationBar: View {
     let title: String
     let showBackButton: Bool
-    let isProUnlocked: Bool
+    var isProUnlocked: Bool = true
     let onBack: () -> Void
-    let onTapPassBadge: () -> Void
+    var onTapPassBadge: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                if showBackButton {
-                    Button(action: onBack) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 16, weight: .semibold))
-                            Text("Indietro")
-                                .font(.system(size: 16, weight: .regular))
+            ZStack {
+                HStack(spacing: 8) {
+                    if showBackButton {
+                        Button(action: onBack) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 16, weight: .semibold))
+                                Text("Indietro")
+                                    .font(.system(size: 16, weight: .regular))
+                            }
+                            .foregroundColor(AppleTheme.blue)
                         }
-                        .foregroundColor(AppleTheme.blue)
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                    } else {
+                        HStack(spacing: 8) {
+                            DirectSwitchAppleEmblem(size: 26)
+                            Text("DirectSwitch")
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                        }
+                        .fixedSize()
                     }
-                    .buttonStyle(.plain)
-                    .fixedSize()
-                } else {
-                    HStack(spacing: 8) {
-                        DirectSwitchAppleEmblem(size: 26)
-                        Text("DirectSwitch")
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                    }
-                    .fixedSize()
-                }
 
-                Spacer(minLength: 4)
+                    Spacer(minLength: 4)
+                }
 
                 if showBackButton {
                     Text(title)
@@ -228,31 +230,8 @@ struct AppleTopNavigationBar: View {
                         .foregroundColor(AppleTheme.textPrimary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
-
-                    Spacer(minLength: 4)
+                        .padding(.horizontal, 86)
                 }
-
-                Button(action: onTapPassBadge) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "crown.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(AppleTheme.premiumAmber)
-                        Text(isProUnlocked ? "Premium Attivo" : "Premium Direct")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(AppleTheme.premiumGold)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(AppleTheme.premiumSurface)
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
-                    )
-                    .shadow(color: AppleTheme.premiumAmber.opacity(0.14), radius: 4, x: 0, y: 2)
-                }
-                .buttonStyle(.plain)
-                .fixedSize()
             }
             .padding(.horizontal, 16)
             .frame(height: 50)
@@ -427,25 +406,9 @@ struct CleanCategoryToggleRow: View {
         HStack(spacing: 12) {
             AppleSettingsIcon(systemName: icon, color: iconColor)
 
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(AppleTheme.textPrimary)
-
-                if premiumBadge {
-                    Text("PREMIUM")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(AppleTheme.premiumGold)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(AppleTheme.premiumSurface)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(AppleTheme.premiumBorder, lineWidth: 0.8)
-                        )
-                }
-            }
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(AppleTheme.textPrimary)
 
             InfoCircleButton(
                 title: title,

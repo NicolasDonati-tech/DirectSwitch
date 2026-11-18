@@ -13,8 +13,10 @@ import UIKit
 private enum DirectSwitchWizardStep: Equatable {
     case home
     case receiveWaitCode
+    case receiveConnected
     case sendConnect
     case sendSelectCategories
+    case transferPreparing
     case transferProgress
 }
 
@@ -106,11 +108,8 @@ struct DirectSwitchMainView: View {
     @State private var receiverAuthorizedDestinations: [String] = iOSDocumentsSandboxBridge.receiverDestinationsSummary().destinations
     @State private var receiverFallbackRootLabel: String? = iOSDocumentsSandboxBridge.receiverDestinationsSummary().fallbackRoot
 
-    // Scansione locale e StoreKit Pass iPhone <-> Android
+    // Scansione locale e stato trasferimento
     @State private var scanSummary: iOSLocalDeviceScanSummary? = nil
-    @State private var isProUnlocked: Bool = iOSLicenseStore.isLocalProUnlocked
-    @State private var showProSheet: Bool = false
-    @State private var billingNote: String? = nil
 
     private var isDedicatedWhatsAppScreenActive: Bool {
         guard activeStep == .transferProgress, transport.errorMessage == nil else { return false }
@@ -127,10 +126,14 @@ struct DirectSwitchMainView: View {
             return "DirectSwitch"
         case .receiveWaitCode:
             return "Ricevi"
+        case .receiveConnected:
+            return "Collegato"
         case .sendConnect:
             return "Invia"
         case .sendSelectCategories:
             return "Cosa inviare"
+        case .transferPreparing:
+            return "Preparazione"
         case .transferProgress:
             if isDedicatedWhatsAppScreenActive {
                 return "Chat WhatsApp"
@@ -152,9 +155,7 @@ struct DirectSwitchMainView: View {
                     AppleTopNavigationBar(
                         title: topBarTitle,
                         showBackButton: activeStep != .home,
-                        isProUnlocked: isProUnlocked,
-                        onBack: handleBackNavigation,
-                        onTapPassBadge: { showProSheet = true }
+                        onBack: handleBackNavigation
                     )
 
                     if let toast = sharedVaultToast, activeStep != .transferProgress {
@@ -218,14 +219,31 @@ struct DirectSwitchMainView: View {
                                         DirectSwitchTransportViewModel.openAppSettings()
                                     },
                                     onCancel: {
-                                        transport.resetSession()
-                                        receiverQrPayload = nil
-                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                            activeStep = .home
-                                        }
+                                        finishAndReturnHome()
                                     }
                                 )
                             }
+
+                        case .receiveConnected:
+                            ReceiveConnectedStepView(
+                                peerName: transport.peerName,
+                                authorizedDestinations: receiverAuthorizedDestinations,
+                                fallbackDestinationRoot: receiverFallbackRootLabel,
+                                onAuthorizeDestinations: {
+                                    presentDocumentPicker(mode: .receiverDestinations)
+                                },
+                                onChooseFallbackRoot: {
+                                    presentDocumentPicker(mode: .receiverFallbackRoot)
+                                },
+                                onClearDestinations: {
+                                    iOSDocumentsSandboxBridge.clearReceiverDestinations()
+                                    receiverAuthorizedDestinations = []
+                                    receiverFallbackRootLabel = nil
+                                },
+                                onCancel: {
+                                    finishAndReturnHome()
+                                }
+                            )
 
                         case .sendConnect:
                             SendConnectStepView(
@@ -252,7 +270,7 @@ struct DirectSwitchMainView: View {
                                 SendCategoriesStepView(
                                     pairedPayload: paired,
                                     scanSummary: scanSummary,
-                                    isLocalProUnlocked: isProUnlocked,
+                                    isLocalProUnlocked: true,
                                     pickedDocuments: pickedDocuments,
                                     documentPrecheck: documentPrecheckReport,
                                     isLoadingPositions: isLoadingDocumentPositions,
@@ -314,8 +332,11 @@ struct DirectSwitchMainView: View {
                                         iOSDocumentsSandboxBridge.clearAllPickedDocumentsAndBookmarks()
                                         refreshAuthorizedSummary()
                                     },
-                                    onOpenProSheet: { showProSheet = true },
+                                    onOpenProSheet: {},
                                     onChangePairedDevice: {
+                                        if let oldPaired = pairedTargetPayload {
+                                            Task { await transport.sendPairReset(qrPayload: oldPaired) }
+                                        }
                                         pairedTargetPayload = nil
                                         pinCodeInput = ""
                                         pairingErrorNote = nil
@@ -328,14 +349,23 @@ struct DirectSwitchMainView: View {
                                 )
                             }
 
+                        case .transferPreparing:
+                            TransferPreparationStepView(
+                                transport: transport,
+                                isReceiverMode: isReceiverMode,
+                                onCancel: {
+                                    finishAndReturnHome()
+                                }
+                            )
+
                         case .transferProgress:
                             DirectSwitchTransferProgressView(
                                 transport: transport,
                                 appInstaller: appInstaller,
                                 isReceiverMode: isReceiverMode,
-                                isProUnlocked: isProUnlocked,
+                                isProUnlocked: true,
                                 canSendAnotherCategory: !isReceiverMode && pairedTargetPayload != nil,
-                                onOpenProSheet: { showProSheet = true },
+                                onOpenProSheet: {},
                                 onRetryIfFailed: {
                                     if !isReceiverMode, let paired = pairedTargetPayload {
                                         launchSenderTransferWithPayload(paired, isResume: transport.canResumeInterruptedTransfer)
@@ -376,15 +406,45 @@ struct DirectSwitchMainView: View {
         }
         .preferredColorScheme(.light)
         .task {
-            isProUnlocked = await iOSLicenseStore.restoreStoreKitEntitlements()
             refreshAuthorizedSummary()
             refreshSenderAppsCatalog()
         }
-        .onChange(of: transport.isSessionConnected) { connected in
-            if connected && activeStep == .receiveWaitCode {
-                appInstaller.reset()
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    activeStep = .transferProgress
+        .onChange(of: transport.sessionStage) { stage in
+            if isReceiverMode {
+                switch stage {
+                case .waitingPairing:
+                    if activeStep == .receiveConnected {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            activeStep = .receiveWaitCode
+                        }
+                    }
+                case .pairedWaitingSelection:
+                    if activeStep == .receiveWaitCode || activeStep == .transferProgress {
+                        appInstaller.reset()
+                        withAnimation(.easeInOut(duration: 0.24)) {
+                            activeStep = .receiveConnected
+                        }
+                    }
+                case .preparing:
+                    if activeStep == .receiveWaitCode || activeStep == .receiveConnected {
+                        appInstaller.reset()
+                        withAnimation(.easeInOut(duration: 0.24)) {
+                            activeStep = .transferPreparing
+                        }
+                    }
+                case .transferring, .completed:
+                    if activeStep == .receiveWaitCode || activeStep == .receiveConnected || activeStep == .transferPreparing {
+                        appInstaller.reset()
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            activeStep = .transferProgress
+                        }
+                    }
+                }
+            } else {
+                if (stage == .transferring || stage == .completed) && activeStep == .transferPreparing {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        activeStep = .transferProgress
+                    }
                 }
             }
         }
@@ -481,13 +541,6 @@ struct DirectSwitchMainView: View {
             guard !clues.isEmpty else { return }
             mergeDetectedAppsIntoCatalog(clues)
         }
-        .sheet(isPresented: $showProSheet) {
-            DirectSwitchProPassSheet(
-                isProUnlocked: $isProUnlocked,
-                billingNote: $billingNote,
-                onClose: { showProSheet = false }
-            )
-        }
     }
 
     // MARK: - Azioni di navigazione e flusso guidato
@@ -559,6 +612,9 @@ struct DirectSwitchMainView: View {
             pairedTargetPayload = parsed
             withAnimation(.easeInOut(duration: 0.22)) {
                 activeStep = .sendSelectCategories
+            }
+            Task {
+                await transport.sendPairAck(qrPayload: parsed)
             }
         } catch {
             pairingErrorNote = "Codice QR non riconosciuto. Assicurati di inquadrare il QR mostrato da DirectSwitch sul nuovo telefono."
@@ -698,7 +754,7 @@ struct DirectSwitchMainView: View {
             )
         }
         withAnimation(.easeInOut(duration: 0.22)) {
-            activeStep = .transferProgress
+            activeStep = (!isResume && !currentScope.isWhatsAppOnly) ? .transferPreparing : .transferProgress
         }
         let docsSnapshot = pickedDocuments
         let appsSnapshot: [InstalledAppRecord] = includeApps
@@ -733,7 +789,7 @@ struct DirectSwitchMainView: View {
     }
 
     private func returnToCategorySelectionForAnotherTransfer() {
-        guard pairedTargetPayload != nil else {
+        guard let paired = pairedTargetPayload else {
             finishAndReturnHome()
             return
         }
@@ -742,8 +798,12 @@ struct DirectSwitchMainView: View {
         transport.isCompleted = false
         transport.pendingNativeWhatsAppMigration = false
         transport.visualStepProgress = 0.0
+        transport.sessionStage = .pairedWaitingSelection
         withAnimation(.easeInOut(duration: 0.22)) {
             activeStep = .sendSelectCategories
+        }
+        Task {
+            await transport.sendPairAck(qrPayload: paired)
         }
     }
 
@@ -1112,7 +1172,7 @@ struct DirectSwitchMainView: View {
         switch activeStep {
         case .home:
             break
-        case .receiveWaitCode:
+        case .receiveWaitCode, .receiveConnected, .transferPreparing:
             finishAndReturnHome()
         case .sendConnect:
             showCameraScanner = false
@@ -1121,6 +1181,9 @@ struct DirectSwitchMainView: View {
                 activeStep = .home
             }
         case .sendSelectCategories:
+            if let oldPaired = pairedTargetPayload {
+                Task { await transport.sendPairReset(qrPayload: oldPaired) }
+            }
             pairedTargetPayload = nil
             pinCodeInput = ""
             pairingErrorNote = nil
@@ -1191,7 +1254,7 @@ private struct DirectSwitchHomeView: View {
                         Spacer()
                         InfoCircleButton(
                             title: "Invia",
-                            message: "Invia i dati da questo telefono direttamente senza cavo all'altro telefono dove hai aperto 'Ricevi'. Con Premium Direct trasferisci tutto anche tra iPhone e Android già configurati, senza formattare."
+                            message: "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (iPhone o Android) dove hai aperto 'Ricevi', tutto gratuito e senza formattare."
                         )
                     }
 
@@ -1440,20 +1503,8 @@ private struct DirectSwitchTransferProgressView: View {
                     id: "failed",
                     icon: "icloud.slash",
                     color: AppleTheme.orange,
-                    title: "Foto iCloud non scaricate / illeggibili",
+                    title: "Elementi non scaricabili da iCloud / illeggibili",
                     value: "\(transport.failedItemsCount)"
-                )
-            )
-        }
-
-        if transport.gatedPreviewCount > 0 {
-            rows.append(
-                ScopedSummaryItem(
-                    id: "gated_preview",
-                    icon: "lock.fill",
-                    color: AppleTheme.blue,
-                    title: "Extra bloccati (limite 25 gratis Cross-OS)",
-                    value: "\(transport.gatedPreviewCount)"
                 )
             )
         }
@@ -1840,25 +1891,6 @@ private struct DirectSwitchTransferProgressView: View {
                                 .foregroundColor(AppleTheme.textSecondary)
                                 .multilineTextAlignment(.center)
                         }
-
-                        if transport.isBackgroundKeepAliveActive {
-                            HStack(spacing: 6) {
-                                Image(systemName: "bolt.shield.fill")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(AppleTheme.teal)
-                                Text("Protezione Background e Anti-Standby attiva")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(AppleTheme.teal)
-                                InfoCircleButton(
-                                    title: "Esecuzione in Background e Resume",
-                                    message: "DirectSwitch mantiene lo schermo acceso e tiene vivo il trasferimento in background se passi brevemente a un'altra app o ricevi una chiamata.\n\nSe iOS dovesse sospendere il Wi-Fi dopo diversi minuti in background, riceverai una notifica e potrai riprendere esattamente dal file interrotto senza rifare il QR."
-                                )
-                            }
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 6)
-                            .background(AppleTheme.teal.opacity(0.10))
-                            .clipShape(Capsule())
-                        }
                     }
                 }
 
@@ -1948,9 +1980,15 @@ private struct DirectSwitchTransferProgressView: View {
                     }
 
                     if let eta = remainingTimeLabel {
-                        Text(eta)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(AppleTheme.blue)
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(AppleTheme.blue)
+                            Text(eta)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(AppleTheme.blue)
+                        }
+                        .padding(.top, 2)
                     }
                 }
                 .appleCard()
@@ -2016,29 +2054,6 @@ private struct DirectSwitchTransferProgressView: View {
 
                 if transport.isCompleted && transport.pendingNativeWhatsAppMigration {
                     whatsAppNativeTransferCard(embeddedInSummary: true)
-                }
-
-                if transport.gatedPreviewCount > 0 && !isProUnlocked {
-                    Button(action: onOpenProSheet) {
-                        HStack(spacing: 10) {
-                            AppleSettingsIcon(systemName: "crown.fill", color: AppleTheme.premiumAmber)
-                            Text("Sblocca i restanti \(transport.gatedPreviewCount) file con Premium Direct")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(AppleTheme.premiumGold)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(AppleTheme.premiumGold)
-                        }
-                        .padding(14)
-                        .background(AppleTheme.premiumSurface)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
-                        )
-                    }
-                    .buttonStyle(.plain)
                 }
 
                 if transport.needsLocalNetworkRedirect || transport.isLocalNetworkDenied {
@@ -2227,158 +2242,5 @@ private struct DirectSwitchTransferProgressView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-    }
-}
-
-// MARK: - Sheet Premium Direct (Passaggio completo iPhone <-> Android senza formattare)
-
-private struct DirectSwitchProPassSheet: View {
-    @Binding var isProUnlocked: Bool
-    @Binding var billingNote: String?
-    var onClose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 14) {
-            // Pill superiore che chiarisce subito Copia Speculare iPhone <-> Android
-            HStack(spacing: 5) {
-                Image(systemName: "crown.fill")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(AppleTheme.premiumAmber)
-                Text("COPIA SPECULARE iPHONE ↔ ANDROID")
-                    .font(.system(size: 11, weight: .bold))
-                    .tracking(0.4)
-                    .foregroundColor(AppleTheme.premiumGold)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(AppleTheme.premiumSurface)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(AppleTheme.premiumBorder.opacity(0.65), lineWidth: 1.0)
-            )
-            .padding(.top, 6)
-
-            DirectSwitchAppleEmblem(size: 64)
-
-            VStack(spacing: 5) {
-                HStack(spacing: 6) {
-                    Text("Premium Direct")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(AppleTheme.textPrimary)
-                    InfoCircleButton(
-                        title: "Perché scegliere Copia Speculare",
-                        message: "Passa a iOS ti obbliga a resettare il telefono, mentre le app generiche ti costringono a selezionare chat, foto, video e file uno per uno.\n\nCon DirectSwitch cloni in blocco app, foto, video 4K, album, posizioni documenti identiche e contatti su telefoni già configurati — lasciando WhatsApp gratis con guida QR nativa."
-                    )
-                }
-
-                Text("Clona app, foto, video, documenti e contatti senza resettare")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(AppleTheme.premiumGold)
-                    .multilineTextAlignment(.center)
-            }
-
-            VStack(alignment: .leading, spacing: 11) {
-                featureLine(
-                    icon: "iphone",
-                    color: AppleTheme.blue,
-                    text: "Copia speculare su telefoni già configurati (zero reset)"
-                )
-                featureLine(
-                    icon: "photo.stack.fill",
-                    color: AppleTheme.orange,
-                    text: "Foto originali, Video 4K e Album copiati in blocco"
-                )
-                featureLine(
-                    icon: "folder.fill",
-                    color: AppleTheme.teal,
-                    text: "Documenti nelle posizioni originali e tutte le App pronte"
-                )
-                featureLine(
-                    icon: "checkmark.seal.fill",
-                    color: AppleTheme.green,
-                    text: "Un solo acquisto per entrambi • Chat WhatsApp sempre gratis"
-                )
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .appleCard(padding: 14)
-
-            Text("Pagamento unico • Nessun abbonamento mensile")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(AppleTheme.textSecondary)
-
-            if let note = billingNote, !note.isEmpty {
-                Text(note)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(AppleTheme.blue)
-                    .multilineTextAlignment(.center)
-            }
-
-            ApplePrimaryButton(
-                title: isProUnlocked ? "Premium Direct Attivo" : "Sblocca Premium Direct — 9,99 €",
-                icon: isProUnlocked ? "checkmark.seal.fill" : "crown.fill",
-                color: isProUnlocked ? AppleTheme.green : AppleTheme.premiumGold,
-                isDisabled: isProUnlocked
-            ) {
-                Task {
-                    let (ok, msg) = await iOSLicenseStore.purchaseCrossOsPass()
-                    billingNote = msg
-                    if ok {
-                        isProUnlocked = true
-                        onClose()
-                    }
-                }
-            }
-
-            HStack(spacing: 14) {
-                Button("Ripristina acquisti") {
-                    Task {
-                        let restored = await iOSLicenseStore.restoreStoreKitEntitlements()
-                        isProUnlocked = restored
-                        billingNote = restored ? "Premium Direct attivo!" : "Nessun acquisto precedente trovato."
-                    }
-                }
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(AppleTheme.blue)
-                .buttonStyle(.plain)
-
-                if isProUnlocked {
-                    Text("•")
-                        .foregroundColor(AppleTheme.textTertiary)
-
-                    Button("Blocca (Test)") {
-                        iOSLicenseStore.isLocalProUnlocked = false
-                        isProUnlocked = false
-                        billingNote = "Modalità Anteprima attivata (rubrica + 25 foto) per test."
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(AppleTheme.orange)
-                    .buttonStyle(.plain)
-                }
-
-                Text("•")
-                    .foregroundColor(AppleTheme.textTertiary)
-
-                Button("Chiudi", action: onClose)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(AppleTheme.textSecondary)
-                    .buttonStyle(.plain)
-            }
-            .padding(.top, 2)
-        }
-        .padding(20)
-        .background(AppleTheme.backgroundGradient.ignoresSafeArea())
-        .presentationDetents([.height(540), .large])
-        .presentationDragIndicator(.visible)
-        .preferredColorScheme(.light)
-    }
-
-    private func featureLine(icon: String, color: Color, text: String) -> some View {
-        HStack(spacing: 11) {
-            AppleSettingsIcon(systemName: icon, color: color, size: 28)
-            Text(text)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(AppleTheme.textPrimary)
-        }
     }
 }

@@ -593,10 +593,6 @@ struct SendCategoriesStepView: View {
         pairedPayload.receiverPlatform == .ANDROID
     }
 
-    private var isSessionFullUnlocked: Bool {
-        !isCrossOs || isLocalProUnlocked || pairedPayload.receiverHasPro
-    }
-
     private var docsCount: Int {
         documentPrecheck?.totalFiles
             ?? scanSummary?.documentsCount
@@ -694,9 +690,7 @@ struct SendCategoriesStepView: View {
                             title: "Stato collegamento",
                             message: !isCrossOs
                                 ? "Collegamento diretto attivo e pronto alla copia speculare dei dati selezionati."
-                                : (isSessionFullUnlocked
-                                   ? "Copia Speculare iPhone ↔ Android attiva: clona app, foto, video, album, documenti e contatti senza formattare (WhatsApp sempre gratuito via QR)."
-                                   : "Con Premium Direct sblocchi la Copia Speculare completa tra iPhone e Android su telefoni già configurati: foto 4K, video, album, posizioni documenti identiche, app e calendari (WhatsApp resta sempre gratuito).")
+                                : "Collegamento diretto attivo iPhone ↔ Android per copiare tutto gratuitamente su telefoni già configurati, senza formattare."
                         )
 
                         Spacer()
@@ -705,32 +699,6 @@ struct SendCategoriesStepView: View {
                             Text("Cambia")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(AppleTheme.blue)
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if isCrossOs && !isSessionFullUnlocked {
-                        Button(action: onOpenProSheet) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "crown.fill")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(AppleTheme.premiumAmber)
-                                Text("Sblocca trasferimento completo iPhone ↔ Android")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundColor(AppleTheme.premiumGold)
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(AppleTheme.premiumGold)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .background(AppleTheme.premiumSurface)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(AppleTheme.premiumBorder.opacity(0.6), lineWidth: 1.0)
-                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -804,7 +772,6 @@ struct SendCategoriesStepView: View {
                         unit: "eventi"
                     ),
                     infoMessage: "Importa lo storico completo degli appuntamenti (-10/+10 anni) con ricorrenze annuali/settimanali e avvisi oppure fino alla data odierna.",
-                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
                     isOn: $includeCalendars
                 ) {
                     calendarsDropdownContent
@@ -820,7 +787,6 @@ struct SendCategoriesStepView: View {
                         unit: "promemoria"
                     ),
                     infoMessage: "Trasferisce le tue liste di Promemoria Apple con scadenze, note, priorità e stato di completamento senza usare iCloud.",
-                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
                     isOn: $includeReminders
                 ) {
                     remindersDropdownContent
@@ -833,7 +799,6 @@ struct SendCategoriesStepView: View {
                     title: "Documenti e Posizioni File",
                     countBadge: docsCount > 0 ? "\(max(1, docFoldersCount)) cartelle • \(docsCount) file" : "iCloud Drive, Su iPhone, Chrome",
                     infoMessage: "Copia intere posizioni (iCloud Drive, Su iPhone, Chrome o altra posizione aggiunta dall'utente) ricreando identica tutta la gerarchia sul nuovo telefono.",
-                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
                     isOn: $includeDocuments
                 ) {
                     documentsDropdownContent
@@ -846,7 +811,6 @@ struct SendCategoriesStepView: View {
                     title: "App scaricate",
                     countBadge: selectedAppsCount > 0 ? "\(selectedAppsCount) app pronte" : nil,
                     infoMessage: "Rileva automaticamente le app installate su questo iPhone tramite verifica schemi iOS + Album/Foto e permette di aggiungerne altre dalle categorie in stile iPhone.",
-                    premiumBadge: isCrossOs && !isSessionFullUnlocked,
                     isOn: $includeApps
                 ) {
                     appsDropdownContent

@@ -10,12 +10,17 @@ import com.directswitch.android.protocol.HandshakeRequest
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
+import com.directswitch.android.protocol.MediaFallbackNaming
+import com.directswitch.android.protocol.PairAckRequest
 import com.directswitch.android.protocol.PhoneNormalizer
 import com.directswitch.android.protocol.QrPairingPayload
 import com.directswitch.android.protocol.SessionLicenseTier
 import com.directswitch.android.protocol.SmsTransferRecord
 import com.directswitch.android.protocol.TransferCategory
 import com.directswitch.android.protocol.TransferManifest
+import com.directswitch.android.protocol.TransferPreparationItem
+import com.directswitch.android.protocol.TransferPrepareRequest
+import com.directswitch.android.protocol.TransferSessionStage
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -53,7 +58,7 @@ class DirectSwitchProtocolTest {
     @Test
     fun crossOsSingleSideUnlockWorksFromEitherDeviceOrVerifiedCloudSavePro() {
         assertEquals(
-            SessionLicenseTier.CROSS_OS_PREVIEW,
+            SessionLicenseTier.CROSS_OS_PRO_UNLOCKED,
             LicensePolicyEvaluator.resolveTier(
                 senderPlatform = DevicePlatform.ANDROID,
                 receiverPlatform = DevicePlatform.IOS,
@@ -96,7 +101,8 @@ class DirectSwitchProtocolTest {
 
     @Test
     fun crossOsPreviewGatesCalendarsFullCategoriesAndMediaOver25() {
-        assertFalse(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PREVIEW))
+        assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PREVIEW))
+        assertTrue(LicensePolicyEvaluator.allowsCalendars(SessionLicenseTier.CROSS_OS_PREVIEW))
         assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.INTRA_OS_FREE))
         assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PRO_UNLOCKED))
 
@@ -113,8 +119,8 @@ class DirectSwitchProtocolTest {
             photos,
             SessionLicenseTier.CROSS_OS_PREVIEW
         )
-        assertEquals(25, allowed.size)
-        assertEquals(15, gated)
+        assertEquals(40, allowed.size)
+        assertEquals(0, gated)
     }
 
     @Test
@@ -494,7 +500,7 @@ class DirectSwitchProtocolTest {
         assertFalse(mixed.isWhatsAppOnly)
         assertTrue(mixed.hasAnyStandardDataCategory)
 
-        assertFalse(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PREVIEW))
+        assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PREVIEW))
         assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.CROSS_OS_PRO_UNLOCKED))
         assertTrue(LicensePolicyEvaluator.allowsFullCategories(SessionLicenseTier.INTRA_OS_FREE))
 
@@ -518,8 +524,8 @@ class DirectSwitchProtocolTest {
             previewItems,
             SessionLicenseTier.CROSS_OS_PREVIEW
         )
-        assertEquals(listOf("wa_free"), allowed.map { it.id })
-        assertEquals(1, gated)
+        assertEquals(listOf("wa_free", "doc_paid"), allowed.map { it.id })
+        assertEquals(0, gated)
     }
 
     @Test
@@ -833,5 +839,63 @@ class DirectSwitchProtocolTest {
 
         // Completato -> null
         assertEquals(null, tracker.update(1.0, isCompleted = true, nowMillis = 2_100_000L))
+    }
+
+    @Test
+    fun synchronizedStageModelsAndMediaFallbackNaming() {
+        val ack = PairAckRequest(
+            sessionId = "sess_sync_1",
+            senderName = "Pixel 8",
+            senderPlatform = DevicePlatform.ANDROID
+        )
+        val decodedAck = DirectSwitchJson.instance.decodeFromString<PairAckRequest>(
+            DirectSwitchJson.instance.encodeToString(ack)
+        )
+        assertEquals(ack, decodedAck)
+
+        val prepReq = TransferPrepareRequest(
+            sessionId = "sess_sync_1",
+            senderName = "Pixel 8",
+            senderPlatform = DevicePlatform.ANDROID,
+            transferScope = ActiveTransferScope(contacts = true, photos = true, videos = true, documents = true)
+        )
+        val decodedPrep = DirectSwitchJson.instance.decodeFromString<TransferPrepareRequest>(
+            DirectSwitchJson.instance.encodeToString(prepReq)
+        )
+        assertEquals(prepReq, decodedPrep)
+
+        assertEquals(5, TransferSessionStage.entries.size)
+
+        val prepItem = TransferPreparationItem(
+            id = "contacts",
+            title = "Rubrica contatti",
+            unitSingular = "contatto",
+            unitPlural = "contatti",
+            targetCount = 802,
+            isReady = true
+        )
+        assertEquals("1 contatto", prepItem.formattedCount(1))
+        assertEquals("802 contatti", prepItem.formattedCount(802))
+
+        val heicFallback = MediaFallbackNaming.reconcileFileNameAndMime(
+            fileName = "IMG_001.HEIC",
+            originalMime = "image/heic",
+            actualExtension = "jpg"
+        )
+        assertEquals(Triple("IMG_001.jpg", "image/jpeg", "jpg"), heicFallback)
+
+        val movFallback = MediaFallbackNaming.reconcileFileNameAndMime(
+            fileName = "CLIP_4K.MOV",
+            originalMime = "video/quicktime",
+            actualExtension = ".MP4"
+        )
+        assertEquals(Triple("CLIP_4K.mp4", "video/mp4", "mp4"), movFallback)
+
+        val sameJpeg = MediaFallbackNaming.reconcileFileNameAndMime(
+            fileName = "PHOTO_02.JPG",
+            originalMime = "image/jpeg",
+            actualExtension = "jpeg"
+        )
+        assertEquals(Triple("PHOTO_02.JPG", "image/jpeg", "jpg"), sameJpeg)
     }
 }
