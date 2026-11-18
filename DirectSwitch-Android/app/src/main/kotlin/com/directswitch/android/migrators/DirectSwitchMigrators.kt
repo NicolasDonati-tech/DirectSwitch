@@ -46,10 +46,15 @@ import com.directswitch.android.protocol.PhoneNormalizer
 import com.directswitch.android.protocol.PostalAddressTransferRecord
 import com.directswitch.android.protocol.SmsTransferRecord
 import com.directswitch.android.protocol.TransferCategory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
+import java.util.Calendar
 import java.util.TimeZone
 
 /** Riepilogo dei file e delle cartelle rilevate per singolo percorso relativo. */
@@ -99,7 +104,45 @@ data class LocalDeviceScanSummary(
     val whatsappArchivesCount: Int = 0,
     val installedAppsCount: Int = 0,
     val freeStorageBytes: Long,
-    val totalStorageBytes: Long
+    val totalStorageBytes: Long,
+    val photoAlbumsCount: Int = 0
+)
+
+data class ContactsPreloadState(
+    val loadedCount: Int = 0,
+    val totalCount: Int = 0,
+    val isLoading: Boolean = false,
+    val isCompleted: Boolean = false
+)
+
+data class PhotosPreloadState(
+    val loadedCount: Int = 0,
+    val totalCount: Int = 0,
+    val albumsCount: Int = 0,
+    val estimatedBytes: Long = 0L,
+    val isLoading: Boolean = false,
+    val isCompleted: Boolean = false
+)
+
+data class VideosPreloadState(
+    val loadedCount: Int = 0,
+    val totalCount: Int = 0,
+    val estimatedBytes: Long = 0L,
+    val isLoading: Boolean = false,
+    val isCompleted: Boolean = false
+)
+
+data class DateSyncPreloadState(
+    val totalAllCount: Int = 0,
+    val totalUpToTodayCount: Int = 0,
+    val lastUpdatedEpochMillis: Long? = null,
+    val isLoading: Boolean = false
+)
+
+data class InstalledAppCategoryGroup(
+    val id: String,
+    val title: String,
+    val apps: List<InstalledAppRecord>
 )
 
 /** Calcola spazio libero e totale sul volume dati del dispositivo. */
@@ -366,6 +409,45 @@ object ContactsSmartMerger {
 
     fun hasWritePermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CONTACTS) == PackageManager.PERMISSION_GRANTED
+
+    /** Precarica progressivamente il conteggio dei contatti in rubrica fino al totale effettivo per la tendina UI. */
+    suspend fun preloadContactsCountWithProgress(
+        context: Context,
+        onProgress: (loaded: Int, total: Int) -> Unit
+    ): Int = withContext(Dispatchers.IO) {
+        if (!hasReadPermission(context)) {
+            withContext(Dispatchers.Main) { onProgress(0, 0) }
+            return@withContext 0
+        }
+        var total = 0
+        runCatching {
+            context.contentResolver.query(
+                ContactsContract.Contacts.CONTENT_URI,
+                arrayOf(ContactsContract.Contacts._ID),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                total = cursor.count
+                if (total <= 0) {
+                    return@use
+                }
+                val step = maxOf(1, total / 24)
+                withContext(Dispatchers.Main) { onProgress(0, total) }
+                var loaded = 0
+                while (cursor.moveToNext()) {
+                    currentCoroutineContext().ensureActive()
+                    loaded++
+                    if (loaded % step == 0 || loaded == total) {
+                        val snap = loaded.coerceAtMost(total)
+                        withContext(Dispatchers.Main) { onProgress(snap, total) }
+                    }
+                }
+            }
+        }
+        withContext(Dispatchers.Main) { onProgress(total, total) }
+        total
+    }
 
     private fun encodePhoneLabel(type: Int, customLabel: String?): String = when (type) {
         ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE -> "mobile"
@@ -904,6 +986,58 @@ object MediaExifScannerAndImporter {
     fun hasMediaPermissions(context: Context): Boolean =
         hasPhotoPermission(context) || hasVideoPermission(context)
 
+    /** Precaricamento progressivo di immagini + album oppure video fino al totale effettivo sul dispositivo. */
+    suspend fun preloadMediaStatsWithProgress(
+        context: Context,
+        isVideo: Boolean,
+        onProgress: (loaded: Int, total: Int, albumsCount: Int, estimatedBytes: Long) -> Unit
+    ): Triple<Int, Int, Long> = withContext(Dispatchers.IO) {
+        val allowed = if (isVideo) hasVideoPermission(context) else hasPhotoPermission(context)
+        if (!allowed) {
+            withContext(Dispatchers.Main) { onProgress(0, 0, 0, 0L) }
+            return@withContext Triple(0, 0, 0L)
+        }
+        val uri = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME
+        )
+        var totalValid = 0
+        var totalBytes = 0L
+        val albums = HashSet<String>()
+        runCatching {
+            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                val rawCount = cursor.count
+                val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                val albumIdx = cursor.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                val step = maxOf(1, rawCount / 24)
+                withContext(Dispatchers.Main) { onProgress(0, rawCount, 0, 0L) }
+                var scanned = 0
+                while (cursor.moveToNext()) {
+                    currentCoroutineContext().ensureActive()
+                    scanned++
+                    val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
+                    if (size > 0L) {
+                        totalValid++
+                        totalBytes += size
+                        val albumName = if (albumIdx >= 0) cursor.getString(albumIdx)?.trim().orEmpty() else ""
+                        if (albumName.isNotEmpty()) albums.add(albumName.lowercase())
+                    }
+                    if (scanned % step == 0 || scanned == rawCount) {
+                        val l = totalValid
+                        val t = maxOf(totalValid, rawCount)
+                        val a = albums.size
+                        val b = totalBytes
+                        withContext(Dispatchers.Main) { onProgress(l, t, a, b) }
+                    }
+                }
+            }
+        }
+        withContext(Dispatchers.Main) { onProgress(totalValid, totalValid, albums.size, totalBytes) }
+        Triple(totalValid, albums.size, totalBytes)
+    }
+
     fun scanMediaEntries(
         context: Context,
         includePhotos: Boolean = true,
@@ -1137,7 +1271,17 @@ object CalendarMigrator {
     fun hasWritePermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED
 
-    fun readEvents(context: Context): List<CalendarEventRecord> {
+    fun endOfDayMillis(referenceMillis: Long = System.currentTimeMillis()): Long {
+        val cal = Calendar.getInstance()
+        cal.timeInMillis = referenceMillis
+        cal.set(Calendar.HOUR_OF_DAY, 23)
+        cal.set(Calendar.MINUTE, 59)
+        cal.set(Calendar.SECOND, 59)
+        cal.set(Calendar.MILLISECOND, 999)
+        return cal.timeInMillis
+    }
+
+    fun readEvents(context: Context, upToEpochMillis: Long? = null): List<CalendarEventRecord> {
         if (!hasReadPermission(context)) return emptyList()
         val out = mutableListOf<CalendarEventRecord>()
         val projection = arrayOf(
@@ -1150,12 +1294,18 @@ object CalendarMigrator {
             CalendarContract.Events.ALL_DAY,
             CalendarContract.Events.RRULE
         )
+        val selection = if (upToEpochMillis != null) {
+            "${CalendarContract.Events.DELETED} = 0 AND ${CalendarContract.Events.DTSTART} <= ?"
+        } else {
+            "${CalendarContract.Events.DELETED} = 0"
+        }
+        val selectionArgs = upToEpochMillis?.let { arrayOf(it.toString()) }
         try {
             context.contentResolver.query(
                 CalendarContract.Events.CONTENT_URI,
                 projection,
-                "${CalendarContract.Events.DELETED} = 0",
-                null,
+                selection,
+                selectionArgs,
                 "${CalendarContract.Events.DTSTART} DESC"
             )?.use { cursor ->
                 val idIdx = cursor.getColumnIndexOrThrow(CalendarContract.Events._ID)
@@ -1320,14 +1470,16 @@ object SmsSystemScanner {
         }
     }
 
-    fun countSms(context: Context): Int {
+    fun countSms(context: Context, upToEpochMillis: Long? = null): Int {
         if (!hasReadPermission(context)) return 0
+        val selection = upToEpochMillis?.let { "${Telephony.Sms.DATE} <= ?" }
+        val args = upToEpochMillis?.let { arrayOf(it.toString()) }
         return try {
             context.contentResolver.query(
                 Telephony.Sms.CONTENT_URI,
                 arrayOf(Telephony.Sms._ID),
-                null,
-                null,
+                selection,
+                args,
                 null
             )?.use { it.count } ?: 0
         } catch (t: Throwable) {
@@ -1336,7 +1488,11 @@ object SmsSystemScanner {
         }
     }
 
-    fun readAllSms(context: Context, maxMessages: Int = 5000): List<SmsTransferRecord> {
+    fun readAllSms(
+        context: Context,
+        maxMessages: Int = 5000,
+        upToEpochMillis: Long? = null
+    ): List<SmsTransferRecord> {
         if (!hasReadPermission(context)) return emptyList()
         val out = mutableListOf<SmsTransferRecord>()
         val projection = arrayOf(
@@ -1346,12 +1502,14 @@ object SmsSystemScanner {
             Telephony.Sms.DATE,
             Telephony.Sms.TYPE
         )
+        val selection = upToEpochMillis?.let { "${Telephony.Sms.DATE} <= ?" }
+        val args = upToEpochMillis?.let { arrayOf(it.toString()) }
         try {
             context.contentResolver.query(
                 Telephony.Sms.CONTENT_URI,
                 projection,
-                null,
-                null,
+                selection,
+                args,
                 "${Telephony.Sms.DATE} DESC"
             )?.use { cursor ->
                 val idIdx = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
@@ -2769,6 +2927,104 @@ object InstalledAppsScanner {
         }
     }
 
+    private data class CategoryClassifierSpec(
+        val id: String,
+        val title: String,
+        val keywords: List<String>,
+        val androidCategory: Int? = null
+    )
+
+    private val extendedCategorySpecs: List<CategoryClassifierSpec> = listOf(
+        CategoryClassifierSpec(
+            id = "social_messaging",
+            title = "Social & Messaggi",
+            keywords = listOf("whatsapp", "telegram", "instagram", "facebook", "orca", "messenger", "tiktok", "musically", "twitter", "barcelona", "threads", "linkedin", "snapchat", "pinterest", "reddit", "discord", "signal", "viber"),
+            androidCategory = ApplicationInfo.CATEGORY_SOCIAL
+        ),
+        CategoryClassifierSpec(
+            id = "banks_payments",
+            title = "Banche & Pagamenti",
+            keywords = listOf("intesa", "latuabanca", "unicredit", "posteitaliane", "isybank", "fineco", "bbva", "bper", "mediolanum", "caitalia", "hype", "nexi", "icbpi", "bancomat", "revolut", "satispay", "paypal", "ing.", "banca", "bank", "wallet", "illimity")
+        ),
+        CategoryClassifierSpec(
+            id = "spid_office",
+            title = "SPID, CIE & Lavoro",
+            keywords = listOf("pagopa", "cieid", "posteid", "postebuy", "aruba", "outlook", "teams", "zoom", "office", "word", "excel", "powerpoint", "onedrive", "dropbox", "slack", "scan", "camscanner", "docs", "drive"),
+            androidCategory = ApplicationInfo.CATEGORY_PRODUCTIVITY
+        ),
+        CategoryClassifierSpec(
+            id = "transport_travel",
+            title = "Trasporti, Auto & Viaggi",
+            keywords = listOf("prontotreno", "trenitalia", "italo", "telepass", "unipol", "mycicero", "mooney", "easypark", "ryanair", "itaairways", "booking", "airbnb", "uber", "waze", "maps", "moovit"),
+            androidCategory = ApplicationInfo.CATEGORY_MAPS
+        ),
+        CategoryClassifierSpec(
+            id = "shopping_food",
+            title = "Shopping, Spesa & Cibo",
+            keywords = listOf("amazon.mshop", "temu", "zzkko", "shein", "subito", "vinted", "ebay", "esselunga", "lidl", "glovo", "deliveroo", "justeat", "zalando", "shein", "coop", "carrefour")
+        ),
+        CategoryClassifierSpec(
+            id = "music_streaming",
+            title = "Musica, Video & Streaming",
+            keywords = listOf("spotify", "shazam", "youtube", "netflix", "avod", "primevideo", "disney", "dazn", "rainet", "raiplay", "mediaset", "sky.", "nowtv", "twitch"),
+            androidCategory = ApplicationInfo.CATEGORY_AUDIO
+        ),
+        CategoryClassifierSpec(
+            id = "photo_video_sport",
+            title = "Foto, Video, Giochi & Sport",
+            keywords = listOf("capcut", "lvoverseas", "canva", "instashot", "snapseed", "lrmobile", "picsart", "vsco", "remini", "facetune", "photoroom", "vlog", "strava", "garmin", "gopro", "dji"),
+            androidCategory = ApplicationInfo.CATEGORY_IMAGE
+        )
+    )
+
+    fun classifyAppCategoryId(packageName: String, appName: String, appCategory: Int = ApplicationInfo.CATEGORY_UNDEFINED): String {
+        val hay = "${packageName.lowercase()} ${appName.lowercase()}"
+        for (spec in extendedCategorySpecs) {
+            if (spec.keywords.any { it in hay }) return spec.id
+        }
+        return when (appCategory) {
+            ApplicationInfo.CATEGORY_SOCIAL -> "social_messaging"
+            ApplicationInfo.CATEGORY_PRODUCTIVITY -> "spid_office"
+            ApplicationInfo.CATEGORY_MAPS -> "transport_travel"
+            ApplicationInfo.CATEGORY_AUDIO, ApplicationInfo.CATEGORY_VIDEO -> "music_streaming"
+            ApplicationInfo.CATEGORY_IMAGE, ApplicationInfo.CATEGORY_GAME -> "photo_video_sport"
+            else -> "operators_home_ai"
+        }
+    }
+
+    fun groupInstalledAppsByCategory(
+        context: Context,
+        apps: List<InstalledAppRecord>
+    ): List<InstalledAppCategoryGroup> {
+        if (apps.isEmpty()) return emptyList()
+        val pm = context.packageManager
+        val buckets = LinkedHashMap<String, MutableList<InstalledAppRecord>>()
+        for (spec in extendedCategorySpecs) {
+            buckets[spec.id] = mutableListOf()
+        }
+        buckets["operators_home_ai"] = mutableListOf()
+
+        for (app in apps) {
+            val sysCat = runCatching {
+                pm.getApplicationInfo(app.packageName, 0).category
+            }.getOrDefault(ApplicationInfo.CATEGORY_UNDEFINED)
+            val catId = classifyAppCategoryId(app.packageName, app.appName, sysCat)
+            buckets.getOrPut(catId) { mutableListOf() }.add(app)
+        }
+
+        val titlesById = extendedCategorySpecs.associate { it.id to it.title } +
+            ("operators_home_ai" to "Operatori, Casa, AI & Altro")
+
+        return buckets.mapNotNull { (id, list) ->
+            if (list.isEmpty()) null
+            else InstalledAppCategoryGroup(
+                id = id,
+                title = titlesById[id] ?: "Altre app",
+                apps = list.sortedBy { it.appName.lowercase() }
+            )
+        }
+    }
+
     fun openAppOnPlayStore(
         context: Context,
         record: InstalledAppRecord,
@@ -2809,6 +3065,11 @@ object DeviceDataAnalyzer {
         val media = MediaExifScannerAndImporter.scanMediaEntries(context, includePhotos = true, includeVideos = true)
         val photos = media.filter { it.manifestItem.category == TransferCategory.PHOTOS }
         val videos = media.filter { it.manifestItem.category == TransferCategory.VIDEOS }
+        val photoAlbumsCount = photos
+            .map { it.manifestItem.relativeAlbumOrFolder.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .size
         val calendars = CalendarMigrator.readEvents(context).size
         val sms = SmsSystemScanner.countSms(context)
         val docPrecheck = DocumentsAndWhatsAppScanner.inspectPreTransferDocuments(
@@ -2841,7 +3102,8 @@ object DeviceDataAnalyzer {
             whatsappArchivesCount = waEntries.size,
             installedAppsCount = appsCount,
             freeStorageBytes = freeBytes,
-            totalStorageBytes = totalBytes
+            totalStorageBytes = totalBytes,
+            photoAlbumsCount = photoAlbumsCount
         )
     }
 }

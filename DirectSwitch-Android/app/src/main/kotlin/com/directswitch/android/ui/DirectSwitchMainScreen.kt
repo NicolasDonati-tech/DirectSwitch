@@ -113,15 +113,23 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.directswitch.android.DirectSwitchLog
+import com.directswitch.android.migrators.CalendarMigrator
 import com.directswitch.android.migrators.CloudSaveEntitlementDetector
+import com.directswitch.android.migrators.ContactsPreloadState
+import com.directswitch.android.migrators.ContactsSmartMerger
+import com.directswitch.android.migrators.DateSyncPreloadState
 import com.directswitch.android.migrators.DeviceDataAnalyzer
 import com.directswitch.android.migrators.DirectSwitchBillingManager
 import com.directswitch.android.migrators.DocumentPrecheckReport
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.GoogleSetupBridge
+import com.directswitch.android.migrators.InstalledAppCategoryGroup
 import com.directswitch.android.migrators.InstalledAppsScanner
 import com.directswitch.android.migrators.LocalDeviceScanSummary
+import com.directswitch.android.migrators.MediaExifScannerAndImporter
+import com.directswitch.android.migrators.PhotosPreloadState
 import com.directswitch.android.migrators.SmsSystemScanner
+import com.directswitch.android.migrators.VideosPreloadState
 import com.directswitch.android.migrators.findHostActivity
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
@@ -170,14 +178,14 @@ private enum class WizardStep {
 }
 
 private data class CategorySelectionState(
-    val contacts: Boolean = true,
-    val photos: Boolean = true,
-    val videos: Boolean = true,
-    val calendars: Boolean = true,
-    val sms: Boolean = true,
-    val documents: Boolean = true,
-    val whatsAppVault: Boolean = true,
-    val installedApps: Boolean = true
+    val contacts: Boolean = false,
+    val photos: Boolean = false,
+    val videos: Boolean = false,
+    val calendars: Boolean = false,
+    val sms: Boolean = false,
+    val documents: Boolean = false,
+    val whatsAppVault: Boolean = false,
+    val installedApps: Boolean = false
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -227,6 +235,17 @@ fun DirectSwitchMainScreen(
     var pendingDocPrecheckReport by remember { mutableStateOf<DocumentPrecheckReport?>(null) }
 
     var categories by remember { mutableStateOf(CategorySelectionState()) }
+    var calendarsUpToTodayOnly by remember { mutableStateOf(false) }
+    var smsUpToTodayOnly by remember { mutableStateOf(false) }
+    var contactsPreload by remember { mutableStateOf(ContactsPreloadState()) }
+    var photosPreload by remember { mutableStateOf(PhotosPreloadState()) }
+    var videosPreload by remember { mutableStateOf(VideosPreloadState()) }
+    var calendarsSync by remember { mutableStateOf(DateSyncPreloadState()) }
+    var smsSync by remember { mutableStateOf(DateSyncPreloadState()) }
+    var detectedAppsCatalog by remember { mutableStateOf<List<InstalledAppRecord>>(emptyList()) }
+    var groupedAppCategories by remember { mutableStateOf<List<InstalledAppCategoryGroup>>(emptyList()) }
+    var deselectedAppPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var isLoadingAppsCatalog by remember { mutableStateOf(false) }
     var isReceiverFlow by remember { mutableStateOf(false) }
 
     var showProSheet by remember { mutableStateOf(false) }
@@ -250,20 +269,6 @@ fun DirectSwitchMainScreen(
             val next = pendingPermissionContinuation
             pendingPermissionContinuation = null
             next?.invoke()
-        }
-    }
-
-    val documentPickerLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            scope.launch {
-                val added = withContext(Dispatchers.IO) {
-                    DocumentsAndWhatsAppScanner.importSharedUrisIntoVault(context, uris)
-                }
-                scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
-                vaultStatusNote = if (added > 0) "$added file pronti" else null
-            }
         }
     }
 
@@ -334,6 +339,149 @@ fun DirectSwitchMainScreen(
         }
     }
 
+    fun requestSpecificPermissionsThen(perms: List<String>, actionAfter: (() -> Unit)? = null) {
+        val missing = perms.filter { perm ->
+            ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            actionAfter?.invoke()
+        } else {
+            pendingPermissionContinuation = actionAfter
+            permissionsLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    fun startContactsPreload() {
+        if (!ContactsSmartMerger.hasReadPermission(context)) return
+        contactsPreload = ContactsPreloadState(isLoading = true)
+        scope.launch {
+            val total = ContactsSmartMerger.preloadContactsCountWithProgress(context) { loaded, tot ->
+                contactsPreload = ContactsPreloadState(loadedCount = loaded, totalCount = tot, isLoading = true, isCompleted = false)
+            }
+            contactsPreload = ContactsPreloadState(loadedCount = total, totalCount = total, isLoading = false, isCompleted = true)
+        }
+    }
+
+    fun startPhotosPreload() {
+        if (!MediaExifScannerAndImporter.hasPhotoPermission(context)) return
+        photosPreload = PhotosPreloadState(isLoading = true)
+        scope.launch {
+            val (total, albums, bytes) = MediaExifScannerAndImporter.preloadMediaStatsWithProgress(context, isVideo = false) { loaded, tot, alb, b ->
+                photosPreload = PhotosPreloadState(loadedCount = loaded, totalCount = tot, albumsCount = alb, estimatedBytes = b, isLoading = true, isCompleted = false)
+            }
+            photosPreload = PhotosPreloadState(loadedCount = total, totalCount = total, albumsCount = albums, estimatedBytes = bytes, isLoading = false, isCompleted = true)
+        }
+    }
+
+    fun startVideosPreload() {
+        if (!MediaExifScannerAndImporter.hasVideoPermission(context)) return
+        videosPreload = VideosPreloadState(isLoading = true)
+        scope.launch {
+            val (total, _, bytes) = MediaExifScannerAndImporter.preloadMediaStatsWithProgress(context, isVideo = true) { loaded, tot, _, b ->
+                videosPreload = VideosPreloadState(loadedCount = loaded, totalCount = tot, estimatedBytes = b, isLoading = true, isCompleted = false)
+            }
+            videosPreload = VideosPreloadState(loadedCount = total, totalCount = total, estimatedBytes = bytes, isLoading = false, isCompleted = true)
+        }
+    }
+
+    fun refreshCalendarsSync() {
+        if (!CalendarMigrator.hasReadPermission(context)) return
+        calendarsSync = calendarsSync.copy(isLoading = true)
+        scope.launch {
+            val (allCount, upToTodayCount) = withContext(Dispatchers.IO) {
+                val cutoff = CalendarMigrator.endOfDayMillis()
+                CalendarMigrator.readEvents(context, null).size to
+                    CalendarMigrator.readEvents(context, cutoff).size
+            }
+            calendarsSync = DateSyncPreloadState(
+                totalAllCount = allCount,
+                totalUpToTodayCount = upToTodayCount,
+                lastUpdatedEpochMillis = System.currentTimeMillis(),
+                isLoading = false
+            )
+        }
+    }
+
+    fun refreshSmsSync() {
+        if (!SmsSystemScanner.hasReadPermission(context)) return
+        smsSync = smsSync.copy(isLoading = true)
+        scope.launch {
+            val (allCount, upToTodayCount) = withContext(Dispatchers.IO) {
+                val cutoff = CalendarMigrator.endOfDayMillis()
+                SmsSystemScanner.countSms(context, null) to
+                    SmsSystemScanner.countSms(context, cutoff)
+            }
+            smsSync = DateSyncPreloadState(
+                totalAllCount = allCount,
+                totalUpToTodayCount = upToTodayCount,
+                lastUpdatedEpochMillis = System.currentTimeMillis(),
+                isLoading = false
+            )
+        }
+    }
+
+    fun loadInstalledAppsCatalog() {
+        isLoadingAppsCatalog = true
+        scope.launch {
+            val (scanned, groups) = withContext(Dispatchers.IO) {
+                val list = InstalledAppsScanner.scanUserInstalledApps(context)
+                val cats = InstalledAppsScanner.groupInstalledAppsByCategory(context, list)
+                list to cats
+            }
+            detectedAppsCatalog = scanned
+            groupedAppCategories = groups
+            isLoadingAppsCatalog = false
+        }
+    }
+
+    fun updateCategoriesAndTriggerPreloads(next: CategorySelectionState) {
+        val prev = categories
+        categories = next
+        if (!prev.contacts && next.contacts) {
+            if (ContactsSmartMerger.hasReadPermission(context)) startContactsPreload()
+            else requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)) { startContactsPreload() }
+        }
+        if (!prev.photos && next.photos) {
+            val photoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
+            if (MediaExifScannerAndImporter.hasPhotoPermission(context)) startPhotosPreload()
+            else requestSpecificPermissionsThen(listOf(photoPerm)) { startPhotosPreload() }
+        }
+        if (!prev.videos && next.videos) {
+            val videoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
+            if (MediaExifScannerAndImporter.hasVideoPermission(context)) startVideosPreload()
+            else requestSpecificPermissionsThen(listOf(videoPerm)) { startVideosPreload() }
+        }
+        if (!prev.calendars && next.calendars) {
+            if (CalendarMigrator.hasReadPermission(context)) refreshCalendarsSync()
+            else requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)) { refreshCalendarsSync() }
+        }
+        if (!prev.sms && next.sms) {
+            if (SmsSystemScanner.hasReadPermission(context)) refreshSmsSync()
+            else requestSpecificPermissionsThen(listOf(Manifest.permission.READ_SMS)) { refreshSmsSync() }
+        }
+        if (!prev.documents && next.documents) {
+            scope.launch {
+                scanSummary = withContext(Dispatchers.IO) { DeviceDataAnalyzer.scanSummary(context) }
+            }
+        }
+        if (!prev.installedApps && next.installedApps) {
+            deselectedAppPackages = emptySet()
+            loadInstalledAppsCatalog()
+        }
+    }
+
+    fun resetCategorySelectionsAndPreloads() {
+        categories = CategorySelectionState()
+        calendarsUpToTodayOnly = false
+        smsUpToTodayOnly = false
+        contactsPreload = ContactsPreloadState()
+        photosPreload = PhotosPreloadState()
+        videosPreload = VideosPreloadState()
+        calendarsSync = DateSyncPreloadState()
+        smsSync = DateSyncPreloadState()
+        deselectedAppPackages = emptySet()
+    }
+
     fun resetAndGoHome() {
         showCameraScanner = false
         autoDiscovery.stopAdvertising()
@@ -351,6 +499,7 @@ fun DirectSwitchMainScreen(
         pinErrorNote = null
         bootstrapPortalUrl = null
         bootstrapWifiQrString = null
+        resetCategorySelectionsAndPreloads()
         step = WizardStep.HOME
     }
 
@@ -415,6 +564,9 @@ fun DirectSwitchMainScreen(
         pendingDocPrecheckReport = null
         isReceiverFlow = false
         vaultStatusNote = null
+        val appsOverride = if (categories.installedApps && detectedAppsCatalog.isNotEmpty()) {
+            detectedAppsCatalog.filter { it.packageName !in deselectedAppPackages }
+        } else null
         step = WizardStep.TRANSFER_PROGRESS
         scope.launch {
             client.executeTransfer(
@@ -423,10 +575,13 @@ fun DirectSwitchMainScreen(
                 includePhotos = categories.photos,
                 includeVideos = categories.videos,
                 includeCalendars = categories.calendars,
+                calendarsUpToTodayOnly = calendarsUpToTodayOnly,
                 includeSms = categories.sms,
+                smsUpToTodayOnly = smsUpToTodayOnly,
                 includeDocuments = categories.documents,
                 includeWhatsAppVault = if (targetPayload.receiverPlatform == DevicePlatform.IOS) false else categories.whatsAppVault,
-                includeInstalledApps = categories.installedApps
+                includeInstalledApps = categories.installedApps,
+                installedAppsOverride = appsOverride
             )
         }
     }
@@ -510,6 +665,7 @@ fun DirectSwitchMainScreen(
                                 selectedBeaconForPin = null
                                 pinInput = ""
                                 pinErrorNote = null
+                                resetCategorySelectionsAndPreloads()
                                 autoDiscovery.startScanningForNewDevices()
                                 step = WizardStep.SENDER_CONNECT
                             }
@@ -651,9 +807,66 @@ fun DirectSwitchMainScreen(
                             summary = scanSummary,
                             isLocalPro = isProUnlocked,
                             categories = categories,
+                            calendarsUpToTodayOnly = calendarsUpToTodayOnly,
+                            smsUpToTodayOnly = smsUpToTodayOnly,
+                            contactsPreload = contactsPreload,
+                            photosPreload = photosPreload,
+                            videosPreload = videosPreload,
+                            calendarsSync = calendarsSync,
+                            smsSync = smsSync,
+                            detectedAppsCatalog = detectedAppsCatalog,
+                            groupedAppCategories = groupedAppCategories,
+                            deselectedAppPackages = deselectedAppPackages,
+                            isLoadingApps = isLoadingAppsCatalog,
                             vaultStatusNote = vaultStatusNote,
-                            onUpdateCategories = { categories = it },
-                            onPickDocumentsOrWhatsApp = { documentPickerLauncher.launch(arrayOf("*/*")) },
+                            onUpdateCategories = { updateCategoriesAndTriggerPreloads(it) },
+                            onToggleCalendarsUpToToday = { calendarsUpToTodayOnly = it },
+                            onToggleSmsUpToToday = { smsUpToTodayOnly = it },
+                            onRequestContactsPermission = {
+                                requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)) { startContactsPreload() }
+                            },
+                            onRequestPhotosPermission = {
+                                val photoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
+                                requestSpecificPermissionsThen(listOf(photoPerm)) { startPhotosPreload() }
+                            },
+                            onRequestVideosPermission = {
+                                val videoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
+                                requestSpecificPermissionsThen(listOf(videoPerm)) { startVideosPreload() }
+                            },
+                            onRequestCalendarsPermission = {
+                                requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)) { refreshCalendarsSync() }
+                            },
+                            onRequestSmsPermission = {
+                                requestSpecificPermissionsThen(listOf(Manifest.permission.READ_SMS)) { refreshSmsSync() }
+                            },
+                            onReloadContacts = { startContactsPreload() },
+                            onReloadPhotos = { startPhotosPreload() },
+                            onReloadVideos = { startVideosPreload() },
+                            onRefreshCalendars = { refreshCalendarsSync() },
+                            onRefreshSms = { refreshSmsSync() },
+                            onToggleSingleApp = { app ->
+                                deselectedAppPackages = if (app.packageName in deselectedAppPackages) {
+                                    deselectedAppPackages - app.packageName
+                                } else {
+                                    deselectedAppPackages + app.packageName
+                                }
+                            },
+                            onToggleAppCategoryAll = { group, currentlyAllSelected ->
+                                val pkgs = group.apps.map { it.packageName }.toSet()
+                                deselectedAppPackages = if (currentlyAllSelected) {
+                                    deselectedAppPackages + pkgs
+                                } else {
+                                    deselectedAppPackages - pkgs
+                                }
+                            },
+                            onToggleAllDetectedApps = { currentlyAllSelected ->
+                                deselectedAppPackages = if (currentlyAllSelected) {
+                                    detectedAppsCatalog.map { it.packageName }.toSet()
+                                } else {
+                                    emptySet()
+                                }
+                            },
+                            onRefreshApps = { loadInstalledAppsCatalog() },
                             onPickFolderTree = { folderTreePickerLauncher.launch(null) },
                             onToggleLocationSelection = { locId, selected ->
                                 scope.launch {
@@ -1441,7 +1654,7 @@ private fun SenderConnectWizardView(
     }
 }
 
-// MARK: - 3B. Passo 2 Mittente: Scegli cosa copiare (stile "Android Switch" + "CloudSave")
+// MARK: - 3B. Passo 2 Mittente: Scegli cosa copiare (tendine inline stile iPhone, tutto da spuntare)
 
 @Composable
 private fun SenderCategoriesWizardView(
@@ -1449,9 +1662,35 @@ private fun SenderCategoriesWizardView(
     summary: LocalDeviceScanSummary?,
     isLocalPro: Boolean,
     categories: CategorySelectionState,
+    calendarsUpToTodayOnly: Boolean,
+    smsUpToTodayOnly: Boolean,
+    contactsPreload: ContactsPreloadState,
+    photosPreload: PhotosPreloadState,
+    videosPreload: VideosPreloadState,
+    calendarsSync: DateSyncPreloadState,
+    smsSync: DateSyncPreloadState,
+    detectedAppsCatalog: List<InstalledAppRecord>,
+    groupedAppCategories: List<InstalledAppCategoryGroup>,
+    deselectedAppPackages: Set<String>,
+    isLoadingApps: Boolean,
     vaultStatusNote: String?,
     onUpdateCategories: (CategorySelectionState) -> Unit,
-    onPickDocumentsOrWhatsApp: () -> Unit,
+    onToggleCalendarsUpToToday: (Boolean) -> Unit,
+    onToggleSmsUpToToday: (Boolean) -> Unit,
+    onRequestContactsPermission: () -> Unit,
+    onRequestPhotosPermission: () -> Unit,
+    onRequestVideosPermission: () -> Unit,
+    onRequestCalendarsPermission: () -> Unit,
+    onRequestSmsPermission: () -> Unit,
+    onReloadContacts: () -> Unit,
+    onReloadPhotos: () -> Unit,
+    onReloadVideos: () -> Unit,
+    onRefreshCalendars: () -> Unit,
+    onRefreshSms: () -> Unit,
+    onToggleSingleApp: (InstalledAppRecord) -> Unit,
+    onToggleAppCategoryAll: (InstalledAppCategoryGroup, Boolean) -> Unit,
+    onToggleAllDetectedApps: (Boolean) -> Unit,
+    onRefreshApps: () -> Unit,
     onPickFolderTree: () -> Unit,
     onToggleLocationSelection: (String, Boolean) -> Unit,
     onRemoveSafLocation: (String) -> Unit,
@@ -1461,6 +1700,7 @@ private fun SenderCategoriesWizardView(
     onChangeDevice: () -> Unit,
     onStartTransfer: () -> Unit
 ) {
+    val wizardContext = LocalContext.current
     val isCrossOs = pairedPayload.receiverPlatform == DevicePlatform.IOS
     val isFullUnlocked = !isCrossOs || isLocalPro || pairedPayload.receiverHasPro
     val allSelected = categories.contacts && categories.photos && categories.videos &&
@@ -1477,7 +1717,7 @@ private fun SenderCategoriesWizardView(
     ) {
         Text("Passo 2 di 3", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
         Text(
-            text = if (allSelected) "Deseleziona" else "Seleziona tutto",
+            text = if (allSelected) "Deseleziona tutto" else "Seleziona tutto",
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             color = DirectSwitchTheme.blue,
@@ -1547,7 +1787,7 @@ private fun SenderCategoriesWizardView(
                 onClick = onOpenProSheet,
                 shape = RoundedCornerShape(10.dp),
                 color = DirectSwitchTheme.premiumSurface,
-                border = androidx.compose.foundation.BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f)),
+                border = BorderStroke(1.dp, DirectSwitchTheme.premiumBorder.copy(alpha = 0.65f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -1562,92 +1802,216 @@ private fun SenderCategoriesWizardView(
         }
     }
 
-    Text("Scegli cosa copiare", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-
-    DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.Contacts,
-            iconColor = DirectSwitchTheme.blue,
-            title = "Rubrica contatti",
-            subtitle = summary?.let { "${it.contactsCount} contatti" },
-            checked = categories.contacts,
-            onCheckedChange = { onUpdateCategories(categories.copy(contacts = it)) }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("Cosa inviare", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        Text(
+            text = "Spunta ogni voce per aprire la configurazione del passaggio al nuovo telefono.",
+            fontSize = 12.5.sp,
+            color = DirectSwitchTheme.textSecondary
         )
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+    }
 
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.Image,
-            iconColor = DirectSwitchTheme.orange,
-            title = "Foto e Album",
-            subtitle = summary?.let { "${it.photosCount} foto • ${formatMb(it.photosBytes)}" },
-            checked = categories.photos,
-            onCheckedChange = { onUpdateCategories(categories.copy(photos = it)) }
+    val contactsTotal = maxOf(contactsPreload.totalCount, summary?.contactsCount ?: 0)
+    val contactsLoaded = if (contactsPreload.isCompleted) contactsTotal else contactsPreload.loadedCount
+    CategoryDropdownCard(
+        icon = Icons.Filled.Contacts,
+        iconColor = DirectSwitchTheme.blue,
+        title = "Rubrica contatti",
+        countBadge = if (contactsTotal > 0) "$contactsTotal contatti" else null,
+        checked = categories.contacts,
+        onCheckedChange = { onUpdateCategories(categories.copy(contacts = it)) }
+    ) {
+        ProgressivePreloadDropdownBody(
+            hasPermission = ContactsSmartMerger.hasReadPermission(wizardContext),
+            permissionTitle = "Permesso Contatti richiesto per preparare la rubrica.",
+            onRequestPermission = onRequestContactsPermission,
+            isLoading = contactsPreload.isLoading,
+            loadedCount = contactsLoaded,
+            totalCount = contactsTotal,
+            loadingLabel = "Precaricamento rubrica: $contactsLoaded / ${maxOf(contactsLoaded, contactsTotal)} contatti",
+            readyLabel = "$contactsTotal contatti totali preparati",
+            detailLabel = "Include numeri con etichette, foto profilo, email, indirizzi e compleanni con unione duplicati.",
+            accentColor = DirectSwitchTheme.blue,
+            onReload = onReloadContacts
         )
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+    }
 
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.Videocam,
-            iconColor = DirectSwitchTheme.red,
-            title = "Video originali",
-            subtitle = summary?.let { "${it.videosCount} video • ${formatMb(it.videosBytes)}" },
-            checked = categories.videos,
-            onCheckedChange = { onUpdateCategories(categories.copy(videos = it)) }
+    val photosTotal = maxOf(photosPreload.totalCount, summary?.photosCount ?: 0)
+    val photosLoaded = if (photosPreload.isCompleted) photosTotal else photosPreload.loadedCount
+    val photosAlbums = maxOf(photosPreload.albumsCount, summary?.photoAlbumsCount ?: 0)
+    val photosBytes = maxOf(photosPreload.estimatedBytes, summary?.photosBytes ?: 0L)
+    CategoryDropdownCard(
+        icon = Icons.Filled.Image,
+        iconColor = DirectSwitchTheme.orange,
+        title = "Foto e Album",
+        countBadge = if (photosTotal > 0) "$photosTotal foto • ${formatMb(photosBytes)}" else null,
+        checked = categories.photos,
+        onCheckedChange = { onUpdateCategories(categories.copy(photos = it)) }
+    ) {
+        ProgressivePreloadDropdownBody(
+            hasPermission = MediaExifScannerAndImporter.hasPhotoPermission(wizardContext),
+            permissionTitle = "Permesso Foto richiesto per preparare immagini e album.",
+            onRequestPermission = onRequestPhotosPermission,
+            isLoading = photosPreload.isLoading,
+            loadedCount = photosLoaded,
+            totalCount = photosTotal,
+            loadingLabel = "Precaricamento immagini: $photosLoaded / ${maxOf(photosLoaded, photosTotal)} foto",
+            readyLabel = "$photosTotal foto totali preparate",
+            detailLabel = "$photosAlbums album rilevati • ${formatMb(photosBytes)} in qualità originale.",
+            accentColor = DirectSwitchTheme.orange,
+            onReload = onReloadPhotos
         )
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+    }
 
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.CalendarMonth,
-            iconColor = DirectSwitchTheme.indigo,
-            title = "Calendari",
-            subtitle = summary?.let { "${it.calendarEventsCount} eventi" },
-            premiumBadge = isCrossOs && !isFullUnlocked,
-            checked = categories.calendars,
-            onCheckedChange = { onUpdateCategories(categories.copy(calendars = it)) }
+    val videosTotal = maxOf(videosPreload.totalCount, summary?.videosCount ?: 0)
+    val videosLoaded = if (videosPreload.isCompleted) videosTotal else videosPreload.loadedCount
+    val videosBytes = maxOf(videosPreload.estimatedBytes, summary?.videosBytes ?: 0L)
+    CategoryDropdownCard(
+        icon = Icons.Filled.Videocam,
+        iconColor = DirectSwitchTheme.red,
+        title = "Video originali",
+        countBadge = if (videosTotal > 0) "$videosTotal video • ${formatMb(videosBytes)}" else null,
+        checked = categories.videos,
+        onCheckedChange = { onUpdateCategories(categories.copy(videos = it)) }
+    ) {
+        ProgressivePreloadDropdownBody(
+            hasPermission = MediaExifScannerAndImporter.hasVideoPermission(wizardContext),
+            permissionTitle = "Permesso Video richiesto per preparare i filmati originali.",
+            onRequestPermission = onRequestVideosPermission,
+            isLoading = videosPreload.isLoading,
+            loadedCount = videosLoaded,
+            totalCount = videosTotal,
+            loadingLabel = "Precaricamento video: $videosLoaded / ${maxOf(videosLoaded, videosTotal)} video",
+            readyLabel = "$videosTotal video originali preparati",
+            detailLabel = "Qualità 4K e Slow-Motion preservata • ${formatMb(videosBytes)}.",
+            accentColor = DirectSwitchTheme.red,
+            onReload = onReloadVideos
         )
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+    }
 
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.Sms,
+    val activeCalCount = if (calendarsUpToTodayOnly) {
+        calendarsSync.totalUpToTodayCount
+    } else {
+        maxOf(calendarsSync.totalAllCount, summary?.calendarEventsCount ?: 0)
+    }
+    CategoryDropdownCard(
+        icon = Icons.Filled.CalendarMonth,
+        iconColor = DirectSwitchTheme.indigo,
+        title = "Calendari",
+        countBadge = if (activeCalCount > 0) "$activeCalCount eventi" else null,
+        premiumBadge = isCrossOs && !isFullUnlocked,
+        checked = categories.calendars,
+        onCheckedChange = { onUpdateCategories(categories.copy(calendars = it)) }
+    ) {
+        DateSyncDropdownBody(
+            hasPermission = CalendarMigrator.hasReadPermission(wizardContext),
+            permissionTitle = "Permesso Calendario richiesto per leggere gli eventi.",
+            onRequestPermission = onRequestCalendarsPermission,
+            isLoading = calendarsSync.isLoading,
+            lastUpdatedEpochMillis = calendarsSync.lastUpdatedEpochMillis,
+            activeCount = activeCalCount,
+            unitLabel = "eventi",
+            upToTodayOnly = calendarsUpToTodayOnly,
+            onToggleUpToToday = onToggleCalendarsUpToToday,
+            onRefresh = onRefreshCalendars
+        )
+    }
+
+    val activeSmsCount = if (smsUpToTodayOnly) {
+        smsSync.totalUpToTodayCount
+    } else {
+        maxOf(smsSync.totalAllCount, summary?.smsCount ?: 0)
+    }
+    CategoryDropdownCard(
+        icon = Icons.Filled.Sms,
+        iconColor = DirectSwitchTheme.green,
+        title = "Messaggi SMS",
+        countBadge = if (activeSmsCount > 0) "$activeSmsCount messaggi" else null,
+        premiumBadge = isCrossOs && !isFullUnlocked,
+        checked = categories.sms,
+        onCheckedChange = { onUpdateCategories(categories.copy(sms = it)) }
+    ) {
+        DateSyncDropdownBody(
+            hasPermission = SmsSystemScanner.hasReadPermission(wizardContext),
+            permissionTitle = "Permesso SMS richiesto per preparare i messaggi.",
+            onRequestPermission = onRequestSmsPermission,
+            isLoading = smsSync.isLoading,
+            lastUpdatedEpochMillis = smsSync.lastUpdatedEpochMillis,
+            activeCount = activeSmsCount,
+            unitLabel = "messaggi",
+            upToTodayOnly = smsUpToTodayOnly,
+            onToggleUpToToday = onToggleSmsUpToToday,
+            onRefresh = onRefreshSms
+        )
+    }
+
+    val locationSummaries = summary?.documentLocationSummaries.orEmpty()
+    val hasAllFiles = summary?.hasAllFilesAccess ?: DocumentsAndWhatsAppScanner.hasAllFilesAccess(wizardContext)
+    val hasPickedLocations = !vaultStatusNote.isNullOrBlank() ||
+        remember(summary) { DocumentsAndWhatsAppScanner.getPersistedFolderTreeUris(wizardContext).isNotEmpty() }
+    val docsBadge = summary?.let {
+        if (it.documentsCount > 0) "${maxOf(1, it.documentFoldersCount)} cartelle • ${it.documentsCount} file"
+        else "Memoria interna, Drive, SD"
+    }
+    CategoryDropdownCard(
+        icon = Icons.Filled.Description,
+        iconColor = DirectSwitchTheme.teal,
+        title = "Documenti e Posizioni File",
+        countBadge = docsBadge,
+        premiumBadge = isCrossOs && !isFullUnlocked,
+        checked = categories.documents,
+        onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
+    ) {
+        DocumentsPositionsDropdownBody(
+            locationSummaries = locationSummaries,
+            hasAllFiles = hasAllFiles,
+            vaultStatusNote = vaultStatusNote,
+            onToggleLocationSelection = onToggleLocationSelection,
+            onRemoveSafLocation = onRemoveSafLocation,
+            onRefreshDocumentCheck = onRefreshDocumentCheck,
+            onPickFolderTree = onPickFolderTree,
+            onClearPickedDocuments = onClearPickedDocuments,
+            hasPickedLocations = hasPickedLocations
+        )
+    }
+
+    if (!isCrossOs) {
+        CategoryDropdownCard(
+            icon = Icons.AutoMirrored.Filled.Chat,
             iconColor = DirectSwitchTheme.green,
-            title = "Messaggi SMS",
-            subtitle = summary?.let { "${it.smsCount} messaggi" },
-            premiumBadge = isCrossOs && !isFullUnlocked,
-            checked = categories.sms,
-            onCheckedChange = { onUpdateCategories(categories.copy(sms = it)) }
-        )
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
-
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.Description,
-            iconColor = DirectSwitchTheme.teal,
-            title = "Documenti e File",
-            subtitle = summary?.let { "${it.documentsCount} file • ${it.documentFoldersCount} cartelle" },
-            premiumBadge = isCrossOs && !isFullUnlocked,
-            checked = categories.documents,
-            onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
-        )
-        if (!isCrossOs) {
-            HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
-
-            CleanCategoryToggleRow(
-                icon = Icons.AutoMirrored.Filled.Chat,
-                iconColor = DirectSwitchTheme.green,
-                title = "Chat WhatsApp",
-                subtitle = "Gratuito • Cronologia chat via QR",
-                checked = categories.whatsAppVault,
-                onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
-            )
+            title = "Chat WhatsApp",
+            countBadge = "Gratuito • Codice QR",
+            checked = categories.whatsAppVault,
+            onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
+        ) {
+            WhatsAppDropdownBody(isCrossOs = false)
         }
-        HorizontalDivider(modifier = Modifier.padding(start = 58.dp), color = DirectSwitchTheme.hairline)
+    }
 
-        CleanCategoryToggleRow(
-            icon = Icons.Filled.Apps,
-            iconColor = DirectSwitchTheme.blue,
-            title = "App installate (catalogo Store)",
-            subtitle = summary?.let { "${it.installedAppsCount} app rilevabili" },
-            premiumBadge = isCrossOs && !isFullUnlocked,
-            checked = categories.installedApps,
-            onCheckedChange = { onUpdateCategories(categories.copy(installedApps = it)) }
+    val effectiveAppsCatalog = detectedAppsCatalog
+    val selectedAppsCount = if (effectiveAppsCatalog.isNotEmpty()) {
+        effectiveAppsCatalog.count { it.packageName !in deselectedAppPackages }
+    } else {
+        summary?.installedAppsCount ?: 0
+    }
+    CategoryDropdownCard(
+        icon = Icons.Filled.Apps,
+        iconColor = DirectSwitchTheme.blue,
+        title = "App scaricate",
+        countBadge = if (selectedAppsCount > 0) "$selectedAppsCount app pronte" else null,
+        premiumBadge = isCrossOs && !isFullUnlocked,
+        checked = categories.installedApps,
+        onCheckedChange = { onUpdateCategories(categories.copy(installedApps = it)) }
+    ) {
+        InstalledAppsDropdownBody(
+            allApps = effectiveAppsCatalog,
+            groupedCategories = groupedAppCategories,
+            deselectedPackages = deselectedAppPackages,
+            isLoadingApps = isLoadingApps,
+            onToggleApp = onToggleSingleApp,
+            onToggleCategoryAll = onToggleAppCategoryAll,
+            onToggleAllDetected = onToggleAllDetectedApps,
+            onRefreshApps = onRefreshApps
         )
     }
 
@@ -1677,259 +2041,13 @@ private fun SenderCategoriesWizardView(
         }
     }
 
-    if (categories.documents) {
-        val wizardContext = LocalContext.current
-        val folderSummaries = summary?.documentFolderSummaries.orEmpty()
-        val locationSummaries = summary?.documentLocationSummaries.orEmpty()
-        val selectedLocationsCount = locationSummaries.count { it.isSelected }
-        val hasAllFiles = summary?.hasAllFilesAccess
-            ?: DocumentsAndWhatsAppScanner.hasAllFilesAccess(wizardContext)
-        val hasPickedLocations = !vaultStatusNote.isNullOrBlank() ||
-            remember(summary) { DocumentsAndWhatsAppScanner.getPersistedFolderTreeUris(wizardContext).isNotEmpty() }
-
-        DirectSwitchCard(padding = 14.dp, spacing = 10.dp) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.teal)
-                    Column {
-                        Text(
-                            text = "Seleziona le posizioni da trasferire",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DirectSwitchTheme.textPrimary
-                        )
-                        Text(
-                            text = if (summary != null) {
-                                if (selectedLocationsCount > 0) {
-                                    "$selectedLocationsCount posizioni selezionate • ${summary.documentsCount} file in ${folderSummaries.size} cartelle • ${formatMb(summary.documentsBytes)}"
-                                } else {
-                                    "Spunta una o più posizioni da copiare"
-                                }
-                            } else {
-                                "Scansione posizioni in corso..."
-                            },
-                            fontSize = 12.sp,
-                            color = DirectSwitchTheme.textSecondary
-                        )
-                    }
-                }
-                TextButton(onClick = onRefreshDocumentCheck) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.Refresh,
-                            contentDescription = "Ricontrolla",
-                            tint = DirectSwitchTheme.blue,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            "Ricontrolla",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = DirectSwitchTheme.blue
-                        )
-                    }
-                }
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFiles) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { DocumentsAndWhatsAppScanner.openAllFilesAccessSettings(wizardContext) },
-                    shape = RoundedCornerShape(12.dp),
-                    color = DirectSwitchTheme.orange.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, DirectSwitchTheme.orange.copy(alpha = 0.45f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.Warning,
-                            contentDescription = null,
-                            tint = DirectSwitchTheme.orange,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Accesso completo non attivo: tocca per autorizzare «Accesso a tutti i file» e leggere intere posizioni (Memoria interna, Download, Documenti, Scheda SD).",
-                            fontSize = 12.sp,
-                            lineHeight = 16.sp,
-                            color = DirectSwitchTheme.textPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Icon(
-                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = null,
-                            tint = DirectSwitchTheme.orange
-                        )
-                    }
-                }
-            }
-
-            if (locationSummaries.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    locationSummaries.forEach { loc ->
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(enabled = loc.locationId.isNotBlank()) {
-                                    onToggleLocationSelection(loc.locationId, !loc.isSelected)
-                                },
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (loc.isSelected) {
-                                DirectSwitchTheme.blue.copy(alpha = 0.08f)
-                            } else {
-                                DirectSwitchTheme.cardSurface
-                            },
-                            border = BorderStroke(
-                                1.dp,
-                                if (loc.isSelected) DirectSwitchTheme.blue.copy(alpha = 0.35f) else DirectSwitchTheme.hairline
-                            )
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                if (loc.isSelected) {
-                                    Icon(
-                                        Icons.Filled.CheckCircle,
-                                        contentDescription = "Selezionata",
-                                        tint = DirectSwitchTheme.blue,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(18.dp)
-                                            .border(
-                                                1.6.dp,
-                                                DirectSwitchTheme.textSecondary.copy(alpha = 0.55f),
-                                                CircleShape
-                                            )
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = (if (!loc.isAccessible) "⚠ " else "") + loc.locationName,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = when {
-                                            !loc.isSelected -> DirectSwitchTheme.textSecondary
-                                            !loc.isAccessible -> DirectSwitchTheme.orange
-                                            else -> DirectSwitchTheme.textPrimary
-                                        }
-                                    )
-                                    Text(
-                                        text = "${loc.folderCount} cartelle • ${loc.fileCount} file • ${formatMb(loc.totalBytes)}",
-                                        fontSize = 11.5.sp,
-                                        color = DirectSwitchTheme.textSecondary
-                                    )
-                                }
-                                if (loc.isRemovableSaf && loc.locationId.isNotBlank()) {
-                                    Icon(
-                                        Icons.Filled.Close,
-                                        contentDescription = "Rimuovi posizione",
-                                        tint = DirectSwitchTheme.textSecondary,
-                                        modifier = Modifier
-                                            .size(18.dp)
-                                            .clickable { onRemoveSafLocation(loc.locationId) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (folderSummaries.isEmpty()) {
-                Text(
-                    text = "Spunta le posizioni da trasferire qui sopra, oppure aggiungi una posizione esterna (SD / USB / Drive).",
-                    fontSize = 12.sp,
-                    color = DirectSwitchTheme.textSecondary
-                )
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    folderSummaries.take(6).forEach { folder ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "${folder.folderPath}/",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = DirectSwitchTheme.textSecondary,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                text = "${folder.fileCount} file • ${formatMb(folder.totalBytes)}",
-                                fontSize = 11.5.sp,
-                                color = DirectSwitchTheme.textSecondary
-                            )
-                        }
-                    }
-                    if (folderSummaries.size > 6) {
-                        Text(
-                            text = "e altre ${folderSummaries.size - 6} cartelle (${summary?.documentsCount ?: 0} file totali)",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = DirectSwitchTheme.teal
-                        )
-                    }
-                }
-            }
-
-            if (!vaultStatusNote.isNullOrBlank()) {
-                Text(
-                    text = vaultStatusNote,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = DirectSwitchTheme.blue
-                )
-            }
-
-            DirectSwitchSecondaryButton(
-                text = "Aggiungi altra posizione (SD / USB / Drive)",
-                onClick = onPickFolderTree
-            )
-            if (hasPickedLocations) {
-                TextButton(
-                    onClick = onClearPickedDocuments,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "Rimuovi posizioni esterne aggiunte",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = DirectSwitchTheme.red
-                    )
-                }
-            }
-        }
-    }
     val isOnlyWhatsAppSelected = !isCrossOs && categories.whatsAppVault &&
         !categories.contacts && !categories.photos && !categories.videos &&
         !categories.calendars && !categories.sms && !categories.documents &&
         !categories.installedApps
 
     DirectSwitchPrimaryButton(
-        text = if (isOnlyWhatsAppSelected) "Vai al passaggio Chat WhatsApp" else "Copia i dati",
+        text = if (isOnlyWhatsAppSelected) "Vai al passaggio Chat WhatsApp" else "Copia le voci selezionate",
         onClick = onStartTransfer,
         enabled = anySelected
     )

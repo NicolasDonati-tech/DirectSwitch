@@ -1087,10 +1087,13 @@ class DirectSwitchTransferClient(private val context: Context) {
         includePhotos: Boolean,
         includeVideos: Boolean,
         includeCalendars: Boolean,
+        calendarsUpToTodayOnly: Boolean = false,
         includeSms: Boolean = true,
+        smsUpToTodayOnly: Boolean = false,
         includeDocuments: Boolean = true,
         includeWhatsAppVault: Boolean = true,
-        includeInstalledApps: Boolean = true
+        includeInstalledApps: Boolean = true,
+        installedAppsOverride: List<InstalledAppRecord>? = null
     ): Result<TransferCompletionReport> = withContext(Dispatchers.IO) {
         var boundChannel: BoundHttpChannel? = null
         DirectSwitchKeepAliveService.start(context, "Invio dati verso ${qrPayload.receiverName}...")
@@ -1127,10 +1130,17 @@ class DirectSwitchTransferClient(private val context: Context) {
                 apps = includeInstalledApps,
                 whatsApp = includeWhatsAppVault
             )
+            val endOfTodayCutoff = CalendarMigrator.endOfDayMillis()
             val contacts = if (includeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
-            val calendars = if (includeCalendars) CalendarMigrator.readEvents(context) else emptyList()
-            val smsList = if (includeSms) SmsSystemScanner.readAllSms(context) else emptyList()
-            val installedApps = if (includeInstalledApps) InstalledAppsScanner.scanUserInstalledApps(context) else emptyList()
+            val calendars = if (includeCalendars) {
+                CalendarMigrator.readEvents(context, upToEpochMillis = if (calendarsUpToTodayOnly) endOfTodayCutoff else null)
+            } else emptyList()
+            val smsList = if (includeSms) {
+                SmsSystemScanner.readAllSms(context, upToEpochMillis = if (smsUpToTodayOnly) endOfTodayCutoff else null)
+            } else emptyList()
+            val installedApps = if (includeInstalledApps) {
+                installedAppsOverride ?: InstalledAppsScanner.scanUserInstalledApps(context)
+            } else emptyList()
             val mediaEntries = MediaExifScannerAndImporter.scanMediaEntries(
                 context = context,
                 includePhotos = includePhotos,

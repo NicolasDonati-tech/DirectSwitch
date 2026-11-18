@@ -741,4 +741,47 @@ class DirectSwitchProtocolTest {
         val recentSpeed = meter.record(bytes = 20L * 1024L * 1024L, nowMillis = 20_000L)
         assertTrue(recentSpeed > 10.0)
     }
+
+    @Test
+    fun androidExtendedCategoriesAndPreloadStateModelsWork() {
+        assertEquals(
+            "social_messaging",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.whatsapp", "WhatsApp")
+        )
+        assertEquals(
+            "banks_payments",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.latuabancaperandroid", "Intesa Sanpaolo")
+        )
+        assertEquals(
+            "spid_office",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("it.ipzs.cieid", "CieID")
+        )
+        assertEquals(
+            "transport_travel",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.lynxspa.prontotreno", "Trenitalia")
+        )
+        assertEquals(
+            "shopping_food",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.einnovation.temu", "Temu")
+        )
+        assertEquals(
+            "music_streaming",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.spotify.music", "Spotify")
+        )
+        assertEquals(
+            "photo_video_sport",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.lemon.lvoverseas", "CapCut")
+        )
+        assertEquals(
+            "operators_home_ai",
+            com.directswitch.android.migrators.InstalledAppsScanner.classifyAppCategoryId("com.openai.chatgpt", "ChatGPT")
+        )
+
+        val endOfDay = com.directswitch.android.migrators.CalendarMigrator.endOfDayMillis(1_700_000_000_000L)
+        assertTrue(endOfDay >= 1_700_000_000_000L)
+
+        val contactsPreload = com.directswitch.android.migrators.ContactsPreloadState(loadedCount = 120, totalCount = 120, isLoading = false, isCompleted = true)
+        assertEquals(120, contactsPreload.totalCount)
+        assertTrue(contactsPreload.isCompleted)
+    }
 }
