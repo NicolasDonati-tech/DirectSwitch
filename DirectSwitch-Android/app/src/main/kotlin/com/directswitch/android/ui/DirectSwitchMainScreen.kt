@@ -49,6 +49,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Description
@@ -2286,12 +2287,12 @@ private fun TransferProgressWizardView(
     }
 
     DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
-        val contactsValue = if (progress.mergedContacts == 0 && progress.contactsAlreadyPresent > 0) {
-            "0 (${progress.contactsAlreadyPresent} già presenti)"
-        } else {
-            "${progress.mergedContacts}"
-        }
-        SummaryItemRow(Icons.Filled.Contacts, DirectSwitchTheme.blue, "Contatti uniti", contactsValue)
+        SummaryItemRow(
+            Icons.Filled.Contacts,
+            DirectSwitchTheme.blue,
+            "Contatti uniti",
+            formatImportedWithDuplicates(progress.mergedContacts, progress.contactsAlreadyPresent)
+        )
         HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
         SummaryItemRow(
             Icons.Filled.Image,
@@ -2300,7 +2301,21 @@ private fun TransferProgressWizardView(
             if (progress.totalItems > 0) "${progress.completedItems} / ${progress.totalItems}" else "${progress.completedItems}"
         )
         HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-        SummaryItemRow(Icons.Filled.CalendarMonth, DirectSwitchTheme.indigo, "Calendari importati", "${progress.importedCalendars}")
+        SummaryItemRow(
+            Icons.Filled.CalendarMonth,
+            DirectSwitchTheme.indigo,
+            "Calendari importati",
+            formatImportedWithDuplicates(progress.importedCalendars, progress.calendarsAlreadyPresent)
+        )
+        if (progress.activeTransferScope.reminders || progress.importedReminders > 0 || progress.remindersAlreadyPresent > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(
+                Icons.Filled.Checklist,
+                DirectSwitchTheme.blue,
+                "Promemoria salvati",
+                formatImportedWithDuplicates(progress.importedReminders, progress.remindersAlreadyPresent)
+            )
+        }
         if (progress.importedSms > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.Sms, DirectSwitchTheme.green, "Messaggi salvati", "${progress.importedSms}")
@@ -2447,6 +2462,12 @@ private fun TransferProgressWizardView(
             onClick = onFinish
         )
     }
+}
+
+private fun formatImportedWithDuplicates(imported: Int, alreadyPresent: Int): String = when {
+    imported == 0 && alreadyPresent > 0 -> "0 ($alreadyPresent già presenti)"
+    alreadyPresent > 0 -> "$imported (+$alreadyPresent già presenti)"
+    else -> "$imported"
 }
 
 @Composable

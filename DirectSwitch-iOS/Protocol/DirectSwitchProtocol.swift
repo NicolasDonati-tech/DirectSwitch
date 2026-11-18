@@ -352,7 +352,9 @@ struct ManifestResponse: Codable, Sendable {
     let contactsMergedCount: Int
     let contactsSkippedDuplicates: Int
     let calendarsImportedCount: Int
+    var calendarsAlreadyPresentCount: Int? = nil
     var remindersImportedCount: Int? = nil
+    var remindersAlreadyPresentCount: Int? = nil
     var smsImportedCount: Int = 0
     var gatedByCrossOsPreviewCount: Int = 0
 }
@@ -364,7 +366,9 @@ struct TransferCompletionReport: Codable, Sendable {
     let transferredBytes: Int64
     let mergedContactsCount: Int
     let importedCalendarsCount: Int
+    var calendarsAlreadyPresentCount: Int? = nil
     var remindersImportedCount: Int? = nil
+    var remindersAlreadyPresentCount: Int? = nil
     var livePhotosSavedCount: Int? = nil
     var importedSmsCount: Int = 0
     let skippedDuplicatesCount: Int
@@ -1000,5 +1004,38 @@ enum MediaFallbackNaming {
             }
         }()
         return (updatedName, updatedMime, cleanExt)
+    }
+}
+
+/// Converte in modo bidirezionale le regole di ricorrenza tra Apple EventKit e RFC 5545 RRULE (Android CalendarProvider).
+enum CalendarRecurrenceMapper {
+    static func toRRule(frequency: String?, interval: Int?) -> String? {
+        guard let rawFreq = frequency?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+              ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].contains(rawFreq) else {
+            return nil
+        }
+        let safeInterval = max(1, interval ?? 1)
+        return "FREQ=\(rawFreq);INTERVAL=\(safeInterval)"
+    }
+
+    static func parseRRule(_ rrule: String?) -> (frequency: String, interval: Int)? {
+        guard let raw = rrule?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        var freq: String? = nil
+        var interval = 1
+        for part in raw.split(separator: ";") {
+            let kv = part.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2 else { continue }
+            let key = kv[0].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let val = kv[1].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if key == "FREQ", ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].contains(val) {
+                freq = val.lowercased()
+            } else if key == "INTERVAL", let parsed = Int(val) {
+                interval = max(1, parsed)
+            }
+        }
+        guard let freq else { return nil }
+        return (freq, interval)
     }
 }

@@ -3535,9 +3535,11 @@ enum iOSDocumentsSandboxBridge {
     }
 }
 
-enum iOSCalendarMigrator {
-    static func isAuthorized() -> Bool {
-        let status = EKEventStore.authorizationStatus(for: .event)
+private enum iOSEventStoreHelpers {
+    static let maxChunkSeconds: TimeInterval = 365.0 * 86400.0 * 3.0
+
+    static func canRead(entityType: EKEntityType) -> Bool {
+        let status = EKEventStore.authorizationStatus(for: entityType)
         if #available(iOS 17.0, *) {
             return status == .fullAccess
         } else {
@@ -3545,14 +3547,148 @@ enum iOSCalendarMigrator {
         }
     }
 
-    static func requestAccessIfNeeded() async -> Bool {
-        if isAuthorized() { return true }
-        let store = EKEventStore()
+    static func canWrite(entityType: EKEntityType) -> Bool {
+        let status = EKEventStore.authorizationStatus(for: entityType)
         if #available(iOS 17.0, *) {
-            return (try? await store.requestFullAccessToEvents()) ?? false
+            return status == .fullAccess || status == .writeOnly
         } else {
-            return (try? await store.requestAccess(to: .event)) ?? false
+            return status == .authorized
         }
+    }
+
+    static func requestAccess(entityType: EKEntityType) async -> Bool {
+        if canRead(entityType: entityType) { return true }
+        let current = EKEventStore.authorizationStatus(for: entityType)
+        if current == .denied || current == .restricted { return false }
+        if #available(iOS 17.0, *), current == .writeOnly { return true }
+
+        return await requestSystemAccessOnMain(entityType: entityType)
+    }
+
+    @MainActor
+    private static func requestSystemAccessOnMain(entityType: EKEntityType) async -> Bool {
+        let store = EKEventStore()
+        defer { _ = store }
+        if #available(iOS 17.0, *) {
+            switch entityType {
+            case .event:
+                _ = try? await store.requestFullAccessToEvents()
+            case .reminder:
+                _ = try? await store.requestFullAccessToReminders()
+            @unknown default:
+                break
+            }
+        } else {
+            _ = try? await store.requestAccess(to: entityType)
+        }
+        return canWrite(entityType: entityType)
+    }
+
+    static func resolveWritableCalendar(
+        in store: EKEventStore,
+        entityType: EKEntityType,
+        fallbackTitle: String
+    ) -> EKCalendar? {
+        let defaultCal: EKCalendar? = entityType == .event
+            ? store.defaultCalendarForNewEvents
+            : store.defaultCalendarForNewReminders()
+        if let defaultCal, defaultCal.allowsContentModifications {
+            return defaultCal
+        }
+        let writable = store.calendars(for: entityType).filter { cal in
+            cal.allowsContentModifications && cal.type != .birthday && cal.type != .subscription
+        }
+        if let preferred = writable.first(where: {
+            $0.source?.sourceType == .calDAV || $0.source?.sourceType == .mobileMe
+        }) ?? writable.first(where: { $0.source?.sourceType == .local }) ?? writable.first {
+            return preferred
+        }
+
+        let candidateSources = store.sources.filter {
+            $0.sourceType == .local || $0.sourceType == .calDAV || $0.sourceType == .mobileMe
+        }
+        for source in candidateSources {
+            let newCal = EKCalendar(for: entityType, eventStore: store)
+            newCal.title = fallbackTitle
+            newCal.source = source
+            if (try? store.saveCalendar(newCal, commit: true)) != nil, newCal.allowsContentModifications {
+                return newCal
+            }
+        }
+        return store.calendars(for: entityType).first(where: { $0.allowsContentModifications })
+    }
+
+    static func writableCalendarsByLowerTitle(in store: EKEventStore, entityType: EKEntityType) -> [String: EKCalendar] {
+        var map: [String: EKCalendar] = [:]
+        for cal in store.calendars(for: entityType) where cal.allowsContentModifications && cal.type != .birthday && cal.type != .subscription {
+            let key = cal.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !key.isEmpty && map[key] == nil {
+                map[key] = cal
+            }
+        }
+        return map
+    }
+
+    static func ensureTargetCalendar(
+        named rawName: String?,
+        entityType: EKEntityType,
+        in store: EKEventStore,
+        fallback: EKCalendar,
+        cache: inout [String: EKCalendar]
+    ) -> EKCalendar {
+        let trimmed = (rawName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback }
+        let lower = trimmed.lowercased()
+        if let existing = cache[lower] {
+            return existing
+        }
+        let preferredSources: [EKSource] = {
+            var srcs: [EKSource] = []
+            if let fbSource = fallback.source { srcs.append(fbSource) }
+            for s in store.sources where !srcs.contains(where: { $0.sourceIdentifier == s.sourceIdentifier }) &&
+                (s.sourceType == .calDAV || s.sourceType == .mobileMe || s.sourceType == .local) {
+                srcs.append(s)
+            }
+            return srcs
+        }()
+        for source in preferredSources {
+            let newCal = EKCalendar(for: entityType, eventStore: store)
+            newCal.title = trimmed
+            newCal.source = source
+            if (try? store.saveCalendar(newCal, commit: true)) != nil {
+                cache[lower] = newCal
+                return newCal
+            }
+        }
+        return fallback
+    }
+
+    /// Apple EventKit `predicateForEvents` tronca silenziosamente le query superiori a 4 anni ai soli primi 4 anni.
+    static func fetchEventsChunked(in store: EKEventStore, from start: Date, to end: Date) -> [EKEvent] {
+        guard start < end else { return [] }
+        var collected: [EKEvent] = []
+        var cursor = start
+        while cursor < end {
+            let chunkEnd = min(end, cursor.addingTimeInterval(maxChunkSeconds))
+            let pred = store.predicateForEvents(withStart: cursor, end: chunkEnd, calendars: nil)
+            collected.append(contentsOf: store.events(matching: pred))
+            cursor = chunkEnd
+        }
+        return collected
+    }
+}
+
+enum iOSCalendarMigrator {
+    static func isAuthorized() -> Bool {
+        iOSEventStoreHelpers.canRead(entityType: .event)
+    }
+
+    static func canWrite() -> Bool {
+        iOSEventStoreHelpers.canWrite(entityType: .event)
+    }
+
+    static func requestAccessIfNeeded() async -> Bool {
+        await iOSEventStoreHelpers.requestAccess(entityType: .event)
     }
 
     private static func encodeFrequency(_ freq: EKRecurrenceFrequency) -> String {
@@ -3578,7 +3714,6 @@ enum iOSCalendarMigrator {
     static func readEvents(upToDate: Date? = nil) -> [CalendarEventRecord] {
         guard isAuthorized() else { return [] }
         let store = EKEventStore()
-        // Finestra ampia (-10 anni .. +10 anni) oppure fino al termine della data odierna se richiesto dall'utente
         let start = Date().addingTimeInterval(-365 * 86400 * 10)
         let defaultEnd = Date().addingTimeInterval(365 * 86400 * 10)
         let end: Date = {
@@ -3586,105 +3721,190 @@ enum iOSCalendarMigrator {
             let endOfCutoffDay = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: cutoff) ?? cutoff
             return max(start, min(defaultEnd, endOfCutoffDay))
         }()
-        let pred = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        return store.events(matching: pred).map { ev in
+
+        let rawEvents = iOSEventStoreHelpers.fetchEventsChunked(in: store, from: start, to: end)
+        var seenSeriesOrOccurrence = Set<String>()
+        var records: [CalendarEventRecord] = []
+
+        for ev in rawEvents {
+            let startMs = Int64(ev.startDate.timeIntervalSince1970 * 1000.0)
+            let endMsRaw = Int64(ev.endDate.timeIntervalSince1970 * 1000.0)
+            let safeEndMs = endMsRaw >= startMs ? endMsRaw : (startMs + 3_600_000)
+            let evId = ev.eventIdentifier ?? UUID().uuidString
+            let dedupKey: String = (ev.hasRecurrenceRules && !ev.isDetached)
+                ? "rec|\(evId)"
+                : "occ|\(evId)|\(startMs)"
+            guard seenSeriesOrOccurrence.insert(dedupKey).inserted else { continue }
+
             let rule = ev.recurrenceRules?.first
+            let freqStr = rule.map { encodeFrequency($0.frequency) }
+            let interval = rule.map { max(1, $0.interval) }
+            let rruleStr = CalendarRecurrenceMapper.toRRule(frequency: freqStr, interval: interval)
             let alarmOffset = ev.alarms?.first?.relativeOffset
-            return CalendarEventRecord(
-                id: ev.eventIdentifier ?? UUID().uuidString,
-                title: ev.title ?? "Evento",
-                description: ev.notes,
-                location: ev.location,
-                startEpochMillis: Int64(ev.startDate.timeIntervalSince1970 * 1000.0),
-                endEpochMillis: Int64(ev.endDate.timeIntervalSince1970 * 1000.0),
-                allDay: ev.isAllDay,
-                calendarTitle: ev.calendar?.title,
-                recurrenceFrequency: rule.map { encodeFrequency($0.frequency) },
-                recurrenceInterval: rule.map { max(1, $0.interval) },
-                alarmOffsetSeconds: alarmOffset
+
+            records.append(
+                CalendarEventRecord(
+                    id: evId,
+                    title: ev.title ?? "Evento",
+                    description: ev.notes,
+                    location: ev.location,
+                    startEpochMillis: startMs,
+                    endEpochMillis: safeEndMs,
+                    allDay: ev.isAllDay,
+                    rrule: rruleStr,
+                    calendarTitle: ev.calendar?.title,
+                    recurrenceFrequency: freqStr,
+                    recurrenceInterval: interval,
+                    alarmOffsetSeconds: alarmOffset
+                )
             )
+        }
+        return records
+    }
+
+    private static func populateEKEvent(
+        _ ev: EKEvent,
+        from rec: CalendarEventRecord,
+        calendar: EKCalendar,
+        includeRecurrenceAndAlarm: Bool
+    ) {
+        let startDate = Date(timeIntervalSince1970: TimeInterval(rec.startEpochMillis) / 1000.0)
+        let safeEndMs = rec.endEpochMillis >= rec.startEpochMillis
+            ? rec.endEpochMillis
+            : (rec.startEpochMillis + (rec.allDay ? 86_400_000 : 3_600_000))
+        let endDate = Date(timeIntervalSince1970: TimeInterval(safeEndMs) / 1000.0)
+
+        ev.calendar = calendar
+        ev.title = rec.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Evento" : rec.title
+        ev.notes = rec.description
+        ev.location = rec.location
+        ev.startDate = startDate
+        ev.endDate = max(startDate, endDate)
+        ev.isAllDay = rec.allDay
+
+        guard includeRecurrenceAndAlarm else { return }
+        let parsedRRule = CalendarRecurrenceMapper.parseRRule(rec.rrule)
+        let freqStr = rec.recurrenceFrequency ?? parsedRRule?.frequency
+        let interval = max(1, rec.recurrenceInterval ?? parsedRRule?.interval ?? 1)
+        if let freq = decodeFrequency(freqStr) {
+            ev.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: freq, interval: interval, end: nil))
+        }
+        if let offset = rec.alarmOffsetSeconds, offset.isFinite {
+            ev.addAlarm(EKAlarm(relativeOffset: offset))
         }
     }
 
-    static func importEvents(_ incoming: [CalendarEventRecord]) -> Int {
-        guard !incoming.isEmpty, isAuthorized() else { return 0 }
+    static func importEventsWithStats(_ incoming: [CalendarEventRecord]) -> (imported: Int, alreadyPresent: Int) {
+        guard !incoming.isEmpty, canWrite() else { return (0, 0) }
         let store = EKEventStore()
-        guard let targetCalendar = store.defaultCalendarForNewEvents else { return 0 }
+        guard let fallbackCalendar = iOSEventStoreHelpers.resolveWritableCalendar(
+            in: store,
+            entityType: .event,
+            fallbackTitle: "Calendario"
+        ) else {
+            return (0, 0)
+        }
 
-        let minMs = incoming.map(\.startEpochMillis).min() ?? 0
-        let maxMs = incoming.map(\.endEpochMillis).max() ?? minMs
-        let existingStart = Date(timeIntervalSince1970: TimeInterval(minMs) / 1000.0 - 86400)
-        let existingEnd = Date(timeIntervalSince1970: TimeInterval(maxMs) / 1000.0 + 86400)
-        let existingPred = store.predicateForEvents(withStart: existingStart, end: existingEnd, calendars: nil)
-        var existingSignatures = Set<String>(
-            store.events(matching: existingPred).map { ev in
+        var existingSignatures = Set<String>()
+        if isAuthorized() {
+            let minMs = incoming.map(\.startEpochMillis).min() ?? 0
+            let maxMs = incoming.map(\.endEpochMillis).max() ?? minMs
+            let existingStart = Date(timeIntervalSince1970: TimeInterval(minMs) / 1000.0 - 86_400)
+            let existingEnd = Date(timeIntervalSince1970: TimeInterval(max(maxMs, minMs)) / 1000.0 + 86_400)
+            for ev in iOSEventStoreHelpers.fetchEventsChunked(in: store, from: existingStart, to: existingEnd) {
                 let normTitle = (ev.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 let startMinute = Int64(ev.startDate.timeIntervalSince1970 * 1000.0) / 60_000
-                return "\(normTitle)_\(startMinute)"
+                existingSignatures.insert("\(normTitle)_\(startMinute)")
             }
-        )
+        }
 
-        var imported = 0
+        var calendarCache = iOSEventStoreHelpers.writableCalendarsByLowerTitle(in: store, entityType: .event)
+        var pendingRecords: [(record: CalendarEventRecord, calendar: EKCalendar, sig: String)] = []
+        var alreadyPresent = 0
+
         for rec in incoming {
             let normTitle = rec.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let sig = "\(normTitle)_\(rec.startEpochMillis / 60_000)"
             if existingSignatures.contains(sig) {
+                alreadyPresent += 1
                 continue
             }
+            let targetCal = iOSEventStoreHelpers.ensureTargetCalendar(
+                named: rec.calendarTitle,
+                entityType: .event,
+                in: store,
+                fallback: fallbackCalendar,
+                cache: &calendarCache
+            )
+            existingSignatures.insert(sig)
+            pendingRecords.append((rec, targetCal, sig))
+        }
+
+        guard !pendingRecords.isEmpty else {
+            return (0, alreadyPresent)
+        }
+
+        var queuedCount = 0
+        for item in pendingRecords {
             let ev = EKEvent(eventStore: store)
-            ev.calendar = targetCalendar
-            ev.title = rec.title
-            ev.notes = rec.description
-            ev.location = rec.location
-            ev.startDate = Date(timeIntervalSince1970: TimeInterval(rec.startEpochMillis) / 1000.0)
-            ev.endDate = Date(timeIntervalSince1970: TimeInterval(rec.endEpochMillis) / 1000.0)
-            ev.isAllDay = rec.allDay
-            if let freq = decodeFrequency(rec.recurrenceFrequency) {
-                let rule = EKRecurrenceRule(
-                    recurrenceWith: freq,
-                    interval: max(1, rec.recurrenceInterval ?? 1),
-                    end: nil
-                )
-                ev.addRecurrenceRule(rule)
-            }
-            if let offset = rec.alarmOffsetSeconds {
-                ev.addAlarm(EKAlarm(relativeOffset: offset))
-            }
+            populateEKEvent(ev, from: item.record, calendar: item.calendar, includeRecurrenceAndAlarm: true)
             if (try? store.save(ev, span: .thisEvent, commit: false)) != nil {
-                existingSignatures.insert(sig)
-                imported += 1
+                queuedCount += 1
             }
         }
-        if imported > 0 {
-            do {
-                try store.commit()
-            } catch {
-                return 0
+        if queuedCount > 0, (try? store.commit()) != nil {
+            return (queuedCount, alreadyPresent)
+        }
+
+        // Fallback atomico per singolo evento: impedisce che 1 elemento anomalo annulli tutti gli altri al commit().
+        store.reset()
+        let freshStore = EKEventStore()
+        let freshFallback = iOSEventStoreHelpers.resolveWritableCalendar(
+            in: freshStore,
+            entityType: .event,
+            fallbackTitle: "Calendario"
+        ) ?? fallbackCalendar
+        var freshCache = iOSEventStoreHelpers.writableCalendarsByLowerTitle(in: freshStore, entityType: .event)
+        var savedIndividually = 0
+
+        for item in pendingRecords {
+            let targetCal = freshCache[item.calendar.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
+                ?? freshFallback
+            let evFull = EKEvent(eventStore: freshStore)
+            populateEKEvent(evFull, from: item.record, calendar: targetCal, includeRecurrenceAndAlarm: true)
+            if (try? freshStore.save(evFull, span: .thisEvent, commit: true)) != nil {
+                savedIndividually += 1
+                continue
+            }
+            freshStore.reset()
+            let evBasic = EKEvent(eventStore: freshStore)
+            populateEKEvent(evBasic, from: item.record, calendar: freshFallback, includeRecurrenceAndAlarm: false)
+            if (try? freshStore.save(evBasic, span: .thisEvent, commit: true)) != nil {
+                savedIndividually += 1
+            } else {
+                freshStore.reset()
             }
         }
-        return imported
+        return (savedIndividually, alreadyPresent)
+    }
+
+    static func importEvents(_ incoming: [CalendarEventRecord]) -> Int {
+        importEventsWithStats(incoming).imported
     }
 }
 
 /// Migratore nativo dei Promemoria Apple (`EKReminder`) senza iCloud, con conservazione delle liste, scadenze, note e priorità.
 enum iOSRemindersMigrator {
     static func isAuthorized() -> Bool {
-        let status = EKEventStore.authorizationStatus(for: .reminder)
-        if #available(iOS 17.0, *) {
-            return status == .fullAccess
-        } else {
-            return status == .authorized
-        }
+        iOSEventStoreHelpers.canRead(entityType: .reminder)
+    }
+
+    static func canWrite() -> Bool {
+        iOSEventStoreHelpers.canWrite(entityType: .reminder)
     }
 
     static func requestAccessIfNeeded() async -> Bool {
-        if isAuthorized() { return true }
-        let store = EKEventStore()
-        if #available(iOS 17.0, *) {
-            return (try? await store.requestFullAccessToReminders()) ?? false
-        } else {
-            return (try? await store.requestAccess(to: .reminder)) ?? false
-        }
+        await iOSEventStoreHelpers.requestAccess(entityType: .reminder)
     }
 
     static func readReminders(upToDate: Date? = nil) async -> [ReminderTransferRecord] {
@@ -3696,6 +3916,7 @@ enum iOSRemindersMigrator {
                 cont.resume(returning: list ?? [])
             }
         }
+        _ = store
         let cutoffMs: Int64? = upToDate.map { date in
             let endOfDay = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: date) ?? date
             return Int64(endOfDay.timeIntervalSince1970 * 1000.0)
@@ -3717,91 +3938,142 @@ enum iOSRemindersMigrator {
                 notes: rem.notes,
                 listName: rem.calendar?.title,
                 isCompleted: rem.isCompleted,
-                priority: rem.priority,
+                priority: max(0, min(9, rem.priority)),
                 dueEpochMillis: dueMs
             )
         }
     }
 
-    static func importReminders(_ incoming: [ReminderTransferRecord]) async -> Int {
-        guard !incoming.isEmpty, isAuthorized() else { return 0 }
-        let store = EKEventStore()
-        guard let fallbackCalendar = store.defaultCalendarForNewReminders() else { return 0 }
+    private static func reminderSignature(listName: String, title: String, dueMs: Int64?) -> String {
+        let dueBucket = dueMs.map { $0 / 60_000 } ?? -1
+        return "\(listName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(dueBucket)"
+    }
 
-        let existingPred = store.predicateForReminders(in: nil)
-        let existingList: [EKReminder] = await withCheckedContinuation { cont in
-            store.fetchReminders(matching: existingPred) { list in
-                cont.resume(returning: list ?? [])
-            }
+    private static func populateEKReminder(
+        _ rem: EKReminder,
+        from rec: ReminderTransferRecord,
+        calendar: EKCalendar
+    ) {
+        let cleanTitle = rec.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        rem.calendar = calendar
+        rem.title = cleanTitle.isEmpty ? "Promemoria" : cleanTitle
+        rem.notes = rec.notes
+        rem.isCompleted = rec.isCompleted
+        rem.completionDate = rec.isCompleted ? Date() : nil
+        rem.priority = max(0, min(9, rec.priority))
+        if let dueMs = rec.dueEpochMillis {
+            let dueDate = Date(timeIntervalSince1970: TimeInterval(dueMs) / 1000.0)
+            var comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: dueDate)
+            comps.calendar = Calendar.current
+            comps.timeZone = Calendar.current.timeZone
+            rem.dueDateComponents = comps
+        } else {
+            rem.dueDateComponents = nil
+        }
+    }
+
+    static func importRemindersWithStats(_ incoming: [ReminderTransferRecord]) async -> (imported: Int, alreadyPresent: Int) {
+        guard !incoming.isEmpty, canWrite() else { return (0, 0) }
+        let store = EKEventStore()
+        guard let fallbackCalendar = iOSEventStoreHelpers.resolveWritableCalendar(
+            in: store,
+            entityType: .reminder,
+            fallbackTitle: "Promemoria"
+        ) else {
+            return (0, 0)
         }
 
         var existingSignatures = Set<String>()
-        for rem in existingList {
-            let normList = (rem.calendar?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let normTitle = (rem.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if !normTitle.isEmpty {
-                existingSignatures.insert("\(normList)|\(normTitle)")
+        if isAuthorized() {
+            let existingPred = store.predicateForReminders(in: nil)
+            let existingList: [EKReminder] = await withCheckedContinuation { cont in
+                store.fetchReminders(matching: existingPred) { list in
+                    cont.resume(returning: list ?? [])
+                }
+            }
+            for rem in existingList {
+                let normList = rem.calendar?.title ?? ""
+                let normTitle = (rem.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normTitle.isEmpty else { continue }
+                let dueMs: Int64? = rem.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
+                    .map { Int64($0.timeIntervalSince1970 * 1000.0) }
+                existingSignatures.insert(reminderSignature(listName: normList, title: normTitle, dueMs: dueMs))
             }
         }
 
-        var calendarsByLowerName: [String: EKCalendar] = [:]
-        for cal in store.calendars(for: .reminder) where cal.allowsContentModifications {
-            calendarsByLowerName[cal.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = cal
-        }
+        // Pre-creiamo le liste prima di accodare i promemoria con commit: false (evita conflitti nello stesso EKEventStore).
+        var calendarCache = iOSEventStoreHelpers.writableCalendarsByLowerTitle(in: store, entityType: .reminder)
+        var pending: [(record: ReminderTransferRecord, calendar: EKCalendar)] = []
+        var alreadyPresent = 0
 
-        func targetList(named rawName: String?) -> EKCalendar {
-            let trimmed = (rawName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return fallbackCalendar }
-            let lower = trimmed.lowercased()
-            if let existingCal = calendarsByLowerName[lower] {
-                return existingCal
-            }
-            let newCal = EKCalendar(for: .reminder, eventStore: store)
-            newCal.title = trimmed
-            newCal.source = fallbackCalendar.source
-            if (try? store.saveCalendar(newCal, commit: true)) != nil {
-                calendarsByLowerName[lower] = newCal
-                return newCal
-            }
-            return fallbackCalendar
-        }
-
-        var imported = 0
         for rec in incoming {
             let cleanTitle = rec.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleanTitle.isEmpty else { continue }
-            let targetCal = targetList(named: rec.listName)
-            let sig = "\(targetCal.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(cleanTitle.lowercased())"
+            let targetCal = iOSEventStoreHelpers.ensureTargetCalendar(
+                named: rec.listName,
+                entityType: .reminder,
+                in: store,
+                fallback: fallbackCalendar,
+                cache: &calendarCache
+            )
+            let sig = reminderSignature(listName: targetCal.title, title: cleanTitle, dueMs: rec.dueEpochMillis)
             if existingSignatures.contains(sig) {
+                alreadyPresent += 1
                 continue
             }
+            existingSignatures.insert(sig)
+            pending.append((rec, targetCal))
+        }
 
+        guard !pending.isEmpty else {
+            return (0, alreadyPresent)
+        }
+
+        var queuedCount = 0
+        for item in pending {
             let rem = EKReminder(eventStore: store)
-            rem.calendar = targetCal
-            rem.title = cleanTitle
-            rem.notes = rec.notes
-            rem.isCompleted = rec.isCompleted
-            rem.priority = rec.priority
-            if let dueMs = rec.dueEpochMillis {
-                let dueDate = Date(timeIntervalSince1970: TimeInterval(dueMs) / 1000.0)
-                rem.dueDateComponents = Calendar.current.dateComponents(
-                    [.year, .month, .day, .hour, .minute],
-                    from: dueDate
-                )
-            }
+            populateEKReminder(rem, from: item.record, calendar: item.calendar)
             if (try? store.save(rem, commit: false)) != nil {
-                existingSignatures.insert(sig)
-                imported += 1
+                queuedCount += 1
             }
+        }
+        if queuedCount > 0, (try? store.commit()) != nil {
+            return (queuedCount, alreadyPresent)
         }
 
-        if imported > 0 {
-            do {
-                try store.commit()
-            } catch {
-                return 0
+        // Fallback atomico per singolo promemoria su nuovo EKEventStore
+        store.reset()
+        let freshStore = EKEventStore()
+        let freshFallback = iOSEventStoreHelpers.resolveWritableCalendar(
+            in: freshStore,
+            entityType: .reminder,
+            fallbackTitle: "Promemoria"
+        ) ?? fallbackCalendar
+        var freshCache = iOSEventStoreHelpers.writableCalendarsByLowerTitle(in: freshStore, entityType: .reminder)
+        var savedIndividually = 0
+
+        for item in pending {
+            let targetCal = freshCache[item.calendar.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
+                ?? freshFallback
+            let rem = EKReminder(eventStore: freshStore)
+            populateEKReminder(rem, from: item.record, calendar: targetCal)
+            if (try? freshStore.save(rem, commit: true)) != nil {
+                savedIndividually += 1
+                continue
+            }
+            freshStore.reset()
+            let remFallback = EKReminder(eventStore: freshStore)
+            populateEKReminder(remFallback, from: item.record, calendar: freshFallback)
+            if (try? freshStore.save(remFallback, commit: true)) != nil {
+                savedIndividually += 1
+            } else {
+                freshStore.reset()
             }
         }
-        return imported
+        return (savedIndividually, alreadyPresent)
+    }
+
+    static func importReminders(_ incoming: [ReminderTransferRecord]) async -> Int {
+        await importRemindersWithStats(incoming).imported
     }
 }

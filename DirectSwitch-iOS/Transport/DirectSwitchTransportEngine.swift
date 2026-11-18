@@ -177,6 +177,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var needsLocalNetworkRedirect: Bool = false
     @Published var failedItemsCount: Int = 0
     @Published var contactsAlreadyPresentCount: Int = 0
+    @Published var calendarsAlreadyPresentCount: Int = 0
+    @Published var remindersAlreadyPresentCount: Int = 0
     @Published var receivedInstalledApps: [InstalledAppRecord] = []
     @Published var sentInstalledAppsCount: Int = 0
     @Published var photoMetadataDiscoveredApps: [InstalledAppRecord] = []
@@ -370,6 +372,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         needsLocalNetworkRedirect = false
         failedItemsCount = 0
         contactsAlreadyPresentCount = 0
+        calendarsAlreadyPresentCount = 0
+        remindersAlreadyPresentCount = 0
         receivedInstalledApps = []
         sentInstalledAppsCount = 0
         showRemoteAppScannerOnReceiver = false
@@ -602,6 +606,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         needsLocalNetworkRedirect = false
         failedItemsCount = 0
         contactsAlreadyPresentCount = 0
+        calendarsAlreadyPresentCount = 0
+        remindersAlreadyPresentCount = 0
         receivedInstalledApps = []
         sentInstalledAppsCount = 0
         showRemoteAppScannerOnReceiver = false
@@ -711,6 +717,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         receiverProgressAccounting = nil
         mergedContacts = 0
         contactsAlreadyPresentCount = 0
+        calendarsAlreadyPresentCount = 0
+        remindersAlreadyPresentCount = 0
         importedCalendars = 0
         importedReminders = 0
         importedSms = 0
@@ -1154,6 +1162,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 receiverProgressAccounting = nil
                 mergedContacts = 0
                 contactsAlreadyPresentCount = 0
+                calendarsAlreadyPresentCount = 0
+                remindersAlreadyPresentCount = 0
                 importedCalendars = 0
                 importedReminders = 0
                 importedSms = 0
@@ -1225,6 +1235,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             visualStepProgress = 0.0
             mergedContacts = 0
             contactsAlreadyPresentCount = 0
+            calendarsAlreadyPresentCount = 0
+            remindersAlreadyPresentCount = 0
             importedCalendars = 0
             importedReminders = 0
             importedSms = 0
@@ -1348,6 +1360,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 visualStepProgress = 0.0
                 mergedContacts = 0
                 contactsAlreadyPresentCount = 0
+                calendarsAlreadyPresentCount = 0
+                remindersAlreadyPresentCount = 0
                 importedCalendars = 0
                 importedReminders = 0
                 importedSms = 0
@@ -1435,13 +1449,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if fullAllowed && !manifest.calendarsPayload.isEmpty {
                 _ = await iOSCalendarMigrator.requestAccessIfNeeded()
             }
-            let insCal = fullAllowed ? iOSCalendarMigrator.importEvents(manifest.calendarsPayload) : 0
+            let calResult = fullAllowed
+                ? iOSCalendarMigrator.importEventsWithStats(manifest.calendarsPayload)
+                : (imported: 0, alreadyPresent: 0)
 
             let incomingReminders = manifest.remindersPayload ?? []
             if fullAllowed && !incomingReminders.isEmpty {
                 _ = await iOSRemindersMigrator.requestAccessIfNeeded()
             }
-            let insRem = fullAllowed ? await iOSRemindersMigrator.importReminders(incomingReminders) : 0
+            let remResult = fullAllowed
+                ? await iOSRemindersMigrator.importRemindersWithStats(incomingReminders)
+                : (imported: 0, alreadyPresent: 0)
             let insSms = fullAllowed ? iOSSmsArchiveStore.saveIncomingSmsArchive(manifest.smsPayload) : 0
 
             let (tierFiltered, gated) = LicensePolicyEvaluator.filterItemsForTier(manifest.items, tier: currentTier)
@@ -1492,8 +1510,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             totalBytesCount = acc.totalBytesForProgress
             mergedContacts += insContacts
             contactsAlreadyPresentCount = skipContacts
-            importedCalendars += insCal
-            importedReminders += insRem
+            importedCalendars += calResult.imported
+            calendarsAlreadyPresentCount += calResult.alreadyPresent
+            importedReminders += remResult.imported
+            remindersAlreadyPresentCount += remResult.alreadyPresent
             importedSms += insSms
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
@@ -1520,7 +1540,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 contactsMergedCount: mergedContacts,
                 contactsSkippedDuplicates: skipContacts,
                 calendarsImportedCount: importedCalendars,
+                calendarsAlreadyPresentCount: calendarsAlreadyPresentCount,
                 remindersImportedCount: importedReminders,
+                remindersAlreadyPresentCount: remindersAlreadyPresentCount,
                 smsImportedCount: importedSms,
                 gatedByCrossOsPreviewCount: gated
             )
@@ -1802,7 +1824,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 transferredBytes: transferredBytes,
                 mergedContactsCount: mergedContacts,
                 importedCalendarsCount: importedCalendars,
+                calendarsAlreadyPresentCount: calendarsAlreadyPresentCount,
                 remindersImportedCount: importedReminders,
+                remindersAlreadyPresentCount: remindersAlreadyPresentCount,
                 livePhotosSavedCount: savedLivePhotos,
                 importedSmsCount: importedSms,
                 skippedDuplicatesCount: skippedDuplicates,
@@ -2196,6 +2220,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             failedItemsCount = 0
             if !isResume {
                 contactsAlreadyPresentCount = 0
+                calendarsAlreadyPresentCount = 0
+                remindersAlreadyPresentCount = 0
                 receivedInstalledApps = []
                 sentInstalledAppsCount = 0
                 photoMetadataDiscoveredApps = []
@@ -2418,8 +2444,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if mfResp.calendarsImportedCount > 0 || importedCalendars == 0 {
                 importedCalendars = mfResp.calendarsImportedCount
             }
+            if let calSkip = mfResp.calendarsAlreadyPresentCount, calSkip > 0 || calendarsAlreadyPresentCount == 0 {
+                calendarsAlreadyPresentCount = calSkip
+            }
             if let remCount = mfResp.remindersImportedCount, remCount > 0 || importedReminders == 0 {
                 importedReminders = remCount
+            }
+            if let remSkip = mfResp.remindersAlreadyPresentCount, remSkip > 0 || remindersAlreadyPresentCount == 0 {
+                remindersAlreadyPresentCount = remSkip
             }
             importedSms = mfResp.smsImportedCount
             skippedDuplicates = mfResp.skippedDuplicateCount
@@ -2889,7 +2921,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                let report = try? JSONDecoder().decode(TransferCompletionReport.self, from: completeData) {
                 if report.mergedContactsCount > 0 { mergedContacts = report.mergedContactsCount }
                 if report.importedCalendarsCount > 0 { importedCalendars = report.importedCalendarsCount }
+                if let calSkip = report.calendarsAlreadyPresentCount, calSkip > 0 { calendarsAlreadyPresentCount = calSkip }
                 if let rem = report.remindersImportedCount, rem > 0 { importedReminders = rem }
+                if let remSkip = report.remindersAlreadyPresentCount, remSkip > 0 { remindersAlreadyPresentCount = remSkip }
                 if let live = report.livePhotosSavedCount, live > 0 { savedLivePhotos = live }
                 importedSms = report.importedSmsCount
                 skippedDuplicates = report.skippedDuplicatesCount

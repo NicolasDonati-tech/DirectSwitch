@@ -1375,11 +1375,21 @@ private struct DirectSwitchTransferProgressView: View {
         return min(0.99, max(0.0, transport.visualStepProgress))
     }
 
-    private var contactsSummaryValue: String {
-        if transport.mergedContacts == 0 && transport.contactsAlreadyPresentCount > 0 {
-            return "0 (\(transport.contactsAlreadyPresentCount) già presenti)"
+    private func formattedCountWithAlreadyPresent(imported: Int, alreadyPresent: Int) -> String {
+        if imported == 0 && alreadyPresent > 0 {
+            return "0 (\(alreadyPresent) già presenti)"
         }
-        return "\(transport.mergedContacts)"
+        if alreadyPresent > 0 {
+            return "\(imported) (+\(alreadyPresent) già presenti)"
+        }
+        return "\(imported)"
+    }
+
+    private var contactsSummaryValue: String {
+        formattedCountWithAlreadyPresent(
+            imported: transport.mergedContacts,
+            alreadyPresent: transport.contactsAlreadyPresentCount
+        )
     }
 
     private var percentageInt: Int {
@@ -1443,7 +1453,10 @@ private struct DirectSwitchTransferProgressView: View {
                     icon: "calendar",
                     color: AppleTheme.slate,
                     title: "Calendari importati",
-                    value: "\(transport.importedCalendars)"
+                    value: formattedCountWithAlreadyPresent(
+                        imported: transport.importedCalendars,
+                        alreadyPresent: transport.calendarsAlreadyPresentCount
+                    )
                 )
             )
         }
@@ -1455,7 +1468,10 @@ private struct DirectSwitchTransferProgressView: View {
                     icon: "checklist",
                     color: AppleTheme.blue,
                     title: "Promemoria importati",
-                    value: "\(transport.importedReminders)"
+                    value: formattedCountWithAlreadyPresent(
+                        imported: transport.importedReminders,
+                        alreadyPresent: transport.remindersAlreadyPresentCount
+                    )
                 )
             )
         }

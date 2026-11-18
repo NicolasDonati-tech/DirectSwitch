@@ -2,6 +2,8 @@ package com.directswitch.android
 
 import com.directswitch.android.migrators.PublicDownloadsSaver
 import com.directswitch.android.protocol.ActiveTransferScope
+import com.directswitch.android.protocol.CalendarEventRecord
+import com.directswitch.android.protocol.CalendarRecurrenceMapper
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchCrypto
 import com.directswitch.android.protocol.DirectSwitchJson
@@ -10,13 +12,16 @@ import com.directswitch.android.protocol.HandshakeRequest
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
+import com.directswitch.android.protocol.ManifestResponse
 import com.directswitch.android.protocol.MediaFallbackNaming
 import com.directswitch.android.protocol.PairAckRequest
 import com.directswitch.android.protocol.PhoneNormalizer
 import com.directswitch.android.protocol.QrPairingPayload
+import com.directswitch.android.protocol.ReminderTransferRecord
 import com.directswitch.android.protocol.SessionLicenseTier
 import com.directswitch.android.protocol.SmsTransferRecord
 import com.directswitch.android.protocol.TransferCategory
+import com.directswitch.android.protocol.TransferCompletionReport
 import com.directswitch.android.protocol.TransferManifest
 import com.directswitch.android.protocol.TransferPreparationItem
 import com.directswitch.android.protocol.TransferPrepareRequest
@@ -897,5 +902,76 @@ class DirectSwitchProtocolTest {
             actualExtension = "jpeg"
         )
         assertEquals(Triple("PHOTO_02.JPG", "image/jpeg", "jpg"), sameJpeg)
+    }
+
+    @Test
+    fun calendarRecurrenceMapperAndReminderPayloadStatsRoundTrip() {
+        assertEquals("FREQ=YEARLY;INTERVAL=1", CalendarRecurrenceMapper.toRRule("yearly", 1))
+        assertEquals("FREQ=WEEKLY;INTERVAL=2", CalendarRecurrenceMapper.toRRule("weekly", 2))
+        assertEquals(null, CalendarRecurrenceMapper.toRRule(null, 1))
+        assertEquals("monthly" to 3, CalendarRecurrenceMapper.parseRRule("FREQ=MONTHLY;INTERVAL=3;COUNT=12"))
+        assertEquals(null, CalendarRecurrenceMapper.parseRRule(""))
+
+        val rem = ReminderTransferRecord(
+            id = "rem_1",
+            title = "Bolletta Luce",
+            notes = "Pagare online",
+            listName = "Casa",
+            isCompleted = false,
+            priority = 1,
+            dueEpochMillis = 1_760_000_000_000L
+        )
+        val cal = CalendarEventRecord(
+            id = "ev_1",
+            title = "Compleanno",
+            startEpochMillis = 1_760_000_000_000L,
+            endEpochMillis = 1_760_086_400_000L,
+            allDay = true,
+            rrule = "FREQ=YEARLY;INTERVAL=1",
+            calendarTitle = "Personale",
+            recurrenceFrequency = "yearly",
+            recurrenceInterval = 1,
+            alarmOffsetSeconds = -900.0
+        )
+        val manifest = TransferManifest(
+            sessionId = "sess_cal_rem",
+            senderPlatform = DevicePlatform.IOS,
+            items = emptyList(),
+            calendarsPayload = listOf(cal),
+            remindersPayload = listOf(rem)
+        )
+        val decodedManifest = DirectSwitchJson.instance.decodeFromString<TransferManifest>(
+            DirectSwitchJson.instance.encodeToString(manifest)
+        )
+        assertEquals(listOf(cal), decodedManifest.calendarsPayload)
+        assertEquals(listOf(rem), decodedManifest.remindersPayload)
+        val inferred = ActiveTransferScope.inferred(decodedManifest)
+        assertTrue(inferred.calendars)
+        assertTrue(inferred.reminders)
+
+        val resp = ManifestResponse(
+            acceptedItemIds = emptyList(),
+            skippedDuplicateCount = 4,
+            contactsMergedCount = 1,
+            contactsSkippedDuplicates = 0,
+            calendarsImportedCount = 5,
+            calendarsAlreadyPresentCount = 2,
+            remindersImportedCount = 8,
+            remindersAlreadyPresentCount = 1
+        )
+        val decodedResp = DirectSwitchJson.instance.decodeFromString<ManifestResponse>(
+            DirectSwitchJson.instance.encodeToString(resp)
+        )
+        assertEquals(5, decodedResp.calendarsImportedCount)
+        assertEquals(2, decodedResp.calendarsAlreadyPresentCount)
+        assertEquals(8, decodedResp.remindersImportedCount)
+        assertEquals(1, decodedResp.remindersAlreadyPresentCount)
+
+        val report = DirectSwitchJson.instance.decodeFromString<TransferCompletionReport>(
+            """{"sessionId":"s1","licenseTier":"CROSS_OS_PRO_UNLOCKED","transferredFilesCount":0,"transferredBytes":0,"mergedContactsCount":0,"importedCalendarsCount":3,"skippedDuplicatesCount":0,"elapsedMillis":100}"""
+        )
+        assertEquals(3, report.importedCalendarsCount)
+        assertEquals(null, report.remindersImportedCount)
+        assertEquals(null, report.calendarsAlreadyPresentCount)
     }
 }

@@ -1517,4 +1517,59 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(sameJpeg.fileName, "PHOTO_02.JPG")
         XCTAssertEqual(sameJpeg.mimeType, "image/jpeg")
     }
+
+    func testCalendarRecurrenceMapperAndReminderPayloadStatsRoundTrip() throws {
+        XCTAssertEqual(CalendarRecurrenceMapper.toRRule(frequency: "yearly", interval: 1), "FREQ=YEARLY;INTERVAL=1")
+        XCTAssertEqual(CalendarRecurrenceMapper.toRRule(frequency: "weekly", interval: 2), "FREQ=WEEKLY;INTERVAL=2")
+        XCTAssertNil(CalendarRecurrenceMapper.toRRule(frequency: nil, interval: 1))
+
+        let parsed = CalendarRecurrenceMapper.parseRRule("FREQ=MONTHLY;INTERVAL=3;COUNT=12")
+        XCTAssertEqual(parsed?.frequency, "monthly")
+        XCTAssertEqual(parsed?.interval, 3)
+        XCTAssertNil(CalendarRecurrenceMapper.parseRRule(""))
+
+        let rem = ReminderTransferRecord(
+            id: "rem_1",
+            title: "Bolletta Luce",
+            notes: "Pagare online",
+            listName: "Casa",
+            isCompleted: false,
+            priority: 1,
+            dueEpochMillis: 1_760_000_000_000
+        )
+        let manifest = TransferManifest(
+            sessionId: "sess_cal_rem",
+            senderPlatform: .IOS,
+            items: [],
+            remindersPayload: [rem]
+        )
+        let decodedManifest = try JSONDecoder().decode(TransferManifest.self, from: JSONEncoder().encode(manifest))
+        XCTAssertEqual(decodedManifest.remindersPayload, [rem])
+        let inferred = ActiveTransferScope.inferred(from: decodedManifest)
+        XCTAssertTrue(inferred.reminders)
+
+        let resp = ManifestResponse(
+            acceptedItemIds: [],
+            skippedDuplicateCount: 4,
+            contactsMergedCount: 1,
+            contactsSkippedDuplicates: 0,
+            calendarsImportedCount: 5,
+            calendarsAlreadyPresentCount: 2,
+            remindersImportedCount: 8,
+            remindersAlreadyPresentCount: 1,
+            smsImportedCount: 0,
+            gatedByCrossOsPreviewCount: 0
+        )
+        let decodedResp = try JSONDecoder().decode(ManifestResponse.self, from: JSONEncoder().encode(resp))
+        XCTAssertEqual(decodedResp.calendarsImportedCount, 5)
+        XCTAssertEqual(decodedResp.calendarsAlreadyPresentCount, 2)
+        XCTAssertEqual(decodedResp.remindersImportedCount, 8)
+        XCTAssertEqual(decodedResp.remindersAlreadyPresentCount, 1)
+
+        let legacyRespJson = Data(#"{"acceptedItemIds":[],"skippedDuplicateCount":0,"contactsMergedCount":0,"contactsSkippedDuplicates":0,"calendarsImportedCount":3}"#.utf8)
+        let legacyDecoded = try JSONDecoder().decode(ManifestResponse.self, from: legacyRespJson)
+        XCTAssertEqual(legacyDecoded.calendarsImportedCount, 3)
+        XCTAssertNil(legacyDecoded.calendarsAlreadyPresentCount)
+        XCTAssertNil(legacyDecoded.remindersAlreadyPresentCount)
+    }
 }

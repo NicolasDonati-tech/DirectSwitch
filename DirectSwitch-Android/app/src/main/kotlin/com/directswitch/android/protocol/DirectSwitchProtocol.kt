@@ -171,6 +171,7 @@ data class ActiveTransferScope(
                 photos = hasPhotos,
                 videos = hasVideos,
                 calendars = manifest.calendarsPayload.isNotEmpty(),
+                reminders = !manifest.remindersPayload.isNullOrEmpty(),
                 documents = hasDocs,
                 apps = manifest.installedAppsPayload.isNotEmpty(),
                 whatsApp = manifest.requestNativeWhatsAppMigration || hasWaVault
@@ -249,7 +250,22 @@ data class CalendarEventRecord(
     val startEpochMillis: Long,
     val endEpochMillis: Long,
     val allDay: Boolean = false,
-    val rrule: String? = null
+    val rrule: String? = null,
+    val calendarTitle: String? = null,
+    val recurrenceFrequency: String? = null,
+    val recurrenceInterval: Int? = null,
+    val alarmOffsetSeconds: Double? = null
+)
+
+@Serializable
+data class ReminderTransferRecord(
+    val id: String,
+    val title: String,
+    val notes: String? = null,
+    val listName: String? = null,
+    val isCompleted: Boolean = false,
+    val priority: Int = 0,
+    val dueEpochMillis: Long? = null
 )
 
 @Serializable
@@ -291,6 +307,7 @@ data class TransferManifest(
     val items: List<ManifestItem>,
     val contactsPayload: List<ContactTransferRecord> = emptyList(),
     val calendarsPayload: List<CalendarEventRecord> = emptyList(),
+    val remindersPayload: List<ReminderTransferRecord>? = null,
     val smsPayload: List<SmsTransferRecord> = emptyList(),
     val installedAppsPayload: List<InstalledAppRecord> = emptyList(),
     val requestNativeWhatsAppMigration: Boolean = false,
@@ -304,6 +321,9 @@ data class ManifestResponse(
     val contactsMergedCount: Int,
     val contactsSkippedDuplicates: Int,
     val calendarsImportedCount: Int,
+    val calendarsAlreadyPresentCount: Int? = null,
+    val remindersImportedCount: Int? = null,
+    val remindersAlreadyPresentCount: Int? = null,
     val smsImportedCount: Int = 0,
     val gatedByCrossOsPreviewCount: Int = 0
 )
@@ -316,6 +336,9 @@ data class TransferCompletionReport(
     val transferredBytes: Long,
     val mergedContactsCount: Int,
     val importedCalendarsCount: Int,
+    val calendarsAlreadyPresentCount: Int? = null,
+    val remindersImportedCount: Int? = null,
+    val remindersAlreadyPresentCount: Int? = null,
     val importedSmsCount: Int = 0,
     val skippedDuplicatesCount: Int,
     val elapsedMillis: Long
@@ -896,5 +919,35 @@ object MediaFallbackNaming {
             else -> originalMime
         }
         return Triple(updatedName, updatedMime, cleanExt)
+    }
+}
+
+/** Converte in modo bidirezionale le regole di ricorrenza tra RFC 5545 RRULE (Android) e EventKit (iOS). */
+object CalendarRecurrenceMapper {
+    private val validFreqs = setOf("DAILY", "WEEKLY", "MONTHLY", "YEARLY")
+
+    fun toRRule(frequency: String?, interval: Int?): String? {
+        val raw = frequency?.trim()?.uppercase()?.takeIf { it in validFreqs } ?: return null
+        val safeInterval = (interval ?: 1).coerceAtLeast(1)
+        return "FREQ=$raw;INTERVAL=$safeInterval"
+    }
+
+    fun parseRRule(rrule: String?): Pair<String, Int>? {
+        val raw = rrule?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        var freq: String? = null
+        var interval = 1
+        for (part in raw.split(';')) {
+            val kv = part.split('=', limit = 2)
+            if (kv.size != 2) continue
+            val key = kv[0].trim().uppercase()
+            val value = kv[1].trim().uppercase()
+            if (key == "FREQ" && value in validFreqs) {
+                freq = value.lowercase()
+            } else if (key == "INTERVAL") {
+                value.toIntOrNull()?.let { interval = it.coerceAtLeast(1) }
+            }
+        }
+        val resolvedFreq = freq ?: return null
+        return resolvedFreq to interval
     }
 }

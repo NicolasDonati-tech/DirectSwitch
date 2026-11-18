@@ -22,6 +22,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import com.directswitch.android.DirectSwitchLog
+import com.directswitch.android.migrators.AndroidRemindersMigrator
 import com.directswitch.android.migrators.CalendarMigrator
 import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.ContactsSmartMerger
@@ -114,6 +115,9 @@ data class LiveTransferProgress(
     val mergedContacts: Int = 0,
     val contactsAlreadyPresent: Int = 0,
     val importedCalendars: Int = 0,
+    val calendarsAlreadyPresent: Int = 0,
+    val importedReminders: Int = 0,
+    val remindersAlreadyPresent: Int = 0,
     val importedSms: Int = 0,
     val skippedDuplicates: Int = 0,
     val failedItemsCount: Int = 0,
@@ -733,10 +737,18 @@ class DirectSwitchTransferServer(
                         context,
                         manifest.contactsPayload
                     )
-                    val importedCalendars = if (LicensePolicyEvaluator.allowsFullCategories(activeTier)) {
-                        CalendarMigrator.importEventsDeduplicated(context, manifest.calendarsPayload)
+                    val (importedCalendars, calendarsAlreadyPresent) = if (LicensePolicyEvaluator.allowsFullCategories(activeTier)) {
+                        CalendarMigrator.importEventsDeduplicatedWithStats(context, manifest.calendarsPayload)
                     } else {
-                        0
+                        0 to 0
+                    }
+                    val (importedReminders, remindersAlreadyPresent) = if (
+                        LicensePolicyEvaluator.allowsFullCategories(activeTier) &&
+                        !manifest.remindersPayload.isNullOrEmpty()
+                    ) {
+                        AndroidRemindersMigrator.importRemindersWithStats(context, manifest.remindersPayload)
+                    } else {
+                        0 to 0
                     }
                     val importedSms = if (LicensePolicyEvaluator.allowsFullCategories(activeTier)) {
                         SmsSystemScanner.importSmsIntoSystemOrArchive(context, manifest.smsPayload)
@@ -796,6 +808,9 @@ class DirectSwitchTransferServer(
                         mergedContacts = mergedContacts,
                         contactsAlreadyPresent = skippedContacts,
                         importedCalendars = importedCalendars,
+                        calendarsAlreadyPresent = calendarsAlreadyPresent,
+                        importedReminders = importedReminders,
+                        remindersAlreadyPresent = remindersAlreadyPresent,
                         importedSms = importedSms,
                         skippedDuplicates = skippedContacts + skippedMediaDups,
                         receivedInstalledApps = receivedApps,
@@ -809,6 +824,9 @@ class DirectSwitchTransferServer(
                         contactsMergedCount = mergedContacts,
                         contactsSkippedDuplicates = skippedContacts,
                         calendarsImportedCount = importedCalendars,
+                        calendarsAlreadyPresentCount = calendarsAlreadyPresent,
+                        remindersImportedCount = importedReminders,
+                        remindersAlreadyPresentCount = remindersAlreadyPresent,
                         smsImportedCount = importedSms,
                         gatedByCrossOsPreviewCount = gatedCount
                     )
@@ -1051,6 +1069,9 @@ class DirectSwitchTransferServer(
                         transferredBytes = transferredBytesCounter.get(),
                         mergedContactsCount = _progress.value.mergedContacts,
                         importedCalendarsCount = _progress.value.importedCalendars,
+                        calendarsAlreadyPresentCount = _progress.value.calendarsAlreadyPresent,
+                        remindersImportedCount = _progress.value.importedReminders,
+                        remindersAlreadyPresentCount = _progress.value.remindersAlreadyPresent,
                         importedSmsCount = _progress.value.importedSms,
                         skippedDuplicatesCount = _progress.value.skippedDuplicates,
                         elapsedMillis = (System.currentTimeMillis() - transferStartMillis).coerceAtLeast(1L)
@@ -1625,6 +1646,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                 mergedContacts = manifestResp.contactsMergedCount,
                 contactsAlreadyPresent = manifestResp.contactsSkippedDuplicates,
                 importedCalendars = manifestResp.calendarsImportedCount,
+                calendarsAlreadyPresent = manifestResp.calendarsAlreadyPresentCount ?: 0,
+                importedReminders = manifestResp.remindersImportedCount ?: 0,
+                remindersAlreadyPresent = manifestResp.remindersAlreadyPresentCount ?: 0,
                 importedSms = manifestResp.smsImportedCount,
                 skippedDuplicates = manifestResp.skippedDuplicateCount,
                 gatedPreviewCount = manifestResp.gatedByCrossOsPreviewCount

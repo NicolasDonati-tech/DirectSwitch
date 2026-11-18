@@ -36,6 +36,7 @@ import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.protocol.CalendarEventRecord
+import com.directswitch.android.protocol.CalendarRecurrenceMapper
 import com.directswitch.android.protocol.ContactTransferRecord
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchJson
@@ -44,6 +45,7 @@ import com.directswitch.android.protocol.LabeledValueRecord
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.PhoneNormalizer
 import com.directswitch.android.protocol.PostalAddressTransferRecord
+import com.directswitch.android.protocol.ReminderTransferRecord
 import com.directswitch.android.protocol.SmsTransferRecord
 import com.directswitch.android.protocol.TransferCategory
 import kotlinx.coroutines.Dispatchers
@@ -1292,7 +1294,8 @@ object CalendarMigrator {
             CalendarContract.Events.DTSTART,
             CalendarContract.Events.DTEND,
             CalendarContract.Events.ALL_DAY,
-            CalendarContract.Events.RRULE
+            CalendarContract.Events.RRULE,
+            CalendarContract.Events.CALENDAR_DISPLAY_NAME
         )
         val selection = if (upToEpochMillis != null) {
             "${CalendarContract.Events.DELETED} = 0 AND ${CalendarContract.Events.DTSTART} <= ?"
@@ -1316,6 +1319,7 @@ object CalendarMigrator {
                 val endIdx = cursor.getColumnIndexOrThrow(CalendarContract.Events.DTEND)
                 val allDayIdx = cursor.getColumnIndexOrThrow(CalendarContract.Events.ALL_DAY)
                 val rruleIdx = cursor.getColumnIndexOrThrow(CalendarContract.Events.RRULE)
+                val calNameIdx = cursor.getColumnIndex(CalendarContract.Events.CALENDAR_DISPLAY_NAME)
 
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idIdx).toString()
@@ -1323,6 +1327,9 @@ object CalendarMigrator {
                     if (title.isEmpty()) continue
                     val dtStart = cursor.getLong(startIdx)
                     val dtEnd = cursor.getLong(endIdx).let { if (it > 0L) it else dtStart + 3_600_000L }
+                    val rrule = cursor.getString(rruleIdx)
+                    val parsedRec = CalendarRecurrenceMapper.parseRRule(rrule)
+                    val calTitle = if (calNameIdx >= 0) cursor.getString(calNameIdx) else null
                     out.add(
                         CalendarEventRecord(
                             id = id,
@@ -1332,7 +1339,10 @@ object CalendarMigrator {
                             startEpochMillis = dtStart,
                             endEpochMillis = dtEnd,
                             allDay = cursor.getInt(allDayIdx) == 1,
-                            rrule = cursor.getString(rruleIdx)
+                            rrule = rrule,
+                            calendarTitle = calTitle,
+                            recurrenceFrequency = parsedRec?.first,
+                            recurrenceInterval = parsedRec?.second
                         )
                     )
                 }
@@ -1343,55 +1353,247 @@ object CalendarMigrator {
         return out
     }
 
-    fun importEventsDeduplicated(context: Context, incoming: List<CalendarEventRecord>): Int {
-        if (!hasWritePermission(context) || incoming.isEmpty()) return 0
-        val primaryCalId = findWritableCalendarId(context) ?: return 0
+    fun importEventsDeduplicatedWithStats(context: Context, incoming: List<CalendarEventRecord>): Pair<Int, Int> {
+        if (!hasWritePermission(context) || incoming.isEmpty()) return 0 to 0
+        val primaryCalId = findOrCreateWritableCalendarId(context) ?: return 0 to 0
         val existingKeys = readEvents(context)
-            .map { "${it.title.lowercase()}_${it.startEpochMillis}" }
+            .map { "${it.title.trim().lowercase()}_${it.startEpochMillis / 60_000L}" }
             .toHashSet()
 
         var imported = 0
+        var alreadyPresent = 0
         for (ev in incoming) {
-            val key = "${ev.title.lowercase()}_${ev.startEpochMillis}"
-            if (key in existingKeys) continue
+            val cleanTitle = ev.title.trim().ifEmpty { "Evento" }
+            val key = "${cleanTitle.lowercase()}_${ev.startEpochMillis / 60_000L}"
+            if (key in existingKeys) {
+                alreadyPresent++
+                continue
+            }
+            val safeEnd = if (ev.endEpochMillis > ev.startEpochMillis) {
+                ev.endEpochMillis
+            } else {
+                ev.startEpochMillis + if (ev.allDay) 86_400_000L else 3_600_000L
+            }
+            val effectiveRRule = ev.rrule?.takeIf { it.isNotBlank() }
+                ?: CalendarRecurrenceMapper.toRRule(ev.recurrenceFrequency, ev.recurrenceInterval)
+
             try {
                 val values = ContentValues().apply {
                     put(CalendarContract.Events.CALENDAR_ID, primaryCalId)
-                    put(CalendarContract.Events.TITLE, ev.title)
+                    put(CalendarContract.Events.TITLE, cleanTitle)
                     put(CalendarContract.Events.DESCRIPTION, ev.description)
                     put(CalendarContract.Events.EVENT_LOCATION, ev.location)
                     put(CalendarContract.Events.DTSTART, ev.startEpochMillis)
-                    put(CalendarContract.Events.DTEND, ev.endEpochMillis)
                     put(CalendarContract.Events.ALL_DAY, if (ev.allDay) 1 else 0)
                     put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
-                    if (!ev.rrule.isNullOrBlank()) {
-                        put(CalendarContract.Events.RRULE, ev.rrule)
+                    if (effectiveRRule != null) {
+                        // Android CalendarProvider vieta di impostare sia DTEND che RRULE: usa DURATION.
+                        val durationSec = ((safeEnd - ev.startEpochMillis) / 1000L).coerceAtLeast(3600L)
+                        put(CalendarContract.Events.DURATION, if (ev.allDay) "P1D" else "P${durationSec}S")
+                        put(CalendarContract.Events.RRULE, effectiveRRule)
+                    } else {
+                        put(CalendarContract.Events.DTEND, safeEnd)
                     }
                 }
-                if (context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values) != null) {
+                val insertedUri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+                if (insertedUri != null) {
                     imported++
                     existingKeys.add(key)
+                    ev.alarmOffsetSeconds?.let { offsetSec ->
+                        val minutesBefore = kotlin.math.abs(kotlin.math.round(offsetSec / 60.0)).toInt().coerceAtLeast(1)
+                        runCatching {
+                            val reminderVals = ContentValues().apply {
+                                put(CalendarContract.Reminders.EVENT_ID, ContentUris.parseId(insertedUri))
+                                put(CalendarContract.Reminders.MINUTES, minutesBefore)
+                                put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+                            }
+                            context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, reminderVals)
+                        }
+                    }
                 }
             } catch (t: Throwable) {
                 DirectSwitchLog.warn("Inserimento evento calendario fallito", t)
             }
         }
-        return imported
+        return imported to alreadyPresent
     }
 
-    private fun findWritableCalendarId(context: Context): Long? {
+    fun importEventsDeduplicated(context: Context, incoming: List<CalendarEventRecord>): Int =
+        importEventsDeduplicatedWithStats(context, incoming).first
+
+    private fun findOrCreateWritableCalendarId(
+        context: Context,
+        preferredTitle: String? = null
+    ): Long? {
+        val projection = arrayOf(
+            CalendarContract.Calendars._ID,
+            CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
+            CalendarContract.Calendars.IS_PRIMARY
+        )
         context.contentResolver.query(
             CalendarContract.Calendars.CONTENT_URI,
-            arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL),
+            projection,
             "${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL} >= ?",
             arrayOf(CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR.toString()),
-            null
+            "${CalendarContract.Calendars.VISIBLE} DESC, ${CalendarContract.Calendars.IS_PRIMARY} DESC, ${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL} DESC"
         )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                return cursor.getLong(0)
+            var firstId: Long? = null
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(0)
+                val name = cursor.getString(1).orEmpty()
+                if (firstId == null) firstId = id
+                if (!preferredTitle.isNullOrBlank() && name.equals(preferredTitle, ignoreCase = true)) {
+                    return id
+                }
+            }
+            if (preferredTitle.isNullOrBlank() && firstId != null) {
+                return firstId
             }
         }
-        return null
+
+        // Telefono nuovo / senza calendario Google sincronizzato: creiamo un calendario locale scrivibile.
+        val calName = preferredTitle?.takeIf { it.isNotBlank() } ?: "Calendario DirectSwitch"
+        return runCatching {
+            val syncUri = CalendarContract.Calendars.CONTENT_URI.buildUpon()
+                .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, "DirectSwitch")
+                .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+                .build()
+            val values = ContentValues().apply {
+                put(CalendarContract.Calendars.ACCOUNT_NAME, "DirectSwitch")
+                put(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+                put(CalendarContract.Calendars.NAME, calName)
+                put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, calName)
+                put(CalendarContract.Calendars.CALENDAR_COLOR, 0xFF0A84FF.toInt())
+                put(CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, CalendarContract.Calendars.CAL_ACCESS_OWNER)
+                put(CalendarContract.Calendars.OWNER_ACCOUNT, "DirectSwitch")
+                put(CalendarContract.Calendars.VISIBLE, 1)
+                put(CalendarContract.Calendars.SYNC_EVENTS, 1)
+                put(CalendarContract.Calendars.CALENDAR_TIME_ZONE, TimeZone.getDefault().id)
+            }
+            val uri = context.contentResolver.insert(syncUri, values) ?: return@runCatching null
+            ContentUris.parseId(uri)
+        }.getOrNull()
+    }
+
+    internal fun findOrCreateNamedCalendarForReminders(context: Context): Long? =
+        findOrCreateWritableCalendarId(context, preferredTitle = "Promemoria Apple")
+}
+
+/** Importa su Android i Promemoria Apple ricevuti da iPhone (salvataggio leggibile + eventi con scadenza in Calendario). */
+object AndroidRemindersMigrator {
+    fun importRemindersWithStats(
+        context: Context,
+        incoming: List<ReminderTransferRecord>
+    ): Pair<Int, Int> {
+        if (incoming.isEmpty()) return 0 to 0
+
+        val uniqueIncoming = linkedMapOf<String, ReminderTransferRecord>()
+        for (rem in incoming) {
+            val title = rem.title.trim()
+            if (title.isEmpty()) continue
+            val list = rem.listName.orEmpty().trim().lowercase()
+            val dueBucket = rem.dueEpochMillis?.let { it / 60_000L } ?: -1L
+            val sig = "$list|${title.lowercase()}|$dueBucket"
+            uniqueIncoming.putIfAbsent(sig, rem.copy(title = title))
+        }
+        if (uniqueIncoming.isEmpty()) return 0 to 0
+        val cleanList = uniqueIncoming.values.toList()
+
+        // 1. Copia completa in Download/DirectSwitch/Promemoria (JSON + HTML consultabile anche senza app Promemoria Apple)
+        val jsonSaved = runCatching {
+            val bytes = DirectSwitchJson.instance.encodeToString(cleanList).toByteArray(Charsets.UTF_8)
+            PublicDownloadsSaver.saveBytes(
+                context = context,
+                subFolder = "Promemoria",
+                fileName = "Promemoria_DirectSwitch.json",
+                mimeType = "application/json",
+                bytes = bytes
+            )
+        }.getOrDefault(false)
+
+        val dateFmt = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.ITALY)
+        val htmlSaved = runCatching {
+            val html = buildString {
+                append("<!DOCTYPE html><html lang='it'><head><meta charset='utf-8'>")
+                append("<meta name='viewport' content='width=device-width,initial-scale=1'>")
+                append("<title>Promemoria trasferiti (${cleanList.size})</title>")
+                append("<style>body{font-family:sans-serif;background:#f4f7f9;padding:16px} .card{background:#fff;border-radius:12px;padding:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,0.06)} .meta{font-size:12px;color:#0a84ff;font-weight:bold} .done{text-decoration:line-through;color:#6c757d}</style></head><body>")
+                append("<h2>Promemoria iPhone salvati (${cleanList.size})</h2>")
+                for (rem in cleanList) {
+                    val safeList = (rem.listName ?: "Promemoria").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    val safeTitle = rem.title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    val safeNotes = rem.notes.orEmpty().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    val dueText = rem.dueEpochMillis?.let { " • Scadenza: ${dateFmt.format(java.util.Date(it))}" } ?: ""
+                    val doneClass = if (rem.isCompleted) " class='done'" else ""
+                    val checkMark = if (rem.isCompleted) "☑ " else "☐ "
+                    append("<div class='card'><div class='meta'>$safeList$dueText</div><div$doneClass>$checkMark$safeTitle</div>")
+                    if (safeNotes.isNotEmpty()) append("<div style='font-size:13px;color:#495057;margin-top:4px'>$safeNotes</div>")
+                    append("</div>")
+                }
+                append("</body></html>")
+            }
+            PublicDownloadsSaver.saveBytes(
+                context = context,
+                subFolder = "Promemoria",
+                fileName = "Promemoria_DirectSwitch.html",
+                mimeType = "text/html",
+                bytes = html.toByteArray(Charsets.UTF_8)
+            )
+        }.getOrDefault(false)
+
+        // 2. Inserimento dei promemoria (con dedup) in un calendario locale "Promemoria Apple" se il permesso Calendario è concesso
+        var calendarInserted = 0
+        var calendarAlreadyPresent = 0
+        if (CalendarMigrator.hasWritePermission(context)) {
+            val targetCalId = CalendarMigrator.findOrCreateNamedCalendarForReminders(context)
+            if (targetCalId != null) {
+                val existingCalKeys = CalendarMigrator.readEvents(context)
+                    .map { "${it.title.trim().lowercase()}_${it.startEpochMillis / 60_000L}" }
+                    .toHashSet()
+                val nowBase = System.currentTimeMillis()
+                cleanList.forEachIndexed { idx, rem ->
+                    val startMs = rem.dueEpochMillis ?: (nowBase + idx * 60_000L)
+                    val prefTitle = if (rem.isCompleted) "[Completato] ${rem.title}" else rem.title
+                    val key = "${prefTitle.trim().lowercase()}_${startMs / 60_000L}"
+                    if (key in existingCalKeys) {
+                        calendarAlreadyPresent++
+                    } else {
+                        val desc = buildString {
+                            if (!rem.listName.isNullOrBlank()) append("Lista: ${rem.listName}\n")
+                            if (!rem.notes.isNullOrBlank()) append(rem.notes)
+                        }.trim().ifEmpty { null }
+                        runCatching {
+                            val values = ContentValues().apply {
+                                put(CalendarContract.Events.CALENDAR_ID, targetCalId)
+                                put(CalendarContract.Events.TITLE, prefTitle)
+                                put(CalendarContract.Events.DESCRIPTION, desc)
+                                put(CalendarContract.Events.DTSTART, startMs)
+                                put(CalendarContract.Events.DTEND, startMs + 1_800_000L)
+                                put(CalendarContract.Events.ALL_DAY, if (rem.dueEpochMillis == null) 1 else 0)
+                                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                            }
+                            if (context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values) != null) {
+                                calendarInserted++
+                                existingCalKeys.add(key)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val effectiveImported = when {
+            calendarInserted > 0 -> calendarInserted
+            jsonSaved || htmlSaved -> if (calendarAlreadyPresent == cleanList.size) 0 else cleanList.size
+            else -> 0
+        }
+        val effectiveAlreadyPresent = if (effectiveImported == 0 && calendarAlreadyPresent > 0) {
+            calendarAlreadyPresent
+        } else {
+            calendarAlreadyPresent
+        }
+        return effectiveImported to effectiveAlreadyPresent
     }
 }
 
