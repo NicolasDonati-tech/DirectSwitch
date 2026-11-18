@@ -1628,13 +1628,18 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
 
-            let reconciledMedia = (item.category == .PHOTOS || item.category == .VIDEOS)
+            let reconciledMedia: (fileName: String, mimeType: String, effectiveExt: String) =
+                (item.category == .PHOTOS || item.category == .VIDEOS)
                 ? MediaFallbackNaming.reconcileFileNameAndMime(
                     fileName: item.fileName,
                     originalMime: item.mimeType,
                     actualExtension: headers["x-ds-actual-ext"]
                 )
-                : (item.fileName, item.mimeType, URL(fileURLWithPath: item.fileName).pathExtension.lowercased())
+                : (
+                    fileName: item.fileName,
+                    mimeType: item.mimeType,
+                    effectiveExt: URL(fileURLWithPath: item.fileName).pathExtension.lowercased()
+                )
             let effectiveItem = ManifestItem(
                 id: item.id,
                 category: item.category,
