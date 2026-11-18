@@ -991,6 +991,7 @@ struct SendCategoriesStepView: View {
             let loaded = photosPreload.isCompleted ? total : photosPreload.loadedCount
             let live = max(photosPreload.livePhotosCount, scanSummary?.livePhotosCount ?? 0)
             let albums = max(photosPreload.albumsCount, scanSummary?.photoAlbumsCount ?? 0)
+            let iCloud = max(photosPreload.iCloudCount, scanSummary?.iCloudPhotosCount ?? 0)
             let bytes = max(photosPreload.estimatedBytes, scanSummary?.photosBytes ?? 0)
 
             HStack(spacing: 8) {
@@ -1027,6 +1028,12 @@ struct SendCategoriesStepView: View {
             Text("\(live) Live Photos • \(albums) album utente • \(bytes > 0 ? DirectSwitchUIHelpers.formatBytes(bytes) : "qualità originale HEIC/RAW")")
                 .font(.system(size: 12))
                 .foregroundColor(AppleTheme.textSecondary)
+
+            if iCloud > 0 {
+                Text("\(iCloud) foto ottimizzate su iCloud: verranno scaricate automaticamente durante la copia (mantieni attiva Internet su questo iPhone).")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(AppleTheme.blue)
+            }
         }
     }
 
@@ -1042,6 +1049,7 @@ struct SendCategoriesStepView: View {
         } else {
             let total = max(videosPreload.totalCount, scanSummary?.videosCount ?? 0)
             let loaded = videosPreload.isCompleted ? total : videosPreload.loadedCount
+            let iCloud = max(videosPreload.iCloudCount, scanSummary?.iCloudVideosCount ?? 0)
             let bytes = max(videosPreload.estimatedBytes, scanSummary?.videosBytes ?? 0)
 
             HStack(spacing: 8) {
@@ -1078,6 +1086,12 @@ struct SendCategoriesStepView: View {
             Text("Qualità 4K 60fps e Slow-Motion preservata\(bytes > 0 ? " • \(DirectSwitchUIHelpers.formatBytes(bytes))" : "").")
                 .font(.system(size: 12))
                 .foregroundColor(AppleTheme.textSecondary)
+
+            if iCloud > 0 {
+                Text("\(iCloud) video su iCloud: verranno scaricati automaticamente uno alla volta durante la copia (mantieni attiva Internet su questo iPhone).")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(AppleTheme.blue)
+            }
         }
     }
 

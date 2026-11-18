@@ -705,12 +705,12 @@ class TransferProgressAccounting(
         get() {
             val total = totalBytesForProgress
             if (total > 0L && transferredBytes > 0L) {
-                return (transferredBytes.toFloat() / total.toFloat()).coerceIn(0.01f, 1f)
+                return (transferredBytes.toDouble() / total.toDouble()).coerceIn(0.01, 1.0).toFloat()
             }
             if (initialTotalItems > 0) {
                 val processed = processedItemsCount
                 if (processed <= 0) return 0f
-                return (processed.toFloat() / initialTotalItems.toFloat()).coerceIn(0.01f, 1f)
+                return (processed.toDouble() / initialTotalItems.toDouble()).coerceIn(0.01, 1.0).toFloat()
             }
             return 0f
         }
@@ -758,5 +758,96 @@ class SlidingTransferSpeedMeter(
         }
         val elapsedMs = (nowMillis - startMillis).coerceAtLeast(250L)
         return (totalBytesRecorded.toDouble() / (1024.0 * 1024.0)) / (elapsedMs / 1000.0)
+    }
+}
+
+/** Formattazione deterministica identica tra Android e iOS (base decimale 1000 MB/GB e percentuale intera coerente). */
+object TransferDisplayFormatting {
+    fun formatBytes(bytes: Long): String {
+        if (bytes <= 0L) return "0 MB"
+        if (bytes >= 1_000_000_000L) {
+            val gb = bytes.toDouble() / 1_000_000_000.0
+            return String.format(Locale.ITALY, "%.2f GB", gb)
+        }
+        if (bytes < 100_000L) {
+            return "0,1 MB"
+        }
+        val mb = bytes.toDouble() / 1_000_000.0
+        return String.format(Locale.ITALY, "%.1f MB", mb)
+    }
+
+    fun percentageInt(fraction: Double, isCompleted: Boolean): Int {
+        if (isCompleted) return 100
+        val clamped = fraction.coerceIn(0.0, 1.0)
+        return kotlin.math.floor(clamped * 100.0 + 1e-9).toInt().coerceIn(0, 99)
+    }
+
+    fun percentageInt(fraction: Float, isCompleted: Boolean): Int =
+        percentageInt(fraction.toDouble(), isCompleted)
+}
+
+/** Calcolatore stabile del tempo rimanente aggiornato ogni 10% in base alla durata reale del 10% precedente. */
+class TenPercentSteppedEtaTracker(
+    initialFraction: Double = 0.0,
+    startMillis: Long = System.currentTimeMillis()
+) {
+    private var lastDecile: Int = 0
+    private var lastFraction: Double = 0.0
+    private var lastTimestampMillis: Long = startMillis
+    var cachedRemainingSeconds: Int? = null
+        private set
+
+    init {
+        reset(initialFraction, startMillis)
+    }
+
+    fun reset(initialFraction: Double = 0.0, atMillis: Long = System.currentTimeMillis()) {
+        val clamped = initialFraction.coerceIn(0.0, 0.99)
+        lastDecile = kotlin.math.floor(clamped * 10.0 + 1e-9).toInt().coerceIn(0, 9)
+        lastFraction = clamped
+        lastTimestampMillis = atMillis
+        cachedRemainingSeconds = null
+    }
+
+    fun reset(initialFraction: Float, atMillis: Long = System.currentTimeMillis()) =
+        reset(initialFraction.toDouble(), atMillis)
+
+    fun update(
+        progressFraction: Double,
+        isCompleted: Boolean,
+        hasTransferableItems: Boolean = true,
+        nowMillis: Long = System.currentTimeMillis()
+    ): String? {
+        if (isCompleted || !hasTransferableItems) return null
+        val clamped = progressFraction.coerceIn(0.0, 0.999)
+        val currentDecile = kotlin.math.floor(clamped * 10.0 + 1e-9).toInt().coerceIn(0, 9)
+
+        if (currentDecile > lastDecile) {
+            val deltaFraction = (clamped - lastFraction).coerceAtLeast(0.01)
+            val elapsedSec = ((nowMillis - lastTimestampMillis).coerceAtLeast(200L)).toDouble() / 1000.0
+            val secondsPerUnit = elapsedSec / deltaFraction
+            val remainingFraction = (1.0 - clamped).coerceAtLeast(0.0)
+            cachedRemainingSeconds = kotlin.math.round(secondsPerUnit * remainingFraction).toInt().coerceAtLeast(1)
+            lastDecile = currentDecile
+            lastFraction = clamped
+            lastTimestampMillis = nowMillis
+        }
+
+        return currentLabel(isCompleted, hasTransferableItems)
+    }
+
+    fun update(
+        progressFraction: Float,
+        isCompleted: Boolean,
+        hasTransferableItems: Boolean = true,
+        nowMillis: Long = System.currentTimeMillis()
+    ): String? = update(progressFraction.toDouble(), isCompleted, hasTransferableItems, nowMillis)
+
+    fun currentLabel(isCompleted: Boolean = false, hasTransferableItems: Boolean = true): String? {
+        if (isCompleted || !hasTransferableItems) return null
+        val sec = cachedRemainingSeconds ?: return "Calcolo tempo rimanente…"
+        if (sec < 60) return "Meno di un minuto rimanente"
+        val mins = kotlin.math.round(sec.toDouble() / 60.0).toInt().coerceAtLeast(1)
+        return "Circa $mins min rimanenti"
     }
 }

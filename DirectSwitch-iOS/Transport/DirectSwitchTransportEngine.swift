@@ -155,6 +155,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var transferredBytesCount: Int64 = 0
     @Published var totalBytesCount: Int64 = 0
     @Published var speedMegabytesPerSec: Double = 0.0
+    @Published var etaLabel: String? = nil
     @Published var mergedContacts: Int = 0
     @Published var importedCalendars: Int = 0
     @Published var importedReminders: Int = 0
@@ -209,6 +210,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var requestedWhatsAppMigration: Bool = false
     private var manifestItems: [String: ManifestItem] = [:]
     private var completedItemIds: Set<String> = []
+    private var skippedItemIds: Set<String> = []
     private var pendingLiveVideoTempURLs: [String: URL] = [:]
     private var receiverDestSession: iOSDocumentsSandboxBridge.ReceiverDestinationSession?
     private var senderUploadedIdsBySession: [String: Set<String>] = [:]
@@ -216,6 +218,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var transferredBytes: Int64 = 0
     private var transferStartDate: Date = Date()
     private var speedMeter = SlidingTransferSpeedMeter()
+    private var etaTracker = TenPercentSteppedEtaTracker()
     private var receiverProgressAccounting: TransferProgressAccounting? = nil
     private var senderProgressAccounting: TransferProgressAccounting? = nil
     private var senderActiveUploadedIds: Set<String> = []
@@ -293,6 +296,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         handshakeAuthenticated = false
         manifestItems.removeAll()
         completedItemIds.removeAll()
+        skippedItemIds.removeAll()
         cleanupPendingLiveVideos()
         peerName = ""
         peerPlatform = nil
@@ -302,7 +306,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         transferredBytesCount = 0
         totalBytesCount = 0
         speedMegabytesPerSec = 0.0
+        etaLabel = nil
         speedMeter = SlidingTransferSpeedMeter()
+        etaTracker.reset()
         receiverProgressAccounting = nil
         mergedContacts = 0
         importedCalendars = 0
@@ -527,7 +533,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         transferredBytesCount = 0
         totalBytesCount = 0
         speedMegabytesPerSec = 0.0
+        etaLabel = nil
         speedMeter = SlidingTransferSpeedMeter()
+        etaTracker.reset()
+        skippedItemIds.removeAll()
         receiverProgressAccounting = nil
         mergedContacts = 0
         importedCalendars = 0
@@ -645,7 +654,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         totalBytesCount = 0
         transferredBytes = 0
         speedMegabytesPerSec = 0.0
+        etaLabel = nil
         speedMeter = SlidingTransferSpeedMeter()
+        etaTracker.reset()
+        skippedItemIds.removeAll()
         receiverProgressAccounting = nil
         mergedContacts = 0
         contactsAlreadyPresentCount = 0
@@ -1146,13 +1158,16 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 cleanupPendingLiveVideos()
                 manifestItems.removeAll()
                 completedItemIds.removeAll()
+                skippedItemIds.removeAll()
                 completedItems = 0
                 totalItems = 0
                 transferredBytes = 0
                 transferredBytesCount = 0
                 totalBytesCount = 0
                 speedMegabytesPerSec = 0.0
+                etaLabel = nil
                 speedMeter = SlidingTransferSpeedMeter()
+                etaTracker.reset()
                 receiverProgressAccounting = nil
                 visualStepProgress = 0.0
                 mergedContacts = 0
@@ -1293,6 +1308,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             )
             receiverProgressAccounting = acc
             speedMeter = SlidingTransferSpeedMeter()
+            etaTracker.reset(initialFraction: acc.progressFraction)
+            etaLabel = etaTracker.currentLabel(isCompleted: false, hasTransferableItems: acc.initialTotalItems > 0)
             totalBytesCount = acc.totalBytesForProgress
             mergedContacts += insContacts
             contactsAlreadyPresentCount = skipContacts
@@ -1371,6 +1388,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             transferredBytesCount = receiverProgressAccounting?.transferredBytes ?? transferredBytes
             if let acc = receiverProgressAccounting {
                 totalBytesCount = acc.totalBytesForProgress
+                etaLabel = etaTracker.update(
+                    progressFraction: acc.progressFraction,
+                    isCompleted: false,
+                    hasTransferableItems: acc.initialTotalItems > 0
+                )
             } else {
                 totalBytesCount = max(transferredBytes, totalBytesCount + plainBytes)
             }
@@ -1462,14 +1484,50 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             transferredBytesCount = receiverProgressAccounting?.transferredBytes ?? transferredBytes
             if let acc = receiverProgressAccounting {
                 totalBytesCount = acc.totalBytesForProgress
+                etaLabel = etaTracker.update(
+                    progressFraction: acc.progressFraction,
+                    isCompleted: false,
+                    hasTransferableItems: acc.initialTotalItems > 0
+                )
             } else {
                 totalBytesCount = max(transferredBytesCount, totalBytesCount)
             }
             speedMegabytesPerSec = speedMeter.record(bytes: plainBytes)
             statusLabel = "Ricevuto \(item.fileName) (\(completedItems)/\(totalItems))"
-            let pct = Int(((receiverProgressAccounting?.progressFraction ?? (totalItems > 0 ? Double(completedItems) / Double(totalItems) : 0.5)) * 100.0).rounded())
+            let frac = receiverProgressAccounting?.progressFraction ?? (totalItems > 0 ? Double(completedItems) / Double(totalItems) : 0.5)
+            let pct = TransferDisplayFormatting.percentageInt(fraction: frac, isCompleted: false)
             iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: statusLabel)
             sendPlainJson(connection: connection, status: 200, json: #"{"ok":true}"#)
+            return
+        }
+
+        if method == "POST" && path.hasPrefix("/v1/item-skip/") {
+            let itemId = String(path.dropFirst("/v1/item-skip/".count))
+            if !body.isEmpty {
+                guard (try? DirectSwitchCrypto.openJsonEnvelope(body, key: key)) != nil else {
+                    sendPlainJson(connection: connection, status: 401, json: #"{"error":"skip_unauthorized"}"#)
+                    return
+                }
+            }
+            if let item = manifestItems[itemId],
+               !completedItemIds.contains(itemId),
+               !skippedItemIds.contains(itemId) {
+                skippedItemIds.insert(itemId)
+                if let pendingLive = pendingLiveVideoTempURLs.removeValue(forKey: itemId) {
+                    try? FileManager.default.removeItem(at: pendingLive)
+                }
+                receiverProgressAccounting?.recordItemFailedOrSkipped(estimatedPrimaryBytes: item.sizeBytes)
+                failedItemsCount = receiverProgressAccounting?.failedItemsCount ?? (failedItemsCount + 1)
+                if let acc = receiverProgressAccounting {
+                    totalBytesCount = acc.totalBytesForProgress
+                    etaLabel = etaTracker.update(
+                        progressFraction: acc.progressFraction,
+                        isCompleted: false,
+                        hasTransferableItems: acc.initialTotalItems > 0
+                    )
+                }
+            }
+            sendEncryptedJson(connection: connection, status: 200, plainJson: #"{"ok":true}"#, key: key)
             return
         }
 
@@ -1485,6 +1543,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             isTransferring = false
             isBackgroundKeepAliveActive = false
             currentItemName = ""
+            etaLabel = nil
             visualStepProgress = 1.0
             pendingNativeWhatsAppMigration = requestedWhatsAppMigration
             isCompleted = true
@@ -2033,6 +2092,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             senderActiveUploadedIds = initialUploadedIds
             senderSucceededDocURLs = []
             speedMeter = SlidingTransferSpeedMeter()
+            etaTracker.reset(initialFraction: initialAccounting.progressFraction)
+            etaLabel = etaTracker.currentLabel(
+                isCompleted: false,
+                hasTransferableItems: initialAccounting.initialTotalItems > 0
+            )
 
             completedItems = initialAccounting.succeededItemsCount
             totalItems = initialAccounting.initialTotalItems
@@ -2146,20 +2210,35 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             @Sendable
+            func notifyReceiverSkippedItem(_ itemId: String) async {
+                let currentBaseUrl = await channelCoordinator.snapshotBaseUrl()
+                _ = try? await self.postEncryptedJson(
+                    url: "\(currentBaseUrl)/v1/item-skip/\(itemId)",
+                    payload: ["sessionId": qrPayload.sessionId],
+                    key: key
+                )
+            }
+
+            @Sendable
             func uploadSingleMediaAsset(_ entry: iOSPhotoKitMigrator.ScannedLibraryAssetEntry) async throws {
                 let isIosLiveTarget = (hsResp.receiverPlatform == .IOS && entry.item.isLivePhoto == true)
                 let estLiveBytes = isIosLiveTarget ? entry.liveVideoBytes : 0
-                let permitsNeeded = entry.item.sizeBytes >= 50 * 1024 * 1024 ? 3 : 1
+                // Le foto/video ottimizzati su iCloud (o file >= 50 MB) prendono tutti e 3 i permessi:
+                // così il download da iCloud avviene uno alla volta a banda piena senza contesa né timeout!
+                let permitsNeeded = (!entry.isLocallyAvailable || entry.item.sizeBytes >= 50 * 1024 * 1024) ? 3 : 1
                 await permitPool.acquire(permitsNeeded)
                 var heldLiveEstimate = estLiveBytes
 
                 do {
                     await MainActor.run {
                         self.currentItemName = entry.item.fileName
-                        self.statusLabel = "Invio \(entry.item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
+                        self.statusLabel = entry.isLocallyAvailable
+                            ? "Invio \(entry.item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
+                            : "Scaricamento da iCloud di \(entry.item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
                     }
                     guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(entry.asset) else {
                         let initialLiveEst = heldLiveEstimate
+                        await notifyReceiverSkippedItem(entry.item.id)
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(
                                 estimatedPrimaryBytes: entry.item.sizeBytes,
@@ -2168,7 +2247,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
-                                let pct = Int((acc.progressFraction * 100.0).rounded())
+                                self.etaLabel = self.etaTracker.update(
+                                    progressFraction: acc.progressFraction,
+                                    isCompleted: false,
+                                    hasTransferableItems: acc.initialTotalItems > 0
+                                )
+                                let pct = TransferDisplayFormatting.percentageInt(fraction: acc.progressFraction, isCompleted: false)
                                 iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: self.statusLabel)
                             }
                             self.speedMegabytesPerSec = self.speedMeter.currentMegabytesPerSec()
@@ -2214,6 +2298,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                         self.senderUploadedBytesBySession[qrPayload.sessionId] = acc.transferredBytes
                                         self.transferredBytesCount = acc.transferredBytes
                                         self.totalBytesCount = acc.totalBytesForProgress
+                                        self.etaLabel = self.etaTracker.update(
+                                            progressFraction: acc.progressFraction,
+                                            isCompleted: false,
+                                            hasTransferableItems: acc.initialTotalItems > 0
+                                        )
                                     }
                                     self.speedMegabytesPerSec = self.speedMeter.record(bytes: liveSent)
                                 }
@@ -2226,6 +2315,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 self.senderProgressAccounting?.recordLiveVideoSkipped(estimatedLiveBytes: dropEst)
                                 if let acc = self.senderProgressAccounting {
                                     self.totalBytesCount = acc.totalBytesForProgress
+                                    self.etaLabel = self.etaTracker.update(
+                                        progressFraction: acc.progressFraction,
+                                        isCompleted: false,
+                                        hasTransferableItems: acc.initialTotalItems > 0
+                                    )
                                 }
                             }
                         }
@@ -2250,7 +2344,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 self.completedItems = acc.succeededItemsCount
                                 self.transferredBytesCount = acc.transferredBytes
                                 self.totalBytesCount = acc.totalBytesForProgress
-                                let pct = Int((acc.progressFraction * 100.0).rounded())
+                                self.etaLabel = self.etaTracker.update(
+                                    progressFraction: acc.progressFraction,
+                                    isCompleted: false,
+                                    hasTransferableItems: acc.initialTotalItems > 0
+                                )
+                                let pct = TransferDisplayFormatting.percentageInt(fraction: acc.progressFraction, isCompleted: false)
                                 let status = "Invio \(entry.item.fileName) (\(self.completedItems)/\(self.totalItems))..."
                                 self.statusLabel = status
                                 iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: status)
@@ -2259,6 +2358,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         }
                     } else {
                         let remainingLiveForThis = heldLiveEstimate
+                        await notifyReceiverSkippedItem(entry.item.id)
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(
                                 estimatedPrimaryBytes: entry.item.sizeBytes,
@@ -2267,6 +2367,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
+                                self.etaLabel = self.etaTracker.update(
+                                    progressFraction: acc.progressFraction,
+                                    isCompleted: false,
+                                    hasTransferableItems: acc.initialTotalItems > 0
+                                )
                             }
                             self.speedMegabytesPerSec = self.speedMeter.currentMegabytesPerSec()
                         }
@@ -2303,11 +2408,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         self.statusLabel = "Invio \(item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
                     }
                     guard iOSDocumentsSandboxBridge.prepareReadableFileForUpload(at: docURL) else {
+                        await notifyReceiverSkippedItem(item.id)
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(estimatedPrimaryBytes: item.sizeBytes)
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
+                                self.etaLabel = self.etaTracker.update(
+                                    progressFraction: acc.progressFraction,
+                                    isCompleted: false,
+                                    hasTransferableItems: acc.initialTotalItems > 0
+                                )
                             }
                             self.speedMegabytesPerSec = self.speedMeter.currentMegabytesPerSec()
                         }
@@ -2330,17 +2441,28 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 self.completedItems = acc.succeededItemsCount
                                 self.transferredBytesCount = acc.transferredBytes
                                 self.totalBytesCount = acc.totalBytesForProgress
-                                let pct = Int((acc.progressFraction * 100.0).rounded())
+                                self.etaLabel = self.etaTracker.update(
+                                    progressFraction: acc.progressFraction,
+                                    isCompleted: false,
+                                    hasTransferableItems: acc.initialTotalItems > 0
+                                )
+                                let pct = TransferDisplayFormatting.percentageInt(fraction: acc.progressFraction, isCompleted: false)
                                 iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: self.statusLabel)
                             }
                             self.speedMegabytesPerSec = self.speedMeter.record(bytes: sentBytes)
                         }
                     } else {
+                        await notifyReceiverSkippedItem(item.id)
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(estimatedPrimaryBytes: item.sizeBytes)
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
+                                self.etaLabel = self.etaTracker.update(
+                                    progressFraction: acc.progressFraction,
+                                    isCompleted: false,
+                                    hasTransferableItems: acc.initialTotalItems > 0
+                                )
                             }
                             self.speedMegabytesPerSec = self.speedMeter.currentMegabytesPerSec()
                         }
@@ -2406,6 +2528,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 try? FileManager.default.removeItem(at: docURL)
             }
             currentItemName = ""
+            etaLabel = nil
             senderUploadedIdsBySession.removeValue(forKey: qrPayload.sessionId)
             senderUploadedBytesBySession.removeValue(forKey: qrPayload.sessionId)
             visualStepProgress = 1.0

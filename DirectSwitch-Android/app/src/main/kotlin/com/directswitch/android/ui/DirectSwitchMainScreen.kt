@@ -128,6 +128,7 @@ import com.directswitch.android.migrators.InstalledAppsScanner
 import com.directswitch.android.migrators.LocalDeviceScanSummary
 import com.directswitch.android.migrators.MediaExifScannerAndImporter
 import com.directswitch.android.migrators.PhotosPreloadState
+import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.VideosPreloadState
 import com.directswitch.android.migrators.findHostActivity
@@ -2150,15 +2151,16 @@ private fun TransferProgressWizardView(
     }
 
     val processedItems = progress.completedItems + progress.failedItemsCount
-    val ratio = when {
-        progress.isCompleted -> 1f
-        progress.transferredBytes == 0L && processedItems == 0 -> 0f
+    val ratioDouble = when {
+        progress.isCompleted -> 1.0
+        progress.transferredBytes == 0L && processedItems == 0 -> 0.0
         progress.totalBytes > 0L && progress.transferredBytes > 0L ->
-            (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0.01f, 1f)
-        progress.totalItems > 0 -> (processedItems.toFloat() / progress.totalItems.toFloat()).coerceIn(0.01f, 1f)
-        else -> 0f
+            (progress.transferredBytes.toDouble() / progress.totalBytes.toDouble()).coerceIn(0.01, 1.0)
+        progress.totalItems > 0 -> (processedItems.toDouble() / progress.totalItems.toDouble()).coerceIn(0.01, 1.0)
+        else -> 0.0
     }
-    val pct = (ratio * 100f).toInt()
+    val ratio = ratioDouble.toFloat()
+    val pct = TransferDisplayFormatting.percentageInt(ratioDouble, progress.isCompleted)
 
     Column(
         modifier = Modifier
@@ -2246,6 +2248,15 @@ private fun TransferProgressWizardView(
                     color = DirectSwitchTheme.textSecondary
                 )
             }
+        }
+
+        if (!progress.isCompleted && !progress.etaLabel.isNullOrBlank()) {
+            Text(
+                text = progress.etaLabel,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = DirectSwitchTheme.blue
+            )
         }
     }
 
@@ -3009,11 +3020,4 @@ private fun decodeQrFromFrame(imageProxy: ImageProxy, onQrScanned: (String) -> U
     }
 }
 
-private fun formatMb(bytes: Long): String {
-    val mb = bytes / (1024.0 * 1024.0)
-    return if (mb >= 1024.0) {
-        String.format(Locale.ITALY, "%.2f GB", mb / 1024.0)
-    } else {
-        String.format(Locale.ITALY, "%.1f MB", mb)
-    }
-}
+private fun formatMb(bytes: Long): String = TransferDisplayFormatting.formatBytes(bytes)

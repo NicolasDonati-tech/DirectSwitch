@@ -861,3 +861,85 @@ struct SlidingTransferSpeedMeter: Sendable {
         return (Double(totalBytesRecorded) / (1024.0 * 1024.0)) / elapsed
     }
 }
+
+/// Formattazione deterministica identica tra iOS e Android (base decimale 1000 MB/GB e percentuale intera coerente).
+enum TransferDisplayFormatting {
+    static func formatBytes(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "0 MB" }
+        if bytes >= 1_000_000_000 {
+            let gb = Double(bytes) / 1_000_000_000.0
+            return String(format: "%.2f GB", locale: Locale(identifier: "it_IT"), gb)
+        }
+        if bytes < 100_000 {
+            return "0,1 MB"
+        }
+        let mb = Double(bytes) / 1_000_000.0
+        return String(format: "%.1f MB", locale: Locale(identifier: "it_IT"), mb)
+    }
+
+    static func percentageInt(fraction: Double, isCompleted: Bool) -> Int {
+        if isCompleted { return 100 }
+        let clamped = min(1.0, max(0.0, fraction))
+        return min(99, max(0, Int((clamped * 100.0 + 1e-9).rounded(.down))))
+    }
+}
+
+/// Calcolatore stabile del tempo rimanente aggiornato a scatti del 10% in base alla durata reale del 10% precedente.
+struct TenPercentSteppedEtaTracker: Sendable {
+    private var lastDecile: Int
+    private var lastFraction: Double
+    private var lastTimestamp: TimeInterval
+    private(set) var cachedRemainingSeconds: Int?
+
+    init(initialFraction: Double = 0.0, startTimestamp: TimeInterval = Date().timeIntervalSinceReferenceDate) {
+        let clamped = min(0.99, max(0.0, initialFraction))
+        self.lastDecile = min(9, max(0, Int((clamped * 10.0 + 1e-9).rounded(.down))))
+        self.lastFraction = clamped
+        self.lastTimestamp = startTimestamp
+        self.cachedRemainingSeconds = nil
+    }
+
+    mutating func reset(initialFraction: Double = 0.0, at timestamp: TimeInterval = Date().timeIntervalSinceReferenceDate) {
+        let clamped = min(0.99, max(0.0, initialFraction))
+        self.lastDecile = min(9, max(0, Int((clamped * 10.0 + 1e-9).rounded(.down))))
+        self.lastFraction = clamped
+        self.lastTimestamp = timestamp
+        self.cachedRemainingSeconds = nil
+    }
+
+    mutating func update(
+        progressFraction: Double,
+        isCompleted: Bool,
+        hasTransferableItems: Bool = true,
+        at timestamp: TimeInterval = Date().timeIntervalSinceReferenceDate
+    ) -> String? {
+        guard !isCompleted, hasTransferableItems else { return nil }
+        let clamped = min(0.999, max(0.0, progressFraction))
+        let currentDecile = min(9, max(0, Int((clamped * 10.0 + 1e-9).rounded(.down))))
+
+        if currentDecile > lastDecile {
+            let deltaFraction = max(0.01, clamped - lastFraction)
+            let elapsed = max(0.2, timestamp - lastTimestamp)
+            let secondsPerUnit = elapsed / deltaFraction
+            let remainingFraction = max(0.0, 1.0 - clamped)
+            cachedRemainingSeconds = max(1, Int((secondsPerUnit * remainingFraction).rounded()))
+            lastDecile = currentDecile
+            lastFraction = clamped
+            lastTimestamp = timestamp
+        }
+
+        return currentLabel(isCompleted: isCompleted, hasTransferableItems: hasTransferableItems)
+    }
+
+    func currentLabel(isCompleted: Bool = false, hasTransferableItems: Bool = true) -> String? {
+        guard !isCompleted, hasTransferableItems else { return nil }
+        guard let sec = cachedRemainingSeconds else {
+            return "Calcolo tempo rimanente…"
+        }
+        if sec < 60 {
+            return "Meno di un minuto rimanente"
+        }
+        let mins = max(1, Int((Double(sec) / 60.0).rounded()))
+        return "Circa \(mins) min rimanenti"
+    }
+}

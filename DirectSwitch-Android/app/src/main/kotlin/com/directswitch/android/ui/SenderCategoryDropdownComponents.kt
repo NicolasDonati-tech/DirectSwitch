@@ -93,6 +93,7 @@ import androidx.core.graphics.drawable.toBitmap
 import com.directswitch.android.migrators.DocumentLocationSummary
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.InstalledAppCategoryGroup
+import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.ui.theme.AppleSettingsIcon
 import com.directswitch.android.ui.theme.CleanCategoryToggleRow
@@ -1090,12 +1091,4 @@ private fun categoryIconForId(categoryId: String): ImageVector = when (categoryI
     else -> Icons.Filled.Home
 }
 
-private fun formatBytesHuman(bytes: Long): String {
-    if (bytes <= 0L) return "0 MB"
-    val mb = bytes / (1024.0 * 1024.0)
-    return if (mb >= 1024.0) {
-        String.format(Locale.ITALY, "%.2f GB", mb / 1024.0)
-    } else {
-        String.format(Locale.ITALY, "%.1f MB", mb)
-    }
-}
+private fun formatBytesHuman(bytes: Long): String = TransferDisplayFormatting.formatBytes(bytes)

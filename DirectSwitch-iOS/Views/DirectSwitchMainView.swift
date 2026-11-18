@@ -592,10 +592,14 @@ struct DirectSwitchMainView: View {
                 case .positions, .folders:
                     isLoadingDocumentPositions = true
                     let currentStaged = pickedDocuments.map(\.0)
+                    let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
                     Task {
                         let (summary, precheck) = await Task.detached(priority: .userInitiated) {
                             _ = iOSDocumentsSandboxBridge.authorizePositionBookmarks(urls)
-                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: currentStaged)
+                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                                stagedItems: currentStaged,
+                                includePairedLiveVideoBytes: includeLiveBytes
+                            )
                             let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
                                 stagedItems: currentStaged,
                                 includeWhatsAppVault: false
@@ -612,11 +616,15 @@ struct DirectSwitchMainView: View {
                 case .files:
                     isLoadingDocumentPositions = true
                     let existingStaged = pickedDocuments.map(\.0)
+                    let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
                     Task {
                         let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
                             let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
                             let allStaged = existingStaged + imp.map(\.0)
-                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: allStaged)
+                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                                stagedItems: allStaged,
+                                includePairedLiveVideoBytes: includeLiveBytes
+                            )
                             let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
                                 stagedItems: allStaged,
                                 includeWhatsAppVault: false
@@ -797,7 +805,11 @@ struct DirectSwitchMainView: View {
             photosPreload.isCompleted = false
             _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
             refreshAuthorizedSummary()
-            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .image) { loaded, tot, live, albums, bytes in
+            let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
+            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(
+                for: .image,
+                includePairedLiveVideoBytes: includeLiveBytes
+            ) { loaded, tot, live, albums, iCloudCount, bytes in
                 Task { @MainActor in
                     guard photosPreload.isLoading else { return }
                     photosPreload = PhotosPreloadState(
@@ -805,6 +817,7 @@ struct DirectSwitchMainView: View {
                         totalCount: tot,
                         livePhotosCount: live,
                         albumsCount: albums,
+                        iCloudCount: iCloudCount,
                         estimatedBytes: bytes,
                         isLoading: true,
                         isCompleted: false
@@ -816,6 +829,7 @@ struct DirectSwitchMainView: View {
                 totalCount: res.total,
                 livePhotosCount: res.liveCount,
                 albumsCount: res.albumsCount,
+                iCloudCount: res.iCloudCount,
                 estimatedBytes: res.estimatedBytes,
                 isLoading: false,
                 isCompleted: true
@@ -835,12 +849,13 @@ struct DirectSwitchMainView: View {
             videosPreload.isCompleted = false
             _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
             refreshAuthorizedSummary()
-            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .video) { loaded, tot, _, _, bytes in
+            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .video) { loaded, tot, _, _, iCloudCount, bytes in
                 Task { @MainActor in
                     guard videosPreload.isLoading else { return }
                     videosPreload = VideosPreloadState(
                         loadedCount: loaded,
                         totalCount: tot,
+                        iCloudCount: iCloudCount,
                         estimatedBytes: bytes,
                         isLoading: true,
                         isCompleted: false
@@ -850,6 +865,7 @@ struct DirectSwitchMainView: View {
             videosPreload = VideosPreloadState(
                 loadedCount: res.total,
                 totalCount: res.total,
+                iCloudCount: res.iCloudCount,
                 estimatedBytes: res.estimatedBytes,
                 isLoading: false,
                 isCompleted: true
@@ -894,9 +910,14 @@ struct DirectSwitchMainView: View {
             )
             let staged = pickedDocuments.map(\.0)
             let remCount = allList.count
+            let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
             let (summary, precheck) = await Task.detached(priority: .utility) {
                 (
-                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged, knownRemindersCount: remCount),
+                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                        stagedItems: staged,
+                        knownRemindersCount: remCount,
+                        includePairedLiveVideoBytes: includeLiveBytes
+                    ),
                     iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
                 )
             }.value
@@ -1051,10 +1072,14 @@ struct DirectSwitchMainView: View {
 
     private func refreshAuthorizedSummary() {
         let staged = pickedDocuments.map(\.0)
+        let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
         Task {
             let (summary, precheck) = await Task.detached(priority: .utility) {
                 (
-                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(stagedItems: staged),
+                    iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                        stagedItems: staged,
+                        includePairedLiveVideoBytes: includeLiveBytes
+                    ),
                     iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
                 )
             }.value
@@ -1295,7 +1320,10 @@ private struct DirectSwitchTransferProgressView: View {
     }
 
     private var percentageInt: Int {
-        Int((progressFraction * 100.0).rounded())
+        let completedFlag = isReceiverAppsOnlyPhase
+            ? (!appInstaller.queueableApps.isEmpty && handledQueueableAppsCount >= appInstaller.queueableApps.count)
+            : transport.isCompleted
+        return TransferDisplayFormatting.percentageInt(fraction: progressFraction, isCompleted: completedFlag)
     }
 
     private var mediaRowTitle: String {
@@ -1434,18 +1462,10 @@ private struct DirectSwitchTransferProgressView: View {
     }
 
     private var remainingTimeLabel: String? {
-        guard !transport.isCompleted,
-              transport.speedMegabytesPerSec > 0.15,
-              transport.totalBytesCount > transport.transferredBytesCount else {
+        guard !isReceiverAppsOnlyPhase, !isReceiverAppsPhase, !transport.isCompleted else {
             return nil
         }
-        let remMB = Double(transport.totalBytesCount - transport.transferredBytesCount) / (1024.0 * 1024.0)
-        let remSec = Int((remMB / transport.speedMegabytesPerSec).rounded())
-        if remSec < 60 {
-            return "Meno di un minuto rimanente"
-        }
-        let mins = max(1, remSec / 60)
-        return "Circa \(mins) min rimanenti"
+        return transport.etaLabel
     }
 
     var body: some View {

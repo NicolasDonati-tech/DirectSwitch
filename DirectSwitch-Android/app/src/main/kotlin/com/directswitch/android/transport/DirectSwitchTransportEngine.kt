@@ -48,6 +48,7 @@ import com.directswitch.android.protocol.PinPairingRequest
 import com.directswitch.android.protocol.QrPairingPayload
 import com.directswitch.android.protocol.SessionLicenseTier
 import com.directswitch.android.protocol.SlidingTransferSpeedMeter
+import com.directswitch.android.protocol.TenPercentSteppedEtaTracker
 import com.directswitch.android.protocol.TransferCategory
 import com.directswitch.android.protocol.TransferCompletionReport
 import com.directswitch.android.protocol.TransferManifest
@@ -103,6 +104,7 @@ data class LiveTransferProgress(
     val transferredBytes: Long = 0L,
     val totalBytes: Long = 0L,
     val speedMegabytesPerSec: Double = 0.0,
+    val etaLabel: String? = null,
     val mergedContacts: Int = 0,
     val contactsAlreadyPresent: Int = 0,
     val importedCalendars: Int = 0,
@@ -257,12 +259,14 @@ class DirectSwitchTransferServer(
     private val pinFailedAttempts = AtomicInteger(0)
     private val manifestMap = ConcurrentHashMap<String, ManifestItem>()
     private val completedIds = ConcurrentHashMap.newKeySet<String>()
+    private val skippedIds = ConcurrentHashMap.newKeySet<String>()
     private val transferredBytesCounter = AtomicLong(0L)
     private val completedFilesCounter = AtomicInteger(0)
     private val docFolderCounts = ConcurrentHashMap<String, Int>()
     private val rxProgressLock = Any()
     private var rxProgressAccounting: TransferProgressAccounting? = null
     private var rxSpeedMeter = SlidingTransferSpeedMeter()
+    private val rxEtaTracker = TenPercentSteppedEtaTracker()
     private var transferStartMillis = 0L
 
     fun startReceiverSession(
@@ -283,9 +287,15 @@ class DirectSwitchTransferServer(
         requestedWhatsAppMigration.set(false)
         manifestMap.clear()
         completedIds.clear()
+        skippedIds.clear()
         docFolderCounts.clear()
         transferredBytesCounter.set(0L)
         completedFilesCounter.set(0)
+        synchronized(rxProgressLock) {
+            rxProgressAccounting = null
+            rxSpeedMeter = SlidingTransferSpeedMeter()
+            rxEtaTracker.reset()
+        }
 
         val boundPort = bindAndAcceptLoop()
         DirectSwitchKeepAliveService.start(context, "Ricezione dati attiva sulla rete locale")
@@ -637,17 +647,24 @@ class DirectSwitchTransferServer(
                         emptyList()
                     }
                     val totalBytesToReceive = acceptedItems.sumOf { it.sizeBytes }
-                    synchronized(rxProgressLock) {
-                        rxProgressAccounting = TransferProgressAccounting(
+                    val initialEtaLabel = synchronized(rxProgressLock) {
+                        val acc = TransferProgressAccounting(
                             queuedItemsCount = acceptedItems.size,
                             remainingEstimatedBytes = totalBytesToReceive
                         )
+                        rxProgressAccounting = acc
                         rxSpeedMeter = SlidingTransferSpeedMeter()
+                        rxEtaTracker.reset(initialFraction = acc.progressFraction)
+                        rxEtaTracker.currentLabel(
+                            isCompleted = false,
+                            hasTransferableItems = acc.initialTotalItems > 0
+                        )
                     }
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Ricezione file in streaming cifrato...",
                         totalItems = acceptedItems.size,
                         totalBytes = totalBytesToReceive,
+                        etaLabel = initialEtaLabel,
                         mergedContacts = mergedContacts,
                         contactsAlreadyPresent = skippedContacts,
                         importedCalendars = importedCalendars,
@@ -759,11 +776,17 @@ class DirectSwitchTransferServer(
                         completedIds.add(itemId)
                         val doneFiles = completedFilesCounter.incrementAndGet()
                         val doneBytes = transferredBytesCounter.addAndGet(plainBytes)
-                        val (reconciledTotalBytes, speedMbs) = synchronized(rxProgressLock) {
+                        val (reconciledTotalBytes, speedMbs, etaStr) = synchronized(rxProgressLock) {
                             rxProgressAccounting?.recordUploaded(item.sizeBytes, plainBytes)
                             val tot = rxProgressAccounting?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: doneBytes
                             val spd = rxSpeedMeter.record(plainBytes)
-                            tot to spd
+                            val acc = rxProgressAccounting
+                            val eta = rxEtaTracker.update(
+                                progressFraction = acc?.progressFraction ?: 0f,
+                                isCompleted = false,
+                                hasTransferableItems = (acc?.initialTotalItems ?: 0) > 0
+                            )
+                            Triple(tot, spd, eta)
                         }
 
                         _progress.value = _progress.value.copy(
@@ -772,12 +795,56 @@ class DirectSwitchTransferServer(
                             transferredBytes = doneBytes,
                             totalBytes = reconciledTotalBytes,
                             speedMegabytesPerSec = speedMbs,
+                            etaLabel = etaStr,
                             receivedDocumentFolders = docFolderCounts.toMap()
                         )
                         writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes,"sha256":"$actualSha256"}""")
                     } finally {
                         tempDecrypted.delete()
                     }
+                }
+
+                method == "POST" && pathOnly.startsWith("/v1/item-skip/") -> {
+                    if (!handshakeCompleted.get()) {
+                        writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
+                        return
+                    }
+                    if (contentLength > 0L) {
+                        if (contentLength > 64L * 1024L) {
+                            writeJsonResponse(output, 400, """{"error":"Payload skip troppo grande"}""")
+                            return
+                        }
+                        val encryptedBody = readFixedBytes(input, contentLength.toInt())
+                        try {
+                            DirectSwitchCrypto.openJsonEnvelope(encryptedBody, sessionAesKey)
+                        } catch (_: Throwable) {
+                            writeJsonResponse(output, 401, """{"error":"Skip non autenticato"}""")
+                            return
+                        }
+                    }
+                    val itemId = pathOnly.removePrefix("/v1/item-skip/")
+                    val item = manifestMap[itemId]
+                    if (item != null && itemId !in completedIds && skippedIds.add(itemId)) {
+                        val (reconciledTotal, failedNow, etaStr) = synchronized(rxProgressLock) {
+                            rxProgressAccounting?.recordFailedOrSkipped(item.sizeBytes)
+                            val acc = rxProgressAccounting
+                            val doneBytes = transferredBytesCounter.get()
+                            val tot = acc?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: _progress.value.totalBytes
+                            val failed = acc?.failedItemsCount ?: (_progress.value.failedItemsCount + 1)
+                            val eta = rxEtaTracker.update(
+                                progressFraction = acc?.progressFraction ?: 0f,
+                                isCompleted = false,
+                                hasTransferableItems = (acc?.initialTotalItems ?: 0) > 0
+                            )
+                            Triple(tot, failed, eta)
+                        }
+                        _progress.value = _progress.value.copy(
+                            totalBytes = reconciledTotal,
+                            failedItemsCount = failedNow,
+                            etaLabel = etaStr
+                        )
+                    }
+                    writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
                 }
 
                 method == "POST" && pathOnly == "/v1/complete" -> {
@@ -797,6 +864,7 @@ class DirectSwitchTransferServer(
 
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Trasferimento completato con successo!",
+                        etaLabel = null,
                         isCompleted = true,
                         pendingNativeWhatsAppMigration = requestedWhatsAppMigration.get()
                     )
@@ -1215,12 +1283,18 @@ class DirectSwitchTransferClient(private val context: Context) {
                 remainingEstimatedBytes = totalBytes
             )
             val speedMeter = SlidingTransferSpeedMeter()
+            val etaTracker = TenPercentSteppedEtaTracker()
+            etaTracker.reset(initialFraction = accounting.progressFraction)
             val progressLock = Mutex()
 
             _progress.value = _progress.value.copy(
                 phaseLabel = "Trasferimento diretto cifrato in corso...",
                 totalItems = entriesToUpload.size,
                 totalBytes = totalBytes,
+                etaLabel = etaTracker.currentLabel(
+                    isCompleted = false,
+                    hasTransferableItems = accounting.initialTotalItems > 0
+                ),
                 mergedContacts = manifestResp.contactsMergedCount,
                 contactsAlreadyPresent = manifestResp.contactsSkippedDuplicates,
                 importedCalendars = manifestResp.calendarsImportedCount,
@@ -1260,13 +1334,27 @@ class DirectSwitchTransferClient(private val context: Context) {
                             }.getOrNull()
 
                             if (encPair == null) {
+                                runCatching {
+                                    postEncryptedJson(
+                                        client = activeClient,
+                                        url = "$baseUrl/v1/item-skip/${entry.manifestItem.id}",
+                                        plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                                        aesKey = sessionAesKey
+                                    )
+                                }
                                 progressLock.withLock {
                                     accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
+                                    val eta = etaTracker.update(
+                                        progressFraction = accounting.progressFraction,
+                                        isCompleted = false,
+                                        hasTransferableItems = accounting.initialTotalItems > 0
+                                    )
                                     _progress.value = _progress.value.copy(
                                         completedItems = accounting.succeededItemsCount,
                                         transferredBytes = accounting.transferredBytes,
                                         totalBytes = accounting.totalBytesForProgress,
                                         speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
+                                        etaLabel = eta,
                                         failedItemsCount = accounting.failedItemsCount,
                                         phaseLabel = "Saltato file non leggibile (${entry.manifestItem.fileName}), proseguo..."
                                     )
@@ -1323,13 +1411,27 @@ class DirectSwitchTransferClient(private val context: Context) {
 
                             if (!uploadedSingleOk) {
                                 DirectSwitchLog.warn("Impossibile inviare ${entry.manifestItem.fileName}, passo al successivo")
+                                runCatching {
+                                    postEncryptedJson(
+                                        client = activeClient,
+                                        url = "$baseUrl/v1/item-skip/${entry.manifestItem.id}",
+                                        plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                                        aesKey = sessionAesKey
+                                    )
+                                }
                                 progressLock.withLock {
                                     accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
+                                    val eta = etaTracker.update(
+                                        progressFraction = accounting.progressFraction,
+                                        isCompleted = false,
+                                        hasTransferableItems = accounting.initialTotalItems > 0
+                                    )
                                     _progress.value = _progress.value.copy(
                                         completedItems = accounting.succeededItemsCount,
                                         transferredBytes = accounting.transferredBytes,
                                         totalBytes = accounting.totalBytesForProgress,
                                         speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
+                                        etaLabel = eta,
                                         failedItemsCount = accounting.failedItemsCount,
                                         phaseLabel = "Saltato ${entry.manifestItem.fileName}, proseguo col resto..."
                                     )
@@ -1340,12 +1442,18 @@ class DirectSwitchTransferClient(private val context: Context) {
                             progressLock.withLock {
                                 accounting.recordUploaded(entry.manifestItem.sizeBytes, plainLen)
                                 val speedMbs = speedMeter.record(plainLen)
+                                val eta = etaTracker.update(
+                                    progressFraction = accounting.progressFraction,
+                                    isCompleted = false,
+                                    hasTransferableItems = accounting.initialTotalItems > 0
+                                )
                                 _progress.value = _progress.value.copy(
                                     currentFileName = entry.manifestItem.fileName,
                                     completedItems = accounting.succeededItemsCount,
                                     transferredBytes = accounting.transferredBytes,
                                     totalBytes = accounting.totalBytesForProgress,
                                     speedMegabytesPerSec = speedMbs,
+                                    etaLabel = eta,
                                     failedItemsCount = accounting.failedItemsCount
                                 )
                             }
@@ -1374,6 +1482,7 @@ class DirectSwitchTransferClient(private val context: Context) {
             }
             _progress.value = _progress.value.copy(
                 phaseLabel = doneLabel,
+                etaLabel = null,
                 isCompleted = true,
                 failedItemsCount = failedCount,
                 pendingNativeWhatsAppMigration = wantNativeWa

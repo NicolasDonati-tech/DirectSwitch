@@ -784,4 +784,54 @@ class DirectSwitchProtocolTest {
         assertEquals(120, contactsPreload.totalCount)
         assertTrue(contactsPreload.isCompleted)
     }
+
+    @Test
+    fun decimalByteFormattingAndPercentageConsistencyAcrossOs() {
+        val fmt = com.directswitch.android.protocol.TransferDisplayFormatting
+        assertEquals("0 MB", fmt.formatBytes(0L))
+        assertEquals("0,1 MB", fmt.formatBytes(50_000L))
+        assertEquals("150,0 MB", fmt.formatBytes(150_000_000L))
+        assertEquals("11,15 GB", fmt.formatBytes(11_150_000_000L))
+
+        assertEquals(0, fmt.percentageInt(0.0, isCompleted = false))
+        assertEquals(14, fmt.percentageInt(0.149, isCompleted = false))
+        assertEquals(30, fmt.percentageInt(0.30, isCompleted = false))
+        assertEquals(99, fmt.percentageInt(0.999, isCompleted = false))
+        assertEquals(99, fmt.percentageInt(1.0, isCompleted = false))
+        assertEquals(100, fmt.percentageInt(1.0, isCompleted = true))
+    }
+
+    @Test
+    fun tenPercentSteppedEtaTrackerUpdatesOnlyEveryTenPercentWithoutOscillation() {
+        val tracker = com.directswitch.android.protocol.TenPercentSteppedEtaTracker(
+            initialFraction = 0.0,
+            startMillis = 1_000_000L
+        )
+        assertEquals("Calcolo tempo rimanente…", tracker.currentLabel(isCompleted = false, hasTransferableItems = true))
+        assertEquals("Calcolo tempo rimanente…", tracker.update(0.04, isCompleted = false, nowMillis = 1_020_000L))
+        assertEquals("Calcolo tempo rimanente…", tracker.update(0.099, isCompleted = false, nowMillis = 1_055_000L))
+
+        // Raggiunge il 10% dopo 60s -> 9 * 60s = 540s = 9 min
+        assertEquals("Circa 9 min rimanenti", tracker.update(0.10, isCompleted = false, nowMillis = 1_060_000L))
+
+        // Tra 11% e 19% non oscilla mai
+        assertEquals("Circa 9 min rimanenti", tracker.update(0.12, isCompleted = false, nowMillis = 1_061_000L))
+        assertEquals("Circa 9 min rimanenti", tracker.update(0.17, isCompleted = false, nowMillis = 1_088_000L))
+        assertEquals("Circa 9 min rimanenti", tracker.update(0.199, isCompleted = false, nowMillis = 1_089_000L))
+
+        // Raggiunge il 20% a +30s dal 10% -> 8 * 30s = 240s = 4 min
+        assertEquals("Circa 4 min rimanenti", tracker.update(0.20, isCompleted = false, nowMillis = 1_090_000L))
+
+        // Verso il 90% in 4s -> meno di un minuto rimanente
+        tracker.update(0.80, isCompleted = false, nowMillis = 1_200_000L)
+        assertEquals("Meno di un minuto rimanente", tracker.update(0.90, isCompleted = false, nowMillis = 1_204_000L))
+
+        // Resume al 34%: attende il 40%
+        tracker.reset(initialFraction = 0.34, atMillis = 2_000_000L)
+        assertEquals("Calcolo tempo rimanente…", tracker.update(0.38, isCompleted = false, nowMillis = 2_020_000L))
+        assertEquals("Circa 5 min rimanenti", tracker.update(0.40, isCompleted = false, nowMillis = 2_030_000L))
+
+        // Completato -> null
+        assertEquals(null, tracker.update(1.0, isCompleted = true, nowMillis = 2_100_000L))
+    }
 }

@@ -1400,4 +1400,49 @@ final class DirectSwitchTests: XCTestCase {
         let remindersCheck = await iOSRemindersMigrator.readReminders(upToDate: Date())
         XCTAssertTrue(remindersCheck.isEmpty || iOSRemindersMigrator.isAuthorized())
     }
+
+    func testDecimalByteFormattingAndPercentageConsistencyAcrossOs() {
+        XCTAssertEqual(TransferDisplayFormatting.formatBytes(0), "0 MB")
+        XCTAssertEqual(TransferDisplayFormatting.formatBytes(50_000), "0,1 MB")
+        XCTAssertEqual(TransferDisplayFormatting.formatBytes(150_000_000), "150,0 MB")
+        // 11.15 GB decimali su iOS e Android (niente più 10.38 GiB binari su Android!)
+        XCTAssertEqual(TransferDisplayFormatting.formatBytes(11_150_000_000), "11,15 GB")
+
+        XCTAssertEqual(TransferDisplayFormatting.percentageInt(fraction: 0.0, isCompleted: false), 0)
+        XCTAssertEqual(TransferDisplayFormatting.percentageInt(fraction: 0.149, isCompleted: false), 14)
+        XCTAssertEqual(TransferDisplayFormatting.percentageInt(fraction: 0.30, isCompleted: false), 30)
+        XCTAssertEqual(TransferDisplayFormatting.percentageInt(fraction: 0.999, isCompleted: false), 99)
+        XCTAssertEqual(TransferDisplayFormatting.percentageInt(fraction: 1.0, isCompleted: false), 99)
+        XCTAssertEqual(TransferDisplayFormatting.percentageInt(fraction: 1.0, isCompleted: true), 100)
+    }
+
+    func testTenPercentSteppedEtaTrackerUpdatesOnlyEveryTenPercentWithoutOscillation() {
+        var tracker = TenPercentSteppedEtaTracker(initialFraction: 0.0, startTimestamp: 1_000.0)
+        XCTAssertEqual(tracker.currentLabel(isCompleted: false, hasTransferableItems: true), "Calcolo tempo rimanente…")
+        XCTAssertEqual(tracker.update(progressFraction: 0.04, isCompleted: false, at: 1_020.0), "Calcolo tempo rimanente…")
+        XCTAssertEqual(tracker.update(progressFraction: 0.099, isCompleted: false, at: 1_055.0), "Calcolo tempo rimanente…")
+
+        // Raggiunge il 10% dopo 60s -> 9 tranche rimanenti * 60s = 540s = 9 min
+        XCTAssertEqual(tracker.update(progressFraction: 0.10, isCompleted: false, at: 1_060.0), "Circa 9 min rimanenti")
+
+        // Tra 11% e 19% la velocità oscilla, ma l'etichetta resta granitica senza ballare
+        XCTAssertEqual(tracker.update(progressFraction: 0.12, isCompleted: false, at: 1_061.0), "Circa 9 min rimanenti")
+        XCTAssertEqual(tracker.update(progressFraction: 0.17, isCompleted: false, at: 1_088.0), "Circa 9 min rimanenti")
+        XCTAssertEqual(tracker.update(progressFraction: 0.199, isCompleted: false, at: 1_089.0), "Circa 9 min rimanenti")
+
+        // Raggiunge il 20% a t=1090s (il 10% precedente 10%->20% ha impiegato 30s) -> restano 8 tranche * 30s = 240s = 4 min
+        XCTAssertEqual(tracker.update(progressFraction: 0.20, isCompleted: false, at: 1_090.0), "Circa 4 min rimanenti")
+
+        // Salto rapido verso il 90% in pochi secondi -> meno di un minuto rimanente
+        _ = tracker.update(progressFraction: 0.80, isCompleted: false, at: 1_200.0)
+        XCTAssertEqual(tracker.update(progressFraction: 0.90, isCompleted: false, at: 1_204.0), "Meno di un minuto rimanente")
+
+        // Ripresa (Resume) al 34%: attende il traguardo del 40% prima di stimare
+        tracker.reset(initialFraction: 0.34, at: 2_000.0)
+        XCTAssertEqual(tracker.update(progressFraction: 0.38, isCompleted: false, at: 2_020.0), "Calcolo tempo rimanente…")
+        XCTAssertEqual(tracker.update(progressFraction: 0.40, isCompleted: false, at: 2_030.0), "Circa 5 min rimanenti")
+
+        // A trasferimento completato sparisce
+        XCTAssertNil(tracker.update(progressFraction: 1.0, isCompleted: true, at: 2_100.0))
+    }
 }

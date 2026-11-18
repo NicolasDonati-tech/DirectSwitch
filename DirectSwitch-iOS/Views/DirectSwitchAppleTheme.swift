@@ -621,11 +621,7 @@ struct LocalNetworkRedirectBanner: View {
 
 enum DirectSwitchUIHelpers {
     static func formatBytes(_ bytes: Int64) -> String {
-        guard bytes > 0 else { return "0 MB" }
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useGB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
+        TransferDisplayFormatting.formatBytes(bytes)
     }
 
     static func generateQrImage(from string: String) -> UIImage? {

@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import AVFoundation
 import Contacts
 import CoreLocation
 import Photos
@@ -123,6 +124,8 @@ struct iOSLocalDeviceScanSummary: Sendable, Equatable {
     var calendarsDenied: Bool = false
     var remindersDenied: Bool = false
     var photoAlbumsCount: Int = 0
+    var iCloudPhotosCount: Int = 0
+    var iCloudVideosCount: Int = 0
 }
 
 struct ContactsPreloadState: Equatable, Sendable {
@@ -137,6 +140,7 @@ struct PhotosPreloadState: Equatable, Sendable {
     var totalCount: Int = 0
     var livePhotosCount: Int = 0
     var albumsCount: Int = 0
+    var iCloudCount: Int = 0
     var estimatedBytes: Int64 = 0
     var isLoading: Bool = false
     var isCompleted: Bool = false
@@ -145,6 +149,7 @@ struct PhotosPreloadState: Equatable, Sendable {
 struct VideosPreloadState: Equatable, Sendable {
     var loadedCount: Int = 0
     var totalCount: Int = 0
+    var iCloudCount: Int = 0
     var estimatedBytes: Int64 = 0
     var isLoading: Bool = false
     var isCompleted: Bool = false
@@ -278,7 +283,8 @@ enum iOSDeviceDataAnalyzer {
     /// Legge subito spazio libero/totale e i conteggi delle sole categorie già autorizzate (nessun popup a freddo).
     static func scanAuthorizedSummary(
         stagedItems: [ManifestItem] = [],
-        knownRemindersCount: Int = 0
+        knownRemindersCount: Int = 0,
+        includePairedLiveVideoBytes: Bool = false
     ) -> iOSLocalDeviceScanSummary {
         let (freeBytes, totalBytes) = iOSStorageCapacityChecker.freeAndTotalStorageBytes()
         let rawContactsStatus = CNContactStore.authorizationStatus(for: .contacts)
@@ -303,8 +309,10 @@ enum iOSDeviceDataAnalyzer {
         var photosCount = 0
         var livePhotosCount = 0
         var photosBytes: Int64 = 0
+        var iCloudPhotosCount = 0
         var videosCount = 0
         var videosBytes: Int64 = 0
+        var iCloudVideosCount = 0
         let photoAlbumsCount = photosAuth
             ? PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil).count
             : 0
@@ -316,13 +324,22 @@ enum iOSDeviceDataAnalyzer {
                     photosCount += 1
                     if asset.mediaSubtypes.contains(.photoLive) {
                         livePhotosCount += 1
-                        photosBytes += 4_800_000
-                    } else {
-                        photosBytes += 2_800_000
+                    }
+                    let measured = iOSPhotoKitMigrator.measureAssetBytes(
+                        asset,
+                        includePairedLiveVideoBytes: includePairedLiveVideoBytes
+                    )
+                    photosBytes += measured.bytes
+                    if !measured.isLocallyAvailable {
+                        iCloudPhotosCount += 1
                     }
                 } else if asset.mediaType == .video {
                     videosCount += 1
-                    videosBytes += Int64(max(1.0, asset.duration) * 2_200_000.0)
+                    let measured = iOSPhotoKitMigrator.measureAssetBytes(asset, includePairedLiveVideoBytes: false)
+                    videosBytes += measured.bytes
+                    if !measured.isLocallyAvailable {
+                        iCloudVideosCount += 1
+                    }
                 }
             }
         }
@@ -362,7 +379,9 @@ enum iOSDeviceDataAnalyzer {
             photosDenied: photosDenied,
             calendarsDenied: calendarsDenied,
             remindersDenied: remindersDenied,
-            photoAlbumsCount: photoAlbumsCount
+            photoAlbumsCount: photoAlbumsCount,
+            iCloudPhotosCount: iCloudPhotosCount,
+            iCloudVideosCount: iCloudVideosCount
         )
     }
 
@@ -850,15 +869,35 @@ enum iOSPhotoKitMigrator {
         return await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
-    /// Precaricamento progressivo di foto/Live Photos/album o video fino al totale effettivo sul Rullino iOS.
+    /// Misura i byte reali (`fileSize` di `PHAssetResource`) e la disponibilità locale dell'asset senza mai usare stime arbitrarie.
+    static func measureAssetBytes(
+        _ asset: PHAsset,
+        includePairedLiveVideoBytes: Bool = false
+    ) -> (bytes: Int64, isLocallyAvailable: Bool) {
+        guard let primary = primaryMediaResource(for: asset) else {
+            return (0, true)
+        }
+        let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
+        let primarySize = (primary.value(forKey: "fileSize") as? Int64) ?? 1_048_576
+        let liveSize: Int64
+        if includePairedLiveVideoBytes, asset.mediaType == .image, let paired = pairedLiveVideoResource(for: asset) {
+            liveSize = max(0, (paired.value(forKey: "fileSize") as? Int64) ?? 0)
+        } else {
+            liveSize = 0
+        }
+        return (max(0, primarySize) + liveSize, isLocal)
+    }
+
+    /// Precaricamento progressivo di foto/Live Photos/album o video leggendo il peso reale `PHAssetResource` sul Rullino iOS.
     static func preloadMediaStatsWithProgress(
         for mediaType: PHAssetMediaType,
-        onProgress: @Sendable @escaping (_ loaded: Int, _ total: Int, _ liveCount: Int, _ albumsCount: Int, _ estimatedBytes: Int64) -> Void
-    ) async -> (total: Int, liveCount: Int, albumsCount: Int, estimatedBytes: Int64) {
+        includePairedLiveVideoBytes: Bool = false,
+        onProgress: @Sendable @escaping (_ loaded: Int, _ total: Int, _ liveCount: Int, _ albumsCount: Int, _ iCloudCount: Int, _ estimatedBytes: Int64) -> Void
+    ) async -> (total: Int, liveCount: Int, albumsCount: Int, iCloudCount: Int, estimatedBytes: Int64) {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else {
-            onProgress(0, 0, 0, 0, 0)
-            return (0, 0, 0, 0)
+            onProgress(0, 0, 0, 0, 0, 0)
+            return (0, 0, 0, 0, 0)
         }
         return await Task.detached(priority: .userInitiated) {
             let albumsCount = mediaType == .image
@@ -867,32 +906,34 @@ enum iOSPhotoKitMigrator {
             let fetched = PHAsset.fetchAssets(with: mediaType, options: nil)
             let total = fetched.count
             guard total > 0 else {
-                onProgress(0, 0, 0, albumsCount, 0)
-                return (0, 0, albumsCount, 0)
+                onProgress(0, 0, 0, albumsCount, 0, 0)
+                return (0, 0, albumsCount, 0, 0)
             }
-            onProgress(0, total, 0, albumsCount, 0)
+            onProgress(0, total, 0, albumsCount, 0, 0)
             let step = max(1, total / 24)
             var loaded = 0
             var liveCount = 0
+            var iCloudCount = 0
             var bytes: Int64 = 0
             fetched.enumerateObjects { asset, _, _ in
                 loaded += 1
-                if mediaType == .image {
-                    if asset.mediaSubtypes.contains(.photoLive) {
-                        liveCount += 1
-                        bytes += 4_800_000
-                    } else {
-                        bytes += 2_800_000
-                    }
-                } else {
-                    bytes += Int64(max(1.0, asset.duration) * 2_200_000.0)
+                if mediaType == .image && asset.mediaSubtypes.contains(.photoLive) {
+                    liveCount += 1
+                }
+                let measured = measureAssetBytes(
+                    asset,
+                    includePairedLiveVideoBytes: mediaType == .image && includePairedLiveVideoBytes
+                )
+                bytes += measured.bytes
+                if !measured.isLocallyAvailable {
+                    iCloudCount += 1
                 }
                 if loaded % step == 0 || loaded == total {
-                    onProgress(loaded, total, liveCount, albumsCount, bytes)
+                    onProgress(loaded, total, liveCount, albumsCount, iCloudCount, bytes)
                 }
             }
-            onProgress(total, total, liveCount, albumsCount, bytes)
-            return (total, liveCount, albumsCount, bytes)
+            onProgress(total, total, liveCount, albumsCount, iCloudCount, bytes)
+            return (total, liveCount, albumsCount, iCloudCount, bytes)
         }.value
     }
     static func mimeTypeForFileName(_ fileName: String, isVideo: Bool) -> String {
@@ -1274,11 +1315,37 @@ enum iOSPhotoKitMigrator {
         private let lock = NSLock()
         private var resumed = false
         private var imageRequestId: PHImageRequestID? = nil
+        private let startTime: TimeInterval = Date().timeIntervalSinceReferenceDate
+        private var lastActivityTime: TimeInterval = Date().timeIntervalSinceReferenceDate
 
         func setImageRequestId(_ id: PHImageRequestID) {
             lock.lock()
             imageRequestId = id
             lock.unlock()
+        }
+
+        func touchActivity() {
+            lock.lock()
+            lastActivityTime = Date().timeIntervalSinceReferenceDate
+            lock.unlock()
+        }
+
+        func isCompleted() -> Bool {
+            lock.lock()
+            let done = resumed
+            lock.unlock()
+            return done
+        }
+
+        func hasTimedOut(idleTimeout: TimeInterval, maxTotalTimeout: TimeInterval) -> Bool {
+            let now = Date().timeIntervalSinceReferenceDate
+            lock.lock()
+            let done = resumed
+            let idle = now - lastActivityTime
+            let total = now - startTime
+            lock.unlock()
+            if done { return false }
+            return idle >= idleTimeout || total >= maxTotalTimeout
         }
 
         func tryClaim(cancelPending: Bool = false) -> Bool {
@@ -1292,18 +1359,52 @@ enum iOSPhotoKitMigrator {
             }
             return shouldResume
         }
+
+        func startActivityWatchdog(
+            idleTimeout: TimeInterval,
+            maxTotalTimeout: TimeInterval,
+            onTimeout: @Sendable @escaping () -> Void
+        ) {
+            @Sendable func poll() {
+                if self.isCompleted() { return }
+                if self.hasTimedOut(idleTimeout: idleTimeout, maxTotalTimeout: maxTotalTimeout) {
+                    if self.tryClaim(cancelPending: true) {
+                        onTimeout()
+                    }
+                    return
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.5) {
+                    poll()
+                }
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + min(2.5, max(0.5, idleTimeout))) {
+                poll()
+            }
+        }
     }
 
-    /// Esporta un `PHAsset` direttamente su file temporaneo su disco con triplo livello di resilienza
-    /// (risorsa locale immediata, download iCloud con timeout limitato così gli hotspot offline non bloccano, e `PHImageManager` fallback).
+    /// Esporta un `PHAsset` su file temporaneo con 4 livelli di resilienza:
+    /// 1) `PHAssetResourceManager` con monitoraggio attivo dell'avanzamento iCloud (non interrompe download attivi in corso),
+    /// 2) Risorsa alternativa dell'asset,
+    /// 3) `PHImageManager` (`requestImageDataAndOrientation` per foto / `requestAVAsset` per video da iCloud),
+    /// 4) Copia ad alta risoluzione dalla cache locale di Foto su iPhone se iCloud non è raggiungibile (es. Hotspot offline).
     static func exportAssetToTempFile(_ asset: PHAsset) async -> URL? {
         if let primary = primaryMediaResource(for: asset) {
             let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
-            if let exported = await exportResourceToTempFile(primary, prefix: "ds_exp", allowNetwork: true, timeoutSeconds: isLocal ? 35.0 : 12.0) {
+            let maxTimeout: TimeInterval = isLocal
+                ? 60.0
+                : (asset.mediaType == .video ? 420.0 : 180.0)
+            let idleTimeout: TimeInterval = isLocal ? 35.0 : 24.0
+            if let exported = await exportResourceToTempFile(
+                primary,
+                prefix: "ds_exp",
+                allowNetwork: true,
+                idleTimeoutSeconds: idleTimeout,
+                maxTotalSeconds: maxTimeout
+            ) {
                 return exported
             }
-            // Livello 2: breve attesa se `assetsd` era occupato o ripiego su risorsa base originale locale
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(nanoseconds: 200_000_000)
             let resources = PHAssetResource.assetResources(for: asset)
             let fallbackRes: PHAssetResource? = {
                 if asset.mediaType == .video {
@@ -1315,17 +1416,35 @@ enum iOSPhotoKitMigrator {
                 }
             }()
             if let fallbackRes,
-               let exported = await exportResourceToTempFile(fallbackRes, prefix: "ds_exp_fb", allowNetwork: false, timeoutSeconds: 8.0) {
+               let exported = await exportResourceToTempFile(
+                   fallbackRes,
+                   prefix: "ds_exp_fb",
+                   allowNetwork: true,
+                   idleTimeoutSeconds: 18.0,
+                   maxTotalSeconds: 120.0
+               ) {
                 return exported
             }
         }
 
-        // Livello 3 (per foto): fallback tramite PHImageManager (prima rete+alta qualità con timeout, poi cache locale offline)
         if asset.mediaType == .image {
-            if let highQ = await exportImageViaImageManager(asset, allowNetwork: true, deliveryMode: .highQualityFormat, timeoutSeconds: 10.0) {
+            if let highQ = await exportImageViaImageManager(
+                asset,
+                allowNetwork: true,
+                deliveryMode: .highQualityFormat,
+                idleTimeoutSeconds: 22.0,
+                maxTotalSeconds: 150.0
+            ) {
                 return highQ
             }
-            return await exportImageViaImageManager(asset, allowNetwork: false, deliveryMode: .opportunistic, timeoutSeconds: 5.0)
+            return await exportBestLocalCachedImage(asset)
+        } else if asset.mediaType == .video {
+            return await exportVideoViaImageManager(
+                asset,
+                allowNetwork: true,
+                idleTimeoutSeconds: 25.0,
+                maxTotalSeconds: 360.0
+            )
         }
         return nil
     }
@@ -1334,20 +1453,22 @@ enum iOSPhotoKitMigrator {
         _ asset: PHAsset,
         allowNetwork: Bool = true,
         deliveryMode: PHImageRequestOptionsDeliveryMode = .highQualityFormat,
-        timeoutSeconds: TimeInterval = 12.0
+        idleTimeoutSeconds: TimeInterval = 22.0,
+        maxTotalSeconds: TimeInterval = 150.0
     ) async -> URL? {
         await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            let guardBox = AsyncExportResumeGuard()
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = allowNetwork
             opts.deliveryMode = deliveryMode
             opts.version = .current
             opts.isSynchronous = false
+            opts.progressHandler = { _, _, _, _ in
+                guardBox.touchActivity()
+            }
 
-            let guardBox = AsyncExportResumeGuard()
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
-                if guardBox.tryClaim(cancelPending: true) {
-                    continuation.resume(returning: nil)
-                }
+            guardBox.startActivityWatchdog(idleTimeout: idleTimeoutSeconds, maxTotalTimeout: maxTotalSeconds) {
+                continuation.resume(returning: nil)
             }
 
             let reqId = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, info in
@@ -1372,18 +1493,115 @@ enum iOSPhotoKitMigrator {
         }
     }
 
+    /// Recupera la migliore copia già presente nella cache locale di Foto su iPhone quando iCloud non è raggiungibile.
+    private static func exportBestLocalCachedImage(_ asset: PHAsset) async -> URL? {
+        await Task.detached(priority: .utility) {
+            let opts = PHImageRequestOptions()
+            opts.isNetworkAccessAllowed = false
+            opts.isSynchronous = true
+            opts.deliveryMode = .highQualityFormat
+            opts.resizeMode = .none
+
+            var capturedData: Data? = nil
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, _ in
+                if let data, !data.isEmpty {
+                    capturedData = data
+                }
+            }
+            if let raw = capturedData {
+                let destURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ds_cached_raw_\(UUID().uuidString).jpg")
+                if (try? raw.write(to: destURL, options: .atomic)) != nil {
+                    return destURL
+                }
+            }
+
+            var bestImage: UIImage? = nil
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: PHImageManagerMaximumSize,
+                contentMode: .default,
+                options: opts
+            ) { img, _ in
+                if let img, img.size.width >= 256, img.size.height >= 256 {
+                    bestImage = img
+                }
+            }
+            guard let img = bestImage, let jpeg = img.jpegData(compressionQuality: 0.92), !jpeg.isEmpty else {
+                return nil
+            }
+            let destURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ds_cached_ui_\(UUID().uuidString).jpg")
+            do {
+                try jpeg.write(to: destURL, options: .atomic)
+                return destURL
+            } catch {
+                try? FileManager.default.removeItem(at: destURL)
+                return nil
+            }
+        }.value
+    }
+
+    private static func exportVideoViaImageManager(
+        _ asset: PHAsset,
+        allowNetwork: Bool = true,
+        idleTimeoutSeconds: TimeInterval = 25.0,
+        maxTotalSeconds: TimeInterval = 360.0
+    ) async -> URL? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            let guardBox = AsyncExportResumeGuard()
+            let opts = PHVideoRequestOptions()
+            opts.isNetworkAccessAllowed = allowNetwork
+            opts.deliveryMode = .highQualityFormat
+            opts.version = .current
+            opts.progressHandler = { _, _, _, _ in
+                guardBox.touchActivity()
+            }
+
+            guardBox.startActivityWatchdog(idleTimeout: idleTimeoutSeconds, maxTotalTimeout: maxTotalSeconds) {
+                continuation.resume(returning: nil)
+            }
+
+            let reqId = PHImageManager.default().requestAVAsset(forVideo: asset, options: opts) { avAsset, _, _ in
+                guard guardBox.tryClaim() else { return }
+                guard let urlAsset = avAsset as? AVURLAsset else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let ext = urlAsset.url.pathExtension.isEmpty ? "mov" : urlAsset.url.pathExtension
+                let destURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ds_vidmgr_\(UUID().uuidString).\(ext)")
+                do {
+                    try FileManager.default.copyItem(at: urlAsset.url, to: destURL)
+                    continuation.resume(returning: destURL)
+                } catch {
+                    try? FileManager.default.removeItem(at: destURL)
+                    continuation.resume(returning: nil)
+                }
+            }
+            guardBox.setImageRequestId(reqId)
+        }
+    }
+
     /// Esporta la componente video `.MOV` accoppiata di una Live Photo su file temporaneo.
     static func exportLivePairedVideoToTempFile(_ asset: PHAsset) async -> URL? {
         guard let paired = pairedLiveVideoResource(for: asset) else { return nil }
         let isLocal = (paired.value(forKey: "locallyAvailable") as? Bool) ?? true
-        return await exportResourceToTempFile(paired, prefix: "ds_live", allowNetwork: true, timeoutSeconds: isLocal ? 20.0 : 9.0)
+        return await exportResourceToTempFile(
+            paired,
+            prefix: "ds_live",
+            allowNetwork: true,
+            idleTimeoutSeconds: isLocal ? 20.0 : 18.0,
+            maxTotalSeconds: isLocal ? 45.0 : 90.0
+        )
     }
 
     private static func exportResourceToTempFile(
         _ resource: PHAssetResource,
         prefix: String,
         allowNetwork: Bool = true,
-        timeoutSeconds: TimeInterval = 25.0
+        idleTimeoutSeconds: TimeInterval = 25.0,
+        maxTotalSeconds: TimeInterval = 180.0
     ) async -> URL? {
         let safeName = URL(fileURLWithPath: resource.originalFilename).lastPathComponent
         let destURL = FileManager.default.temporaryDirectory
@@ -1391,15 +1609,18 @@ enum iOSPhotoKitMigrator {
         try? FileManager.default.removeItem(at: destURL)
 
         return await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            let guardBox = AsyncExportResumeGuard()
             let opts = PHAssetResourceRequestOptions()
             opts.isNetworkAccessAllowed = allowNetwork
-            let guardBox = AsyncExportResumeGuard()
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
-                if guardBox.tryClaim(cancelPending: true) {
-                    try? FileManager.default.removeItem(at: destURL)
-                    continuation.resume(returning: nil)
-                }
+            opts.progressHandler = { _ in
+                guardBox.touchActivity()
             }
+
+            guardBox.startActivityWatchdog(idleTimeout: idleTimeoutSeconds, maxTotalTimeout: maxTotalSeconds) {
+                try? FileManager.default.removeItem(at: destURL)
+                continuation.resume(returning: nil)
+            }
+
             PHAssetResourceManager.default().writeData(
                 for: resource,
                 toFile: destURL,
@@ -1413,7 +1634,13 @@ enum iOSPhotoKitMigrator {
                     try? FileManager.default.removeItem(at: destURL)
                     continuation.resume(returning: nil)
                 } else {
-                    continuation.resume(returning: destURL)
+                    let size = (try? FileManager.default.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
+                    if size <= 0 {
+                        try? FileManager.default.removeItem(at: destURL)
+                        continuation.resume(returning: nil)
+                    } else {
+                        continuation.resume(returning: destURL)
+                    }
                 }
             }
         }
