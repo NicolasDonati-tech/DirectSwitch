@@ -357,6 +357,57 @@ struct ManifestResponse: Codable, Sendable {
     var remindersAlreadyPresentCount: Int? = nil
     var smsImportedCount: Int = 0
     var gatedByCrossOsPreviewCount: Int = 0
+
+    enum CodingKeys: String, CodingKey {
+        case acceptedItemIds
+        case skippedDuplicateCount
+        case contactsMergedCount
+        case contactsSkippedDuplicates
+        case calendarsImportedCount
+        case calendarsAlreadyPresentCount
+        case remindersImportedCount
+        case remindersAlreadyPresentCount
+        case smsImportedCount
+        case gatedByCrossOsPreviewCount
+    }
+
+    init(
+        acceptedItemIds: [String],
+        skippedDuplicateCount: Int,
+        contactsMergedCount: Int,
+        contactsSkippedDuplicates: Int,
+        calendarsImportedCount: Int,
+        calendarsAlreadyPresentCount: Int? = nil,
+        remindersImportedCount: Int? = nil,
+        remindersAlreadyPresentCount: Int? = nil,
+        smsImportedCount: Int = 0,
+        gatedByCrossOsPreviewCount: Int = 0
+    ) {
+        self.acceptedItemIds = acceptedItemIds
+        self.skippedDuplicateCount = skippedDuplicateCount
+        self.contactsMergedCount = contactsMergedCount
+        self.contactsSkippedDuplicates = contactsSkippedDuplicates
+        self.calendarsImportedCount = calendarsImportedCount
+        self.calendarsAlreadyPresentCount = calendarsAlreadyPresentCount
+        self.remindersImportedCount = remindersImportedCount
+        self.remindersAlreadyPresentCount = remindersAlreadyPresentCount
+        self.smsImportedCount = smsImportedCount
+        self.gatedByCrossOsPreviewCount = gatedByCrossOsPreviewCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        acceptedItemIds = try c.decodeIfPresent([String].self, forKey: .acceptedItemIds) ?? []
+        skippedDuplicateCount = try c.decodeIfPresent(Int.self, forKey: .skippedDuplicateCount) ?? 0
+        contactsMergedCount = try c.decodeIfPresent(Int.self, forKey: .contactsMergedCount) ?? 0
+        contactsSkippedDuplicates = try c.decodeIfPresent(Int.self, forKey: .contactsSkippedDuplicates) ?? 0
+        calendarsImportedCount = try c.decodeIfPresent(Int.self, forKey: .calendarsImportedCount) ?? 0
+        calendarsAlreadyPresentCount = try c.decodeIfPresent(Int.self, forKey: .calendarsAlreadyPresentCount)
+        remindersImportedCount = try c.decodeIfPresent(Int.self, forKey: .remindersImportedCount)
+        remindersAlreadyPresentCount = try c.decodeIfPresent(Int.self, forKey: .remindersAlreadyPresentCount)
+        smsImportedCount = try c.decodeIfPresent(Int.self, forKey: .smsImportedCount) ?? 0
+        gatedByCrossOsPreviewCount = try c.decodeIfPresent(Int.self, forKey: .gatedByCrossOsPreviewCount) ?? 0
+    }
 }
 
 struct TransferCompletionReport: Codable, Sendable {
@@ -373,6 +424,69 @@ struct TransferCompletionReport: Codable, Sendable {
     var importedSmsCount: Int = 0
     let skippedDuplicatesCount: Int
     let elapsedMillis: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId
+        case licenseTier
+        case transferredFilesCount
+        case transferredBytes
+        case mergedContactsCount
+        case importedCalendarsCount
+        case calendarsAlreadyPresentCount
+        case remindersImportedCount
+        case remindersAlreadyPresentCount
+        case livePhotosSavedCount
+        case importedSmsCount
+        case skippedDuplicatesCount
+        case elapsedMillis
+    }
+
+    init(
+        sessionId: String,
+        licenseTier: SessionLicenseTier,
+        transferredFilesCount: Int,
+        transferredBytes: Int64,
+        mergedContactsCount: Int,
+        importedCalendarsCount: Int,
+        calendarsAlreadyPresentCount: Int? = nil,
+        remindersImportedCount: Int? = nil,
+        remindersAlreadyPresentCount: Int? = nil,
+        livePhotosSavedCount: Int? = nil,
+        importedSmsCount: Int = 0,
+        skippedDuplicatesCount: Int,
+        elapsedMillis: Int64
+    ) {
+        self.sessionId = sessionId
+        self.licenseTier = licenseTier
+        self.transferredFilesCount = transferredFilesCount
+        self.transferredBytes = transferredBytes
+        self.mergedContactsCount = mergedContactsCount
+        self.importedCalendarsCount = importedCalendarsCount
+        self.calendarsAlreadyPresentCount = calendarsAlreadyPresentCount
+        self.remindersImportedCount = remindersImportedCount
+        self.remindersAlreadyPresentCount = remindersAlreadyPresentCount
+        self.livePhotosSavedCount = livePhotosSavedCount
+        self.importedSmsCount = importedSmsCount
+        self.skippedDuplicatesCount = skippedDuplicatesCount
+        self.elapsedMillis = elapsedMillis
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        licenseTier = try c.decodeIfPresent(SessionLicenseTier.self, forKey: .licenseTier) ?? .CROSS_OS_PRO_UNLOCKED
+        transferredFilesCount = try c.decodeIfPresent(Int.self, forKey: .transferredFilesCount) ?? 0
+        transferredBytes = try c.decodeIfPresent(Int64.self, forKey: .transferredBytes) ?? 0
+        mergedContactsCount = try c.decodeIfPresent(Int.self, forKey: .mergedContactsCount) ?? 0
+        importedCalendarsCount = try c.decodeIfPresent(Int.self, forKey: .importedCalendarsCount) ?? 0
+        calendarsAlreadyPresentCount = try c.decodeIfPresent(Int.self, forKey: .calendarsAlreadyPresentCount)
+        remindersImportedCount = try c.decodeIfPresent(Int.self, forKey: .remindersImportedCount)
+        remindersAlreadyPresentCount = try c.decodeIfPresent(Int.self, forKey: .remindersAlreadyPresentCount)
+        livePhotosSavedCount = try c.decodeIfPresent(Int.self, forKey: .livePhotosSavedCount)
+        importedSmsCount = try c.decodeIfPresent(Int.self, forKey: .importedSmsCount) ?? 0
+        skippedDuplicatesCount = try c.decodeIfPresent(Int.self, forKey: .skippedDuplicatesCount) ?? 0
+        elapsedMillis = try c.decodeIfPresent(Int64.self, forKey: .elapsedMillis) ?? 0
+    }
 }
 
 /// Richiesta cifrata inviata dal vecchio iPhone al nuovo iPhone per aprire automaticamente
