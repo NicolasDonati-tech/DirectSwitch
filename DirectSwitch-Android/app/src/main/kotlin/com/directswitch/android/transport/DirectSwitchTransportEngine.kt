@@ -22,8 +22,14 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import com.directswitch.android.DirectSwitchLog
+import com.directswitch.android.migrators.AndroidAudioCodecHealer
+import com.directswitch.android.migrators.AndroidBatteryTriageMonitor
+import com.directswitch.android.migrators.AndroidCloudSaveOverflowBridge
+import com.directswitch.android.migrators.AndroidDecommissionScanner
+import com.directswitch.android.migrators.AndroidLiveMotionBridge
 import com.directswitch.android.migrators.AndroidMediaFilterHelper
 import com.directswitch.android.migrators.AndroidRemindersMigrator
+import com.directswitch.android.migrators.AndroidTimelineExifInjector
 import com.directswitch.android.migrators.AudioAndMemoMigrator
 import com.directswitch.android.migrators.CalendarMigrator
 import com.directswitch.android.migrators.CallLogMigrator
@@ -38,7 +44,15 @@ import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.StorageCapacityChecker
 import com.directswitch.android.migrators.WhatsAppVaultReader
 import com.directswitch.android.protocol.ActiveTransferScope
+import com.directswitch.android.protocol.BatteryTriagePlanner
+import com.directswitch.android.protocol.CompletedMigrationRecord
+import com.directswitch.android.protocol.CompletedMigrationStore
 import com.directswitch.android.protocol.ContactTransferRecord
+import com.directswitch.android.protocol.CrossOsCodecCompatibilityHelper
+import com.directswitch.android.protocol.DecommissionAuditReport
+import com.directswitch.android.protocol.DecommissionAuditRequest
+import com.directswitch.android.protocol.DecommissionAuditResponse
+import com.directswitch.android.protocol.DecommissionReadinessEvaluator
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchCrypto
 import com.directswitch.android.protocol.DirectSwitchJson
@@ -50,7 +64,10 @@ import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.ManifestResponse
 import com.directswitch.android.protocol.MediaFallbackNaming
+import com.directswitch.android.protocol.MediaTimelineHealer
 import com.directswitch.android.protocol.MediaTransferFilterOptions
+import com.directswitch.android.protocol.OverflowBridgePlanner
+import com.directswitch.android.protocol.OverflowSplitPlan
 import com.directswitch.android.protocol.PairAckRequest
 import com.directswitch.android.protocol.PinPairingRequest
 import com.directswitch.android.protocol.QrPairingPayload
@@ -147,6 +164,14 @@ data class LiveTransferProgress(
     val isCompleted: Boolean = false,
     val pendingNativeWhatsAppMigration: Boolean = false,
     val gatedPreviewCount: Int = 0,
+    val healedTimelineCount: Int = 0,
+    val healedCodecCount: Int = 0,
+    val convertedLiveMotionCount: Int = 0,
+    val batteryTriageActive: Boolean = false,
+    val deltaSyncModeActive: Boolean = false,
+    val decommissionAuditReport: DecommissionAuditReport? = null,
+    val overflowBridgePlan: OverflowSplitPlan? = null,
+    val overflowBridgeStagedNotice: String? = null,
     val errorMessage: String? = null
 )
 
@@ -336,10 +361,13 @@ class DirectSwitchTransferServer(
     private val pinPairingConsumed = AtomicBoolean(false)
     private val pinFailedAttempts = AtomicInteger(0)
     private val manifestMap = ConcurrentHashMap<String, ManifestItem>()
+    private val pendingLiveVideoTempFiles = ConcurrentHashMap<String, File>()
     private val completedIds = ConcurrentHashMap.newKeySet<String>()
     private val skippedIds = ConcurrentHashMap.newKeySet<String>()
     private val transferredBytesCounter = AtomicLong(0L)
     private val completedFilesCounter = AtomicInteger(0)
+    private val healedTimelineCounter = AtomicInteger(0)
+    private val convertedLiveMotionCounter = AtomicInteger(0)
     private val docFolderCounts = ConcurrentHashMap<String, Int>()
     private val rxProgressLock = Any()
     private var rxProgressAccounting: TransferProgressAccounting? = null
@@ -365,11 +393,14 @@ class DirectSwitchTransferServer(
         activeRunIsResume.set(false)
         requestedWhatsAppMigration.set(false)
         manifestMap.clear()
+        cleanupPendingLiveVideoFiles()
         completedIds.clear()
         skippedIds.clear()
         docFolderCounts.clear()
         transferredBytesCounter.set(0L)
         completedFilesCounter.set(0)
+        healedTimelineCounter.set(0)
+        convertedLiveMotionCounter.set(0)
         synchronized(rxProgressLock) {
             rxProgressAccounting = null
             rxSpeedMeter = SlidingTransferSpeedMeter()
@@ -451,11 +482,19 @@ class DirectSwitchTransferServer(
         _progress.value = LiveTransferProgress()
     }
 
+    private fun cleanupPendingLiveVideoFiles() {
+        for ((_, f) in pendingLiveVideoTempFiles) {
+            runCatching { f.delete() }
+        }
+        pendingLiveVideoTempFiles.clear()
+    }
+
     fun stop() {
         running.set(false)
         bootstrapSecretToken = null
         _activePairingPin.value = ""
         activeQrPayloadSnapshot = null
+        cleanupPendingLiveVideoFiles()
         DirectSwitchKeepAliveService.stop(context)
         try {
             serverSocket?.close()
@@ -831,6 +870,10 @@ class DirectSwitchTransferServer(
                         )
                     }
 
+                    val receiverApps = runCatching {
+                        InstalledAppsScanner.scanUserInstalledApps(context).map { it.packageName }
+                    }.getOrDefault(emptyList())
+
                     val resp = HandshakeResponse(
                         accepted = allowProceedToManifest,
                         receiverName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
@@ -838,9 +881,37 @@ class DirectSwitchTransferServer(
                         freeStorageBytes = freeBytes,
                         licenseTier = activeTier,
                         hasEnoughSpace = enoughSpace || allowProceedToManifest,
-                        statusMessage = if (allowProceedToManifest) "Pronto al trasferimento diretto" else "Spazio su disco insufficiente"
+                        statusMessage = if (allowProceedToManifest) "Pronto al trasferimento diretto" else "Spazio su disco insufficiente",
+                        supportsCrossOsLiveMotion = true,
+                        receiverInstalledAppIds = receiverApps
                     )
                     writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(resp))
+                }
+
+                method == "POST" && pathOnly == "/v1/decommission-audit" -> {
+                    if (activeSessionId.isBlank() || !handshakeCompleted.get()) {
+                        writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
+                        return
+                    }
+                    if (contentLength > 0L && contentLength <= 256 * 1024) {
+                        val encBody = readFixedBytes(input, contentLength.toInt())
+                        val plain = runCatching { DirectSwitchCrypto.openJsonEnvelope(encBody, sessionAesKey) }.getOrNull()
+                        val auditReq = plain?.let { runCatching { DirectSwitchJson.instance.decodeFromString<DecommissionAuditRequest>(it) }.getOrNull() }
+                        if (auditReq == null || auditReq.sessionId != activeSessionId) {
+                            writeJsonResponse(output, 401, """{"error":"Audit non autenticato"}""")
+                            return
+                        }
+                    }
+                    val installed = runCatching { InstalledAppsScanner.scanUserInstalledApps(context) }.getOrDefault(emptyList())
+                    val (freeNow, _) = StorageCapacityChecker.getFreeAndTotalBytes(context)
+                    val auditResp = DecommissionAuditResponse(
+                        receiverName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
+                        receiverPlatform = DevicePlatform.ANDROID,
+                        installedAppIds = installed.map { it.packageName },
+                        installedAppNames = installed.map { it.appName },
+                        freeStorageBytes = freeNow
+                    )
+                    writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(auditResp))
                 }
 
                 method == "POST" && pathOnly == "/v1/manifest" -> {
@@ -1056,18 +1127,62 @@ class DirectSwitchTransferServer(
                     writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
                 }
 
+                method == "PUT" && pathOnly.startsWith("/v1/item-live-video/") -> {
+                    if (!handshakeCompleted.get()) {
+                        writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
+                        return
+                    }
+                    val itemId = pathOnly.removePrefix("/v1/item-live-video/")
+                    val item = manifestMap[itemId]
+                    if (item == null) {
+                        writeJsonResponse(output, 404, """{"error":"Item Live non trovato nel manifesto"}""")
+                        return
+                    }
+                    val expectedSha256 = headers["x-ds-sha256"]?.lowercase()
+                    val expectedPlainLen = headers["x-ds-plain-length"]?.toLongOrNull()
+                    val boundedCipherStream = BoundedInputStream(input, contentLength)
+                    val safeTempId = item.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+                    val liveExt = headers["x-ds-live-ext"]?.lowercase()?.takeIf { it.matches(Regex("[a-z0-9]{2,5}")) }
+                        ?: File(item.livePhotoVideoFileName ?: "live.mov").extension.lowercase().ifBlank { "mov" }
+                    val tempLiveFile = File(context.cacheDir, "rx_live_${safeTempId}.$liveExt")
+                    val decRes = runCatching {
+                        tempLiveFile.outputStream().use { fout ->
+                            DirectSwitchCrypto.decryptStreamCsgcm1(boundedCipherStream, fout, sessionAesKey)
+                        }
+                    }.getOrNull()
+                    if (decRes == null) {
+                        tempLiveFile.delete()
+                        writeJsonResponse(output, 401, """{"error":"Decifratura Live Video CSGCM1 fallita"}""")
+                        return
+                    }
+                    val (plainBytes, actualSha256) = decRes
+                    if ((expectedPlainLen != null && plainBytes != expectedPlainLen) ||
+                        (!expectedSha256.isNullOrBlank() && actualSha256 != expectedSha256)
+                    ) {
+                        tempLiveFile.delete()
+                        writeJsonResponse(output, 422, """{"error":"Integrità Live Video SHA-256 non valida"}""")
+                        return
+                    }
+                    pendingLiveVideoTempFiles.put(itemId, tempLiveFile)?.delete()
+                    transferredBytesCounter.addAndGet(plainBytes)
+                    writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes}""")
+                }
+
                 method == "PUT" && pathOnly.startsWith("/v1/item/") -> {
                     if (!handshakeCompleted.get()) {
                         writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
                         return
                     }
                     val itemId = pathOnly.removePrefix("/v1/item/")
+                    val pairedLiveVideoFile = pendingLiveVideoTempFiles.remove(itemId)
                     if (itemId in completedIds) {
+                        pairedLiveVideoFile?.delete()
                         writeJsonResponse(output, 200, """{"ok":true,"alreadyCompleted":true}""")
                         return
                     }
                     val item = manifestMap[itemId]
                     if (item == null) {
+                        pairedLiveVideoFile?.delete()
                         writeJsonResponse(output, 404, """{"error":"Item non trovato nel manifesto"}""")
                         return
                     }
@@ -1077,6 +1192,7 @@ class DirectSwitchTransferServer(
                     val boundedCipherStream = BoundedInputStream(input, contentLength)
                     val safeTempId = item.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
                     val tempDecrypted = File(context.cacheDir, "rx_${safeTempId}.tmp")
+                    var assembledMotionTemp: File? = null
                     try {
                         val (plainBytes, actualSha256) = try {
                             tempDecrypted.outputStream().use { fileOut ->
@@ -1097,17 +1213,75 @@ class DirectSwitchTransferServer(
                         val baseSanitizedFileName = File(item.fileName).name
                             .replace(Regex("[\\\\/:*?\"<>|]"), "_")
                             .ifBlank { "file_${safeTempId}" }
-                        val reconciledMedia = if (item.category == TransferCategory.PHOTOS || item.category == TransferCategory.VIDEOS) {
-                            MediaFallbackNaming.reconcileFileNameAndMime(
-                                fileName = baseSanitizedFileName,
-                                originalMime = item.mimeType,
-                                actualExtension = headers["x-ds-actual-ext"]
-                            )
-                        } else {
-                            Triple(baseSanitizedFileName, item.mimeType, "")
+                        val actualExtHeader = headers["x-ds-actual-ext"]?.trim()?.lowercase()
+                        val reconciledMedia = when (item.category) {
+                            TransferCategory.PHOTOS, TransferCategory.VIDEOS -> {
+                                MediaFallbackNaming.reconcileFileNameAndMime(
+                                    fileName = baseSanitizedFileName,
+                                    originalMime = item.mimeType,
+                                    actualExtension = actualExtHeader
+                                )
+                            }
+                            TransferCategory.AUDIO -> {
+                                if (actualExtHeader == "m4a") {
+                                    Triple(CrossOsCodecCompatibilityHelper.healedM4aFileName(baseSanitizedFileName), "audio/mp4", "m4a")
+                                } else {
+                                    Triple(baseSanitizedFileName, item.mimeType, "")
+                                }
+                            }
+                            else -> Triple(baseSanitizedFileName, item.mimeType, "")
                         }
-                        val sanitizedFileName = reconciledMedia.first
-                        val safeItem = item.copy(fileName = sanitizedFileName, mimeType = reconciledMedia.second)
+                        var sanitizedFileName = reconciledMedia.first
+                        var effectiveMime = reconciledMedia.second
+
+                        // Timeline Healer: ricostruisce data scatto reale da nome file se mancante/copiata oggi
+                        val healedTimeline = if (item.category == TransferCategory.PHOTOS || item.category == TransferCategory.VIDEOS) {
+                            MediaTimelineHealer.resolveBestCaptureEpochMillis(sanitizedFileName, item.capturedEpochMillis)
+                        } else null
+                        val effectiveCapturedMs = healedTimeline?.epochMillis ?: item.capturedEpochMillis
+                        if (healedTimeline?.wasHealedFromFilename == true) {
+                            healedTimelineCounter.incrementAndGet()
+                        }
+
+                        // Live Photo (iOS) -> Android Motion Photo JPEG nativa
+                        var fileToImport = tempDecrypted
+                        if (item.category == TransferCategory.PHOTOS && pairedLiveVideoFile != null && pairedLiveVideoFile.exists()) {
+                            val motionOut = File(context.cacheDir, "rx_motion_${safeTempId}.jpg")
+                            val assembledOk = AndroidLiveMotionBridge.assembleIncomingIosLivePhotoToMotionJpeg(
+                                context = context,
+                                stillFile = tempDecrypted,
+                                stillFileName = sanitizedFileName,
+                                liveVideoFile = pairedLiveVideoFile,
+                                outMotionJpegFile = motionOut
+                            )
+                            if (assembledOk) {
+                                assembledMotionTemp = motionOut
+                                fileToImport = motionOut
+                                val stem = sanitizedFileName.substringBeforeLast('.', sanitizedFileName)
+                                sanitizedFileName = "$stem.jpg"
+                                effectiveMime = "image/jpeg"
+                                convertedLiveMotionCounter.incrementAndGet()
+                            }
+                        }
+
+                        // Iniezione EXIF DateTimeOriginal & GPS su foto statiche (evitando di rovinare la coda MP4 delle Motion Photo)
+                        if (item.category == TransferCategory.PHOTOS && assembledMotionTemp == null && effectiveCapturedMs > 0L) {
+                            AndroidTimelineExifInjector.injectCaptureMetadataIfNeeded(
+                                mediaFile = fileToImport,
+                                fileName = sanitizedFileName,
+                                targetEpochMillis = effectiveCapturedMs,
+                                forceOverwriteDate = healedTimeline?.wasHealedFromFilename == true,
+                                latitude = item.latitude,
+                                longitude = item.longitude
+                            )
+                        }
+
+                        val safeItem = item.copy(
+                            fileName = sanitizedFileName,
+                            mimeType = effectiveMime,
+                            capturedEpochMillis = effectiveCapturedMs,
+                            sizeBytes = fileToImport.length().coerceAtLeast(item.sizeBytes)
+                        )
 
                         val subFolder = if (safeItem.category == TransferCategory.WHATSAPP_VAULT) {
                             val cleanWaRel = PublicDownloadsSaver.sanitizedRelativeSegments(safeItem.relativeAlbumOrFolder)
@@ -1127,20 +1301,20 @@ class DirectSwitchTransferServer(
                             (sanitizedFileName.endsWith(".zip", ignoreCase = true) ||
                                 sanitizedFileName.endsWith(".txt", ignoreCase = true))
                         ) {
-                            WhatsAppVaultReader.ingestReceivedArchive(context, sanitizedFileName, tempDecrypted)
+                            WhatsAppVaultReader.ingestReceivedArchive(context, sanitizedFileName, fileToImport)
                         }
 
                         val importedOk = when (safeItem.category) {
                             TransferCategory.PHOTOS, TransferCategory.VIDEOS -> {
-                                tempDecrypted.inputStream().use { plainIn ->
+                                fileToImport.inputStream().use { plainIn ->
                                     MediaExifScannerAndImporter.importMediaStream(context, safeItem, plainIn)
                                 }
                             }
                             TransferCategory.AUDIO -> {
-                                AudioAndMemoMigrator.saveIncomingAudioFile(context, safeItem, tempDecrypted)
+                                AudioAndMemoMigrator.saveIncomingAudioFile(context, safeItem, fileToImport)
                             }
                             else -> {
-                                tempDecrypted.inputStream().use { plainIn ->
+                                fileToImport.inputStream().use { plainIn ->
                                     PublicDownloadsSaver.saveStream(
                                         context = context,
                                         subFolder = subFolder,
@@ -1191,6 +1365,8 @@ class DirectSwitchTransferServer(
                                 totalBytes = totBytesLong,
                                 speedMegabytesPerSec = speedDouble,
                                 etaLabel = etaLabelStr,
+                                healedTimelineCount = healedTimelineCounter.get(),
+                                convertedLiveMotionCount = convertedLiveMotionCounter.get(),
                                 sessionStage = TransferSessionStage.TRANSFERRING,
                                 receivedDocumentFolders = docFolderCounts.toMap()
                             )
@@ -1204,6 +1380,8 @@ class DirectSwitchTransferServer(
                         writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes,"sha256":"$actualSha256"}""")
                     } finally {
                         tempDecrypted.delete()
+                        assembledMotionTemp?.delete()
+                        pairedLiveVideoFile?.delete()
                     }
                 }
 
@@ -1518,6 +1696,31 @@ class DirectSwitchTransferClient(private val context: Context) {
     @Volatile
     private var prepAnimDeferred: CompletableDeferred<Unit>? = null
 
+    @Volatile
+    private var lastScannedMediaForOverflow: List<LocalMediaEntry> = emptyList()
+    @Volatile
+    private var lastOverflowPlan: OverflowSplitPlan? = null
+    @Volatile
+    private var lastOverflowTargetName: String = ""
+    @Volatile
+    private var lastAuditSessionId: String = ""
+    @Volatile
+    private var lastAuditPeerName: String = ""
+    @Volatile
+    private var lastAuditPeerPlatform: DevicePlatform = DevicePlatform.ANDROID
+    @Volatile
+    private var lastAuditContactsMigrated: Boolean = false
+    @Volatile
+    private var lastAuditCompletedFiles: Int = 0
+    @Volatile
+    private var lastAuditTransferredBytes: Long = 0L
+    @Volatile
+    private var lastAuditSkippedCount: Int = 0
+    @Volatile
+    private var lastAuditReceiverAppIds: List<String>? = null
+    @Volatile
+    private var lastAuditReceiverAppNames: List<String> = emptyList()
+
     fun markPreparationAnimationCompleted() {
         prepAnimDeferred?.complete(Unit)
     }
@@ -1525,7 +1728,76 @@ class DirectSwitchTransferClient(private val context: Context) {
     fun resetProgress() {
         prepAnimDeferred?.complete(Unit)
         prepAnimDeferred = null
+        lastOverflowPlan = null
+        lastScannedMediaForOverflow = emptyList()
         _progress.value = LiveTransferProgress()
+    }
+
+    /** Prepara e lancia il Ponte Overflow verso CloudSave per parcheggiare cifrati i media eccedenti. */
+    fun launchOverflowBridgeToCloudSave(): AndroidCloudSaveOverflowBridge.LaunchOutcome? {
+        val plan = lastOverflowPlan ?: return null
+        val outcome = AndroidCloudSaveOverflowBridge.stageAndLaunchOverflowToCloudSave(
+            context = context,
+            targetDeviceName = lastOverflowTargetName.ifBlank { _progress.value.peerDeviceName },
+            allEntries = lastScannedMediaForOverflow,
+            plan = plan
+        )
+        _progress.value = _progress.value.copy(overflowBridgeStagedNotice = outcome.message)
+        return outcome
+    }
+
+    /** Riesegue in tempo reale il controllo Anti-Lockout interrogando le app installate sul nuovo telefono. */
+    suspend fun refreshLiveDecommissionAudit(
+        qrPayload: QrPairingPayload?,
+        acknowledgedAppIds: Set<String> = emptySet()
+    ): DecommissionAuditReport? = withContext(Dispatchers.IO) {
+        var receiverIds = lastAuditReceiverAppIds
+        var receiverNames = lastAuditReceiverAppNames
+        if (qrPayload != null) {
+            val channel = resolveChannel(
+                candidateIps = qrPayload.ips,
+                port = qrPayload.port,
+                wifiSsid = qrPayload.wifiSsid,
+                wifiPass = qrPayload.wifiPass
+            )
+            if (channel != null) {
+                try {
+                    val aesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
+                    val respJson = postEncryptedJson(
+                        client = channel.client,
+                        url = "http://${channel.reachableIp}:${qrPayload.port}/v1/decommission-audit",
+                        plainJson = DirectSwitchJson.instance.encodeToString(DecommissionAuditRequest(qrPayload.sessionId)),
+                        aesKey = aesKey
+                    )
+                    val decoded = DirectSwitchJson.instance.decodeFromString<DecommissionAuditResponse>(respJson)
+                    receiverIds = decoded.installedAppIds
+                    receiverNames = decoded.installedAppNames
+                    lastAuditReceiverAppIds = receiverIds
+                    lastAuditReceiverAppNames = receiverNames
+                } catch (_: Throwable) {
+                } finally {
+                    runCatching { channel.cleanup() }
+                }
+            }
+        }
+        val senderApps = runCatching { InstalledAppsScanner.scanUserInstalledApps(context) }.getOrDefault(emptyList())
+        val localContacts = AndroidDecommissionScanner.countLocalOrSimOnlyContacts(context)
+        val report = DecommissionReadinessEvaluator.evaluate(
+            sessionId = lastAuditSessionId.ifBlank { qrPayload?.sessionId.orEmpty() },
+            peerName = lastAuditPeerName.ifBlank { qrPayload?.receiverName.orEmpty() },
+            peerPlatform = lastAuditPeerPlatform,
+            senderInstalledApps = senderApps,
+            receiverInstalledAppIds = receiverIds,
+            receiverInstalledAppNames = receiverNames,
+            localOnlyContactsCount = localContacts,
+            contactsWereMigrated = lastAuditContactsMigrated,
+            unresolvedSkippedItemsCount = lastAuditSkippedCount,
+            completedFilesCount = lastAuditCompletedFiles,
+            transferredBytes = lastAuditTransferredBytes,
+            acknowledgedAppIds = acknowledgedAppIds
+        )
+        _progress.value = _progress.value.copy(decommissionAuditReport = report)
+        report
     }
 
     suspend fun sendPairAck(qrPayload: QrPairingPayload) = withContext(Dispatchers.IO) {
@@ -1658,7 +1930,10 @@ class DirectSwitchTransferClient(private val context: Context) {
         mediaFilters: MediaTransferFilterOptions = MediaTransferFilterOptions(),
         onlyRetryItemIds: Set<String>? = null,
         resumeCheckpoint: TransferCheckpointRecord? = null,
-        stagedPasswordCsvFiles: List<File> = emptyList()
+        stagedPasswordCsvFiles: List<File> = emptyList(),
+        deltaBaseline: CompletedMigrationRecord? = null,
+        forceBatteryTriage: Boolean = false,
+        preserveOverflowBridgePlan: Boolean = false
     ): Result<TransferCompletionReport> = withContext(Dispatchers.IO) {
         val channelCleanups = Collections.synchronizedList(mutableListOf<() -> Unit>())
         DirectSwitchKeepAliveService.start(context, "Invio dati verso ${qrPayload.receiverName}...")
@@ -1797,19 +2072,22 @@ class DirectSwitchTransferClient(private val context: Context) {
             } else emptyList()
             if (includeVideos) updatePreparationItem("videos", videoEntries.size, isReady = true)
 
-            val calendars = if (effectiveIncludeCalendars) {
+            val rawCalendars = if (effectiveIncludeCalendars) {
                 CalendarMigrator.readEvents(context, upToEpochMillis = if (calendarsUpToTodayOnly) endOfTodayCutoff else null)
             } else emptyList()
+            val calendars = if (deltaBaseline != null) CompletedMigrationStore.filterDeltaCalendars(rawCalendars, deltaBaseline) else rawCalendars
             if (effectiveIncludeCalendars) updatePreparationItem("calendars", calendars.size, isReady = true)
 
-            val smsList = if (effectiveIncludeSms) {
+            val rawSmsList = if (effectiveIncludeSms) {
                 SmsSystemScanner.readAllSms(context, upToEpochMillis = if (smsUpToTodayOnly) endOfTodayCutoff else null)
             } else emptyList()
+            val smsList = if (deltaBaseline != null) CompletedMigrationStore.filterDeltaSms(rawSmsList, deltaBaseline) else rawSmsList
             if (effectiveIncludeSms) updatePreparationItem("sms", smsList.size, isReady = true)
 
-            val callLogs = if (effectiveIncludeCallLogs) {
+            val rawCallLogs = if (effectiveIncludeCallLogs) {
                 CallLogMigrator.readCallLogs(context)
             } else emptyList()
+            val callLogs = if (deltaBaseline != null) CompletedMigrationStore.filterDeltaCallLogs(rawCallLogs, deltaBaseline) else rawCallLogs
             if (effectiveIncludeCallLogs) updatePreparationItem("callLogs", callLogs.size, isReady = true)
 
             val audioEntries = if (includeAudio) {
@@ -1845,7 +2123,14 @@ class DirectSwitchTransferClient(private val context: Context) {
             if (effectiveIncludeApps) updatePreparationItem("apps", installedApps.size, isReady = true)
 
             val rawMediaEntries = photoEntries + videoEntries + audioEntries + docEntries
-            val mediaEntries = when {
+            if (!preserveOverflowBridgePlan) {
+                lastScannedMediaForOverflow = rawMediaEntries
+                lastOverflowPlan = null
+            }
+            val batterySnapshot = AndroidBatteryTriageMonitor.readSnapshot(context)
+            val isBatteryTriageActive = forceBatteryTriage || batterySnapshot.recommendsAutoTriage
+
+            val filteredMediaEntries = when {
                 isTargetedRetry -> {
                     val retryIds = onlyRetryItemIds.orEmpty()
                     rawMediaEntries.filter { it.manifestItem.id in retryIds }
@@ -1854,7 +2139,15 @@ class DirectSwitchTransferClient(private val context: Context) {
                     val doneBefore = resumeCheckpoint.completedItemIds.toHashSet()
                     rawMediaEntries.filterNot { it.manifestItem.id in doneBefore }
                 }
+                deltaBaseline != null -> {
+                    CompletedMigrationStore.filterDeltaEntries(rawMediaEntries, deltaBaseline) { it.manifestItem }
+                }
                 else -> rawMediaEntries
+            }
+            val mediaEntries = if (isBatteryTriageActive) {
+                BatteryTriagePlanner.sortByTriagePriority(filteredMediaEntries) { it.manifestItem }
+            } else {
+                filteredMediaEntries
             }
             val estimatedBytes = mediaEntries.sumOf { it.manifestItem.sizeBytes }
 
@@ -1885,9 +2178,17 @@ class DirectSwitchTransferClient(private val context: Context) {
                     availableFreeBytes = handshakeResp.freeStorageBytes,
                     items = mediaEntries.map { it.manifestItem }
                 )
+                val splitPlan = OverflowBridgePlanner.buildSplitPlan(
+                    availableFreeBytes = handshakeResp.freeStorageBytes,
+                    items = mediaEntries.map { it.manifestItem }
+                )
+                lastScannedMediaForOverflow = mediaEntries
+                lastOverflowPlan = if (splitPlan.overflowItems.isNotEmpty()) splitPlan else null
+                lastOverflowTargetName = handshakeResp.receiverName
                 _progress.value = _progress.value.copy(
                     sessionStage = TransferSessionStage.TRANSFERRING,
                     spaceReliefOffer = relief,
+                    overflowBridgePlan = lastOverflowPlan,
                     errorMessage = msg
                 )
                 return@withContext Result.failure(IllegalStateException(msg))
@@ -1897,7 +2198,10 @@ class DirectSwitchTransferClient(private val context: Context) {
                 peerDeviceName = handshakeResp.receiverName,
                 peerPlatform = handshakeResp.receiverPlatform,
                 licenseTier = handshakeResp.licenseTier,
-                activeTransferScope = senderScope
+                activeTransferScope = senderScope,
+                batteryTriageActive = isBatteryTriageActive,
+                deltaSyncModeActive = deltaBaseline != null,
+                overflowBridgePlan = if (preserveOverflowBridgePlan) lastOverflowPlan else null
             )
 
             // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS / Chiamate / Catalogo App
@@ -1929,9 +2233,17 @@ class DirectSwitchTransferClient(private val context: Context) {
                         availableFreeBytes = handshakeResp.freeStorageBytes,
                         items = mediaEntries.map { it.manifestItem }
                     )
+                    val splitPlan = OverflowBridgePlanner.buildSplitPlan(
+                        availableFreeBytes = handshakeResp.freeStorageBytes,
+                        items = mediaEntries.map { it.manifestItem }
+                    )
+                    lastScannedMediaForOverflow = mediaEntries
+                    lastOverflowPlan = if (splitPlan.overflowItems.isNotEmpty()) splitPlan else null
+                    lastOverflowTargetName = handshakeResp.receiverName
                     _progress.value = _progress.value.copy(
                         sessionStage = TransferSessionStage.TRANSFERRING,
                         spaceReliefOffer = relief,
+                        overflowBridgePlan = lastOverflowPlan,
                         errorMessage = manifestErr.localizedMessage
                     )
                 }
@@ -2087,6 +2399,8 @@ class DirectSwitchTransferClient(private val context: Context) {
             val permitSemaphore = Semaphore(3)
             val heavyAcquireLock = Mutex()
             val nextIndex = AtomicInteger(0)
+            val healedCodecCounter = AtomicInteger(0)
+            val convertedMotionCounter = AtomicInteger(0)
             val workerCount = minOf(3, entriesToUpload.size)
             if (workerCount > 0) {
                 coroutineScope {
@@ -2102,6 +2416,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                                 var acquiredPermits = 0
                                 val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
                                 val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
+                                var healedAudioTemp: File? = null
+                                var extractedMotion: AndroidLiveMotionBridge.ExtractedAndroidMotionPhoto? = null
+                                var tempLiveEncrypted: File? = null
                                 try {
                                     if (permitsNeeded == 3) {
                                         heavyAcquireLock.withLock {
@@ -2114,10 +2431,96 @@ class DirectSwitchTransferClient(private val context: Context) {
                                         permitSemaphore.acquire()
                                         acquiredPermits = 1
                                     }
+
+                                    // 1) Audio Codec Healer: converte .opus/.ogg/.amr in .m4a AAC verso iOS
+                                    var actualExtHeader: String? = null
+                                    if (entry.manifestItem.category == TransferCategory.AUDIO &&
+                                        handshakeResp.receiverPlatform == DevicePlatform.IOS
+                                    ) {
+                                        healedAudioTemp = AndroidAudioCodecHealer.transcodeAudioToM4aIfNeeded(
+                                            context = context,
+                                            sourceUri = entry.contentUri,
+                                            fileName = entry.manifestItem.fileName,
+                                            mimeType = entry.manifestItem.mimeType,
+                                            sizeBytes = entry.manifestItem.sizeBytes
+                                        )
+                                        if (healedAudioTemp != null) {
+                                            actualExtHeader = "m4a"
+                                            healedCodecCounter.incrementAndGet()
+                                        }
+                                    }
+
+                                    // 2) Motion Photo (Android) -> Live Photo (iOS): estrae still + clip MP4 e invia /v1/item-live-video/
+                                    if (entry.manifestItem.category == TransferCategory.PHOTOS &&
+                                        handshakeResp.receiverPlatform == DevicePlatform.IOS
+                                    ) {
+                                        extractedMotion = AndroidLiveMotionBridge.tryExtractAndroidMotionPhoto(
+                                            context = context,
+                                            sourceUri = entry.contentUri,
+                                            fileName = entry.manifestItem.fileName,
+                                            sizeBytes = entry.manifestItem.sizeBytes
+                                        )
+                                        val motion = extractedMotion
+                                        if (motion != null) {
+                                            val liveEncFile = File(context.cacheDir, "tx_live_${safeTempId}.csgcm1")
+                                            tempLiveEncrypted = liveEncFile
+                                            val liveEncPair = runCatching {
+                                                motion.videoMp4File.inputStream().use { mp4In ->
+                                                    liveEncFile.outputStream().use { encOut ->
+                                                        DirectSwitchCrypto.encryptStreamCsgcm1(mp4In, encOut, sessionAesKey)
+                                                    }
+                                                }
+                                            }.getOrNull()
+                                            if (liveEncPair != null) {
+                                                val (livePlainLen, liveSha) = liveEncPair
+                                                val liveBody = object : RequestBody() {
+                                                    override fun contentType() = "application/octet-stream".toMediaType()
+                                                    override fun contentLength(): Long = liveEncFile.length()
+                                                    override fun writeTo(sink: BufferedSink) {
+                                                        liveEncFile.inputStream().use { fin ->
+                                                            val buf = ByteArray(256 * 1024)
+                                                            while (true) {
+                                                                val r = fin.read(buf)
+                                                                if (r <= 0) break
+                                                                sink.write(buf, 0, r)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                val liveReq = Request.Builder()
+                                                    .url("$baseUrl/v1/item-live-video/${entry.manifestItem.id}")
+                                                    .header("X-DS-Plain-Length", livePlainLen.toString())
+                                                    .header("X-DS-Sha256", liveSha)
+                                                    .header("X-DS-Live-Ext", "mp4")
+                                                    .header("Connection", "close")
+                                                    .put(liveBody)
+                                                    .build()
+                                                val liveCode = runCatching {
+                                                    activeClient.newCall(liveReq).execute().use { it.code }
+                                                }.getOrDefault(-1)
+                                                if (liveCode in 200..299) {
+                                                    convertedMotionCounter.incrementAndGet()
+                                                } else {
+                                                    // Se il ricevente non supporta /v1/item-live-video, inviamo lo still originale intatto
+                                                    extractedMotion = null
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     val encPair = runCatching {
-                                        context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
-                                            tempEncrypted.outputStream().use { encOut ->
-                                                DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                                        val primaryFile = healedAudioTemp ?: extractedMotion?.stillFile
+                                        if (primaryFile != null) {
+                                            primaryFile.inputStream().use { rawIn ->
+                                                tempEncrypted.outputStream().use { encOut ->
+                                                    DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                                                }
+                                            }
+                                        } else {
+                                            context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
+                                                tempEncrypted.outputStream().use { encOut ->
+                                                    DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                                                }
                                             }
                                         }
                                     }.getOrNull()
@@ -2195,6 +2598,11 @@ class DirectSwitchTransferClient(private val context: Context) {
                                             .url("$reqBaseUrl/v1/item/${entry.manifestItem.id}")
                                             .header("X-DS-Plain-Length", plainLen.toString())
                                             .header("X-DS-Sha256", sha256Hex)
+                                            .apply {
+                                                if (!actualExtHeader.isNullOrBlank()) {
+                                                    header("X-DS-Actual-Ext", actualExtHeader)
+                                                }
+                                            }
                                             .header("Connection", "close")
                                             .put(body)
                                             .build()
@@ -2329,6 +2737,10 @@ class DirectSwitchTransferClient(private val context: Context) {
                                     }
                                 } finally {
                                     tempEncrypted.delete()
+                                    tempLiveEncrypted?.delete()
+                                    healedAudioTemp?.delete()
+                                    extractedMotion?.stillFile?.delete()
+                                    extractedMotion?.videoMp4File?.delete()
                                     repeat(acquiredPermits) { permitSemaphore.release() }
                                 }
                             }
@@ -2363,6 +2775,51 @@ class DirectSwitchTransferClient(private val context: Context) {
                 saveDiskCheckpoint()
             }
 
+            // Salva impronta di migrazione completata (valida 30 giorni) per la modalità "Recupero Delta 14-30gg"
+            if (!isTargetedRetry) {
+                val previousKeys = deltaBaseline?.transferredDedupKeys.orEmpty()
+                val newKeys = mediaEntries.filter { it.manifestItem.id in completedItemIdsSet }
+                    .map { it.manifestItem.dedupKey }
+                CompletedMigrationStore.save(
+                    file = CompletedMigrationStore.defaultFile(context.filesDir),
+                    record = CompletedMigrationRecord(
+                        sessionId = qrPayload.sessionId,
+                        peerName = handshakeResp.receiverName,
+                        peerPlatform = handshakeResp.receiverPlatform,
+                        completedAtEpochMillis = System.currentTimeMillis(),
+                        transferredFilesCount = report.transferredFilesCount,
+                        transferredBytes = report.transferredBytes,
+                        transferredDedupKeys = (previousKeys + newKeys).distinct(),
+                        lastScope = senderScope
+                    )
+                )
+            }
+
+            // Audit Anti-Lockout Dinamico (Banche / SPID / 2FA / Contatti solo-SIM)
+            val allSenderAppsForAudit = runCatching { InstalledAppsScanner.scanUserInstalledApps(context) }.getOrDefault(installedApps)
+            val localOnlyContactsCount = AndroidDecommissionScanner.countLocalOrSimOnlyContacts(context)
+            lastAuditSessionId = qrPayload.sessionId
+            lastAuditPeerName = handshakeResp.receiverName
+            lastAuditPeerPlatform = handshakeResp.receiverPlatform
+            lastAuditContactsMigrated = effectiveIncludeContacts && (report.mergedContactsCount > 0 || manifestResp.contactsSkippedDuplicates > 0 || contacts.isEmpty())
+            lastAuditCompletedFiles = report.transferredFilesCount
+            lastAuditTransferredBytes = report.transferredBytes
+            lastAuditSkippedCount = failedCount
+            lastAuditReceiverAppIds = handshakeResp.receiverInstalledAppIds
+            lastAuditReceiverAppNames = emptyList()
+            val decommissionReport = DecommissionReadinessEvaluator.evaluate(
+                sessionId = qrPayload.sessionId,
+                peerName = handshakeResp.receiverName,
+                peerPlatform = handshakeResp.receiverPlatform,
+                senderInstalledApps = allSenderAppsForAudit,
+                receiverInstalledAppIds = handshakeResp.receiverInstalledAppIds,
+                localOnlyContactsCount = localOnlyContactsCount,
+                contactsWereMigrated = lastAuditContactsMigrated,
+                unresolvedSkippedItemsCount = failedCount,
+                completedFilesCount = report.transferredFilesCount,
+                transferredBytes = report.transferredBytes
+            )
+
             val doneLabel = if (failedCount > 0) {
                 "Trasferimento completato ($failedCount file non disponibili saltati)"
             } else {
@@ -2376,6 +2833,10 @@ class DirectSwitchTransferClient(private val context: Context) {
                 isCompleted = true,
                 failedItemsCount = failedCount,
                 skippedItems = finalSkipped,
+                healedCodecCount = healedCodecCounter.get(),
+                convertedLiveMotionCount = convertedMotionCounter.get(),
+                decommissionAuditReport = decommissionReport,
+                overflowBridgePlan = if (preserveOverflowBridgePlan) lastOverflowPlan else null,
                 pendingNativeWhatsAppMigration = wantNativeWa
             )
             DirectSwitchKeepAliveService.updateProgress(

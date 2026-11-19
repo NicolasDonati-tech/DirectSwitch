@@ -1067,7 +1067,7 @@ object MediaExifScannerAndImporter {
         category: TransferCategory
     ): List<LocalMediaEntry> {
         val out = mutableListOf<LocalMediaEntry>()
-        val projection = arrayOf(
+        val projection = mutableListOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE,
@@ -1075,7 +1075,11 @@ object MediaExifScannerAndImporter {
             MediaStore.MediaColumns.DATE_MODIFIED,
             MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
             MediaStore.MediaColumns.MIME_TYPE
-        )
+        ).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                add(MediaStore.MediaColumns.IS_FAVORITE)
+            }
+        }.toTypedArray()
         try {
             context.contentResolver.query(
                 collectionUri,
@@ -1091,6 +1095,9 @@ object MediaExifScannerAndImporter {
                 val modCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
                 val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
                 val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                val favCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
+                } else -1
 
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idCol)
@@ -1099,7 +1106,13 @@ object MediaExifScannerAndImporter {
                     if (size <= 0L) continue
                     val rawDateTaken = cursor.getLong(dateCol)
                     val rawDateModifiedSec = cursor.getLong(modCol)
-                    val dateTaken = resolveEffectiveTimestampMillis(rawDateTaken, rawDateModifiedSec)
+                    val baseTimestamp = resolveEffectiveTimestampMillis(rawDateTaken, rawDateModifiedSec)
+                    val healedDate = com.directswitch.android.protocol.MediaTimelineHealer.resolveBestCaptureEpochMillis(
+                        fileName = name,
+                        reportedEpochMillis = baseTimestamp
+                    )
+                    val dateTaken = healedDate.epochMillis
+                    val isFav = if (favCol >= 0) cursor.getInt(favCol) == 1 else false
                     val album = cursor.getString(bucketCol) ?: "Camera"
                     val mime = cursor.getString(mimeCol)
                         ?: if (category == TransferCategory.VIDEOS) "video/mp4" else "image/jpeg"
@@ -1116,7 +1129,8 @@ object MediaExifScannerAndImporter {
                                 sizeBytes = size,
                                 capturedEpochMillis = dateTaken,
                                 dedupKey = dedupKey,
-                                mimeType = mime
+                                mimeType = mime,
+                                isFavorite = if (isFav) true else null
                             ),
                             contentUri = contentUri
                         )
@@ -1207,6 +1221,10 @@ object MediaExifScannerAndImporter {
                     put(MediaStore.MediaColumns.RELATIVE_PATH, baseRelPath)
                     if (item.capturedEpochMillis > 0L) {
                         put(MediaStore.MediaColumns.DATE_TAKEN, item.capturedEpochMillis)
+                        put(MediaStore.MediaColumns.DATE_MODIFIED, item.capturedEpochMillis / 1000L)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && item.isFavorite == true) {
+                        put(MediaStore.MediaColumns.IS_FAVORITE, 1)
                     }
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }

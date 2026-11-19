@@ -345,6 +345,60 @@ struct HandshakeResponse: Codable, Sendable {
     let licenseTier: SessionLicenseTier
     let hasEnoughSpace: Bool
     let statusMessage: String
+    var supportsCrossOsLiveMotion: Bool? = nil
+    var receiverInstalledAppIds: [String]? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case accepted, receiverName, receiverPlatform, freeStorageBytes, licenseTier, hasEnoughSpace, statusMessage
+        case supportsCrossOsLiveMotion, receiverInstalledAppIds
+    }
+
+    init(
+        accepted: Bool,
+        receiverName: String,
+        receiverPlatform: DevicePlatform,
+        freeStorageBytes: Int64,
+        licenseTier: SessionLicenseTier,
+        hasEnoughSpace: Bool,
+        statusMessage: String,
+        supportsCrossOsLiveMotion: Bool? = nil,
+        receiverInstalledAppIds: [String]? = nil
+    ) {
+        self.accepted = accepted
+        self.receiverName = receiverName
+        self.receiverPlatform = receiverPlatform
+        self.freeStorageBytes = freeStorageBytes
+        self.licenseTier = licenseTier
+        self.hasEnoughSpace = hasEnoughSpace
+        self.statusMessage = statusMessage
+        self.supportsCrossOsLiveMotion = supportsCrossOsLiveMotion
+        self.receiverInstalledAppIds = receiverInstalledAppIds
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        accepted = try c.decode(Bool.self, forKey: .accepted)
+        receiverName = try c.decode(String.self, forKey: .receiverName)
+        receiverPlatform = try c.decode(DevicePlatform.self, forKey: .receiverPlatform)
+        freeStorageBytes = try c.decode(Int64.self, forKey: .freeStorageBytes)
+        licenseTier = try c.decode(SessionLicenseTier.self, forKey: .licenseTier)
+        hasEnoughSpace = try c.decode(Bool.self, forKey: .hasEnoughSpace)
+        statusMessage = try c.decode(String.self, forKey: .statusMessage)
+        supportsCrossOsLiveMotion = try c.decodeIfPresent(Bool.self, forKey: .supportsCrossOsLiveMotion)
+        receiverInstalledAppIds = try c.decodeIfPresent([String].self, forKey: .receiverInstalledAppIds)
+    }
+}
+
+struct DecommissionAuditRequest: Codable, Sendable {
+    let sessionId: String
+}
+
+struct DecommissionAuditResponse: Codable, Sendable {
+    let receiverName: String
+    let receiverPlatform: DevicePlatform
+    var installedAppIds: [String] = []
+    var installedAppNames: [String] = []
+    var freeStorageBytes: Int64 = 0
 }
 
 struct LabeledValueRecord: Codable, Equatable, Sendable {

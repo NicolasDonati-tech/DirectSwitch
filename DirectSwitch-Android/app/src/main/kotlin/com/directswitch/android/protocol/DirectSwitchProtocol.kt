@@ -206,7 +206,23 @@ data class HandshakeResponse(
     val freeStorageBytes: Long,
     val licenseTier: SessionLicenseTier,
     val hasEnoughSpace: Boolean,
-    val statusMessage: String
+    val statusMessage: String,
+    val supportsCrossOsLiveMotion: Boolean = false,
+    val receiverInstalledAppIds: List<String>? = null
+)
+
+@Serializable
+data class DecommissionAuditRequest(
+    val sessionId: String
+)
+
+@Serializable
+data class DecommissionAuditResponse(
+    val receiverName: String,
+    val receiverPlatform: DevicePlatform,
+    val installedAppIds: List<String> = emptyList(),
+    val installedAppNames: List<String> = emptyList(),
+    val freeStorageBytes: Long = 0L
 )
 
 @Serializable
@@ -314,7 +330,12 @@ data class ManifestItem(
     val sizeBytes: Long,
     val capturedEpochMillis: Long = 0L,
     val dedupKey: String,
-    val mimeType: String = "application/octet-stream"
+    val mimeType: String = "application/octet-stream",
+    val isFavorite: Boolean? = null,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val isLivePhoto: Boolean? = null,
+    val livePhotoVideoFileName: String? = null
 )
 
 @Serializable

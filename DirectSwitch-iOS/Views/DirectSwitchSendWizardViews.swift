@@ -561,6 +561,8 @@ struct SendCategoriesStepView: View {
     @Binding var includeApps: Bool
     @Binding var includeWhatsApp: Bool
     @Binding var mediaFilters: MediaTransferFilterOptions
+    var activeDeltaBaseline: CompletedMigrationRecord? = nil
+    @Binding var forceBatteryTriage: Bool
 
     var onPreloadContacts: () -> Void
     var onPreloadPhotos: () -> Void
@@ -862,10 +864,45 @@ struct SendCategoriesStepView: View {
                     whatsAppDropdownContent
                 }
 
+                // Modalità Recupero Delta attiva (salta i file già copiati)
+                if let delta = activeDeltaBaseline {
+                    HStack(spacing: 10) {
+                        AppleSettingsIcon(systemName: "clock.arrow.circlepath", color: AppleTheme.teal)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Recupero Delta attivo")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Text("Salta i \(delta.transferredDedupKeys.count) elementi già copiati su \(delta.peerName): trasferisce solo le novità.")
+                                .font(.system(size: 12))
+                                .foregroundColor(AppleTheme.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .appleCard()
+                }
+
+                // Triage Batteria Critica (auto ≤ 15% o attivabile manualmente)
+                HStack(spacing: 12) {
+                    AppleSettingsIcon(systemName: "battery.25", color: AppleTheme.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Triage Batteria Critica")
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Text("Salva prima Password, Documenti, Audio e Foto Preferite (auto ≤ 15%).")
+                            .font(.system(size: 12))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $forceBatteryTriage)
+                        .labelsHidden()
+                        .tint(AppleTheme.orange)
+                }
+                .appleCard()
+
                 ApplePrimaryButton(
                     title: isOnlyWhatsAppSelected
                         ? "Vai al passaggio Chat WhatsApp"
-                        : "Copia le voci selezionate",
+                        : (activeDeltaBaseline != nil ? "Copia solo le novità (Delta)" : "Copia le voci selezionate"),
                     icon: isOnlyWhatsAppSelected
                         ? "bubble.left.and.bubble.right.fill"
                         : "arrow.right",

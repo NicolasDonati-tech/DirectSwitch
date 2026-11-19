@@ -1030,8 +1030,32 @@ enum iOSPhotoKitMigrator {
         let fallbackExt = item.category == .VIDEOS ? "mp4" : "jpg"
         let finalName = safeName.isEmpty ? "media_\(UUID().uuidString).\(fallbackExt)" : safeName
 
-        let creationDate: Date? = item.capturedEpochMillis > 0
-            ? Date(timeIntervalSince1970: TimeInterval(item.capturedEpochMillis) / 1000.0)
+        let healed = MediaTimelineHealer.resolveBestCaptureEpochMillis(
+            fileName: finalName,
+            reportedEpochMillis: item.capturedEpochMillis
+        )
+        let effectiveEpochMs = healed.epochMillis > 0 ? healed.epochMillis : item.capturedEpochMillis
+
+        var effectiveFileURL = fileURL
+        var healedExifTempURL: URL? = nil
+        if item.category == .PHOTOS && effectiveEpochMs > 0 && pairedLiveVideoURL == nil {
+            if let injected = MediaTimelineHealer.injectExifDateIntoImageIfNeeded(
+                sourceURL: fileURL,
+                epochMillis: effectiveEpochMs,
+                forceOverwrite: healed.wasHealedFromFilename
+            ) {
+                healedExifTempURL = injected
+                effectiveFileURL = injected
+            }
+        }
+        defer {
+            if let healedExifTempURL {
+                try? FileManager.default.removeItem(at: healedExifTempURL)
+            }
+        }
+
+        let creationDate: Date? = effectiveEpochMs > 0
+            ? Date(timeIntervalSince1970: TimeInterval(effectiveEpochMs) / 1000.0)
             : nil
         let locationObj: CLLocation? = {
             if let lat = item.latitude, let lon = item.longitude {
@@ -1048,23 +1072,37 @@ enum iOSPhotoKitMigrator {
         var savedLive = false
 
         // Percorso 1: ricostruzione nativa Live Photo (.photo + .pairedVideo nella stessa PHAssetCreationRequest)
+        // Supporta sia Live Photo iPhone->iPhone (.mov nativo) sia Android Motion Photo (.mp4 -> .mov con content identifier QuickTime).
         if item.category == .PHOTOS,
-           let liveURL = pairedLiveVideoURL,
-           FileManager.default.fileExists(atPath: liveURL.path) {
+           let incomingLiveURL = pairedLiveVideoURL,
+           FileManager.default.fileExists(atPath: incomingLiveURL.path) {
+            let crossOsPair = await iOSCrossOsLiveMotionBridge.prepareCrossOsLivePhotoPairIfNeeded(
+                stillURL: effectiveFileURL,
+                liveVideoURL: incomingLiveURL
+            )
+            defer {
+                if let dir = crossOsPair?.cleanupDir {
+                    try? FileManager.default.removeItem(at: dir)
+                }
+            }
+            let photoURLForLive = crossOsPair?.stillURL ?? effectiveFileURL
+            let movURLForLive = crossOsPair?.movURL ?? incomingLiveURL
             let rawLiveName = URL(fileURLWithPath: item.livePhotoVideoFileName ?? "").lastPathComponent
-            let finalLiveName = rawLiveName.isEmpty ? "live_\(UUID().uuidString).mov" : rawLiveName
+            let finalLiveName = (crossOsPair != nil || rawLiveName.isEmpty)
+                ? "live_\(UUID().uuidString).mov"
+                : rawLiveName
             do {
                 try await PHPhotoLibrary.shared().performChanges {
                     let req = PHAssetCreationRequest.forAsset()
                     let photoOpts = PHAssetResourceCreationOptions()
                     photoOpts.originalFilename = finalName
                     photoOpts.shouldMoveFile = false
-                    req.addResource(with: .photo, fileURL: fileURL, options: photoOpts)
+                    req.addResource(with: .photo, fileURL: photoURLForLive, options: photoOpts)
 
                     let liveOpts = PHAssetResourceCreationOptions()
                     liveOpts.originalFilename = finalLiveName
                     liveOpts.shouldMoveFile = false
-                    req.addResource(with: .pairedVideo, fileURL: liveURL, options: liveOpts)
+                    req.addResource(with: .pairedVideo, fileURL: movURLForLive, options: liveOpts)
 
                     if let creationDate { req.creationDate = creationDate }
                     if let locationObj { req.location = locationObj }
@@ -1086,9 +1124,9 @@ enum iOSPhotoKitMigrator {
                     resOpts.originalFilename = finalName
                     resOpts.shouldMoveFile = false
                     if item.category == .VIDEOS {
-                        req.addResource(with: .video, fileURL: fileURL, options: resOpts)
+                        req.addResource(with: .video, fileURL: effectiveFileURL, options: resOpts)
                     } else {
-                        req.addResource(with: .photo, fileURL: fileURL, options: resOpts)
+                        req.addResource(with: .photo, fileURL: effectiveFileURL, options: resOpts)
                     }
                     if let creationDate { req.creationDate = creationDate }
                     if let locationObj { req.location = locationObj }
@@ -1100,8 +1138,8 @@ enum iOSPhotoKitMigrator {
                 do {
                     try await PHPhotoLibrary.shared().performChanges {
                         let fallbackReq = item.category == .VIDEOS
-                            ? PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
-                            : PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+                            ? PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: effectiveFileURL)
+                            : PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: effectiveFileURL)
                         if let creationDate { fallbackReq?.creationDate = creationDate }
                         if let locationObj { fallbackReq?.location = locationObj }
                         if markFavorite { fallbackReq?.isFavorite = true }

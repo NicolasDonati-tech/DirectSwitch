@@ -117,8 +117,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.directswitch.android.DirectSwitchLog
+import com.directswitch.android.migrators.AndroidBatteryTriageMonitor
 import com.directswitch.android.migrators.AndroidMediaFilterHelper
 import com.directswitch.android.migrators.AudioAndMemoMigrator
+import com.directswitch.android.migrators.BatterySnapshot
 import com.directswitch.android.migrators.CalendarMigrator
 import com.directswitch.android.migrators.CallLogMigrator
 import com.directswitch.android.migrators.ContactsPreloadState
@@ -135,6 +137,8 @@ import com.directswitch.android.migrators.MediaExifScannerAndImporter
 import com.directswitch.android.migrators.PhotosPreloadState
 import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.VideosPreloadState
+import com.directswitch.android.protocol.CompletedMigrationRecord
+import com.directswitch.android.protocol.CompletedMigrationStore
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchL10n
 import com.directswitch.android.protocol.DirectSwitchLanguage
@@ -220,6 +224,13 @@ fun DirectSwitchMainScreen(
 
     var currentLanguage by remember { mutableStateOf(DirectSwitchLanguage.load(context)) }
     var resumableCheckpoint by remember { mutableStateOf(TransferCheckpointStore.load(context)) }
+    var completedDeltaRecord by remember {
+        mutableStateOf(CompletedMigrationStore.load(CompletedMigrationStore.defaultFile(context.filesDir)))
+    }
+    var activeDeltaBaseline by remember { mutableStateOf<CompletedMigrationRecord?>(null) }
+    var forceBatteryTriage by remember { mutableStateOf(false) }
+    var acknowledgedAuditAppIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var isRefreshingAudit by remember { mutableStateOf(false) }
     var step by remember { mutableStateOf(WizardStep.HOME) }
     var scanSummary by remember { mutableStateOf<LocalDeviceScanSummary?>(null) }
 
@@ -708,11 +719,13 @@ fun DirectSwitchMainScreen(
     fun launchSenderTransfer(
         targetPayload: QrPairingPayload,
         onlyRetryItemIds: Set<String>? = null,
-        resumeCheckpoint: TransferCheckpointRecord? = null
+        resumeCheckpoint: TransferCheckpointRecord? = null,
+        preserveOverflowPlan: Boolean = false
     ) {
         pendingDocPrecheckReport = null
         isReceiverFlow = false
         vaultStatusNote = null
+        acknowledgedAuditAppIds = emptySet()
         val selectedDetected = if (categories.installedApps && detectedAppsCatalog.isNotEmpty()) {
             detectedAppsCatalog.filter { it.packageName !in deselectedAppPackages }
         } else {
@@ -731,6 +744,8 @@ fun DirectSwitchMainScreen(
         val skipPrep = isWhatsAppOnly || resumeCheckpoint != null || !onlyRetryItemIds.isNullOrEmpty()
         step = if (skipPrep) WizardStep.TRANSFER_PROGRESS else WizardStep.TRANSFER_PREPARING
         val pwdFilesSnapshot = stagedPasswordCsvFiles
+        val deltaSnapshot = activeDeltaBaseline
+        val triageSnapshot = forceBatteryTriage
         scope.launch {
             client.executeTransfer(
                 qrPayload = targetPayload,
@@ -750,10 +765,14 @@ fun DirectSwitchMainScreen(
                 mediaFilters = mediaFilters,
                 onlyRetryItemIds = onlyRetryItemIds,
                 resumeCheckpoint = resumeCheckpoint,
-                stagedPasswordCsvFiles = pwdFilesSnapshot
+                stagedPasswordCsvFiles = pwdFilesSnapshot,
+                deltaBaseline = deltaSnapshot,
+                forceBatteryTriage = triageSnapshot,
+                preserveOverflowBridgePlan = preserveOverflowPlan
             )
             stagedPasswordCsvFiles = emptyList()
             resumableCheckpoint = TransferCheckpointStore.load(context)
+            completedDeltaRecord = CompletedMigrationStore.load(CompletedMigrationStore.defaultFile(context.filesDir))
         }
     }
 
@@ -783,7 +802,17 @@ fun DirectSwitchMainScreen(
 
     fun applySpaceReliefAndRestart(action: SpaceReliefActionKind) {
         val target = pairedTargetPayload ?: return
+        var preserveOverflow = false
         when (action) {
+            SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE -> {
+                val plan = clientProgress.overflowBridgePlan
+                if (plan != null && plan.cutoffEpochMillis > 0L) {
+                    mediaFilters = mediaFilters.copy(photosLastYearOnly = true, videosLastYearOnly = true)
+                } else {
+                    mediaFilters = mediaFilters.copy(maxVideoBytes = SpaceReliefPlanner.HEAVY_VIDEO_THRESHOLD_BYTES)
+                }
+                preserveOverflow = true
+            }
             SpaceReliefActionKind.EXCLUDE_HEAVY_VIDEOS_300MB -> {
                 mediaFilters = mediaFilters.copy(maxVideoBytes = SpaceReliefPlanner.HEAVY_VIDEO_THRESHOLD_BYTES)
             }
@@ -794,7 +823,7 @@ fun DirectSwitchMainScreen(
                 categories = categories.copy(videos = false)
             }
         }
-        launchSenderTransfer(target)
+        launchSenderTransfer(target, preserveOverflowPlan = preserveOverflow)
     }
 
     val topTitle = when (step) {
@@ -872,6 +901,39 @@ fun DirectSwitchMainScreen(
                             TransferCheckpointStore.clear(context)
                             resumableCheckpoint = null
                         },
+                        completedDeltaRecord = completedDeltaRecord,
+                        onStartDeltaSync = { rec ->
+                            requestPermissionsThen {
+                                isReceiverFlow = false
+                                pairedTargetPayload = null
+                                selectedBeaconForPin = null
+                                pinInput = ""
+                                pinErrorNote = null
+                                activeDeltaBaseline = rec
+                                resetCategorySelectionsAndPreloads()
+                                updateCategoriesAndTriggerPreloads(
+                                    CategorySelectionState(
+                                        contacts = rec.lastScope.contacts,
+                                        photos = rec.lastScope.photos,
+                                        videos = rec.lastScope.videos,
+                                        calendars = rec.lastScope.calendars,
+                                        sms = true,
+                                        callLogs = rec.lastScope.callLogs,
+                                        audio = rec.lastScope.audio,
+                                        documents = rec.lastScope.documents,
+                                        whatsAppVault = false,
+                                        installedApps = false
+                                    )
+                                )
+                                autoDiscovery.startScanningForNewDevices()
+                                step = WizardStep.SENDER_CONNECT
+                            }
+                        },
+                        onDismissDelta = {
+                            CompletedMigrationStore.clear(CompletedMigrationStore.defaultFile(context.filesDir))
+                            completedDeltaRecord = null
+                            activeDeltaBaseline = null
+                        },
                         onStartReceive = {
                             requestPermissionsThen {
                                 isReceiverFlow = true
@@ -884,6 +946,7 @@ fun DirectSwitchMainScreen(
                         onStartSend = {
                             requestPermissionsThen {
                                 isReceiverFlow = false
+                                activeDeltaBaseline = null
                                 pairedTargetPayload = null
                                 selectedBeaconForPin = null
                                 pinInput = ""
@@ -1167,6 +1230,10 @@ fun DirectSwitchMainScreen(
                                 autoDiscovery.startScanningForNewDevices()
                                 step = WizardStep.SENDER_CONNECT
                             },
+                            activeDeltaBaseline = activeDeltaBaseline,
+                            forceBatteryTriage = forceBatteryTriage,
+                            onToggleForceBatteryTriage = { forceBatteryTriage = it },
+                            onClearDeltaBaseline = { activeDeltaBaseline = null },
                             onStartTransfer = {
                                 if (categories.documents) {
                                     scope.launch {
@@ -1206,6 +1273,29 @@ fun DirectSwitchMainScreen(
                     TransferProgressWizardView(
                         progress = if (isReceiverFlow) serverProgress else clientProgress,
                         isReceiver = isReceiverFlow,
+                        acknowledgedAuditAppIds = acknowledgedAuditAppIds,
+                        isRefreshingAudit = isRefreshingAudit,
+                        onToggleAcknowledgeAudit = { appId ->
+                            val next = if (appId in acknowledgedAuditAppIds) {
+                                acknowledgedAuditAppIds - appId
+                            } else {
+                                acknowledgedAuditAppIds + appId
+                            }
+                            acknowledgedAuditAppIds = next
+                            scope.launch {
+                                client.refreshLiveDecommissionAudit(null, acknowledgedAppIds = next)
+                            }
+                        },
+                        onRefreshLiveAudit = {
+                            scope.launch {
+                                isRefreshingAudit = true
+                                client.refreshLiveDecommissionAudit(pairedTargetPayload, acknowledgedAppIds = acknowledgedAuditAppIds)
+                                isRefreshingAudit = false
+                            }
+                        },
+                        onLaunchCloudSaveOverflow = {
+                            client.launchOverflowBridgeToCloudSave()
+                        },
                         onApplySpaceRelief = { action -> applySpaceReliefAndRestart(action) },
                         onRetrySkippedOnly = { ids ->
                             val target = pairedTargetPayload
@@ -1355,6 +1445,9 @@ private fun AndroidHomeView(
     resumableCheckpoint: TransferCheckpointRecord?,
     onResumeCheckpoint: (TransferCheckpointRecord) -> Unit,
     onDismissCheckpoint: () -> Unit,
+    completedDeltaRecord: CompletedMigrationRecord?,
+    onStartDeltaSync: (CompletedMigrationRecord) -> Unit,
+    onDismissDelta: () -> Unit,
     onStartReceive: () -> Unit,
     onStartSend: () -> Unit,
     onOpenGoogleBridge: () -> Unit,
@@ -1401,6 +1494,12 @@ private fun AndroidHomeView(
             checkpoint = resumableCheckpoint,
             onResume = { onResumeCheckpoint(resumableCheckpoint) },
             onDismiss = onDismissCheckpoint
+        )
+    } else if (completedDeltaRecord != null) {
+        DeltaCatchUpCard(
+            record = completedDeltaRecord,
+            onStartDeltaSync = { onStartDeltaSync(completedDeltaRecord) },
+            onDismiss = onDismissDelta
         )
     }
 
@@ -1987,6 +2086,10 @@ private fun SenderCategoriesWizardView(
     onRefreshDocumentCheck: () -> Unit,
     onClearPickedDocuments: () -> Unit,
     onChangeDevice: () -> Unit,
+    activeDeltaBaseline: CompletedMigrationRecord?,
+    forceBatteryTriage: Boolean,
+    onToggleForceBatteryTriage: (Boolean) -> Unit,
+    onClearDeltaBaseline: () -> Unit,
     onStartTransfer: () -> Unit
 ) {
     val wizardContext = LocalContext.current
@@ -2375,6 +2478,40 @@ private fun SenderCategoriesWizardView(
         }
     }
 
+    val batterySnap = remember(wizardContext) { AndroidBatteryTriageMonitor.readSnapshot(wizardContext) }
+    if (activeDeltaBaseline != null) {
+        DirectSwitchCard(padding = 12.dp, spacing = 6.dp) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Modalità Delta attiva (solo novità)",
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.teal
+                    )
+                    Text(
+                        text = "Verranno inviati solo i nuovi elementi creati dopo l'ultima copia verso ${activeDeltaBaseline.peerName}.",
+                        fontSize = 11.5.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                }
+                TextButton(onClick = onClearDeltaBaseline) {
+                    Text("Copia tutto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                }
+            }
+        }
+    }
+
+    BatteryTriageToggleCard(
+        battery = batterySnap,
+        enabled = forceBatteryTriage,
+        onToggle = onToggleForceBatteryTriage
+    )
+
     val isOnlyWhatsAppSelected = !isCrossOs && categories.whatsAppVault &&
         !categories.contacts && !categories.photos && !categories.videos &&
         !categories.calendars && !categories.sms && !categories.callLogs &&
@@ -2394,6 +2531,11 @@ private fun SenderCategoriesWizardView(
 private fun TransferProgressWizardView(
     progress: LiveTransferProgress,
     isReceiver: Boolean,
+    acknowledgedAuditAppIds: Set<String>,
+    isRefreshingAudit: Boolean,
+    onToggleAcknowledgeAudit: (String) -> Unit,
+    onRefreshLiveAudit: () -> Unit,
+    onLaunchCloudSaveOverflow: () -> Unit,
     onApplySpaceRelief: (SpaceReliefActionKind) -> Unit,
     onRetrySkippedOnly: (List<String>) -> Unit,
     onFinish: () -> Unit
@@ -2593,8 +2735,15 @@ private fun TransferProgressWizardView(
             }
         }
 
-        Row(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             ConnectionMediumPill(medium = progress.connectionMedium)
+            if (progress.batteryTriageActive) {
+                BatteryTriageActivePill()
+            }
         }
     }
 
@@ -2635,6 +2784,18 @@ private fun TransferProgressWizardView(
         if (progress.importedCallLogs > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.Call, DirectSwitchTheme.teal, "Chiamate salvate", "${progress.importedCallLogs}")
+        }
+        if (progress.healedTimelineCount > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.Schedule, DirectSwitchTheme.blue, "Date EXIF ricostruite", "${progress.healedTimelineCount}")
+        }
+        if (progress.convertedLiveMotionCount > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.Image, DirectSwitchTheme.teal, "Live / Motion Photo preservate", "${progress.convertedLiveMotionCount}")
+        }
+        if (progress.healedCodecCount > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.AudioFile, DirectSwitchTheme.indigo, "Audio convertiti compatibili iOS", "${progress.healedCodecCount}")
         }
         if (progress.skippedDuplicates > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
@@ -2762,6 +2923,15 @@ private fun TransferProgressWizardView(
         )
     }
 
+    val overflowPlan = progress.overflowBridgePlan
+    if (!isReceiver && overflowPlan != null && reliefOffer == null && (progress.isCompleted || progress.errorMessage == null)) {
+        OverflowBridgeCloudSaveCard(
+            plan = overflowPlan,
+            statusNotice = progress.overflowBridgeStagedNotice,
+            onLaunchCloudSaveOverflow = onLaunchCloudSaveOverflow
+        )
+    }
+
     if (progress.skippedItems.isNotEmpty()) {
         SkippedItemsReportCard(
             items = progress.skippedItems,
@@ -2774,6 +2944,19 @@ private fun TransferProgressWizardView(
         DirectSwitchCard(padding = 14.dp) {
             Text(progress.errorMessage, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
         }
+    }
+
+    val auditReport = progress.decommissionAuditReport
+    if (!isReceiver && progress.isCompleted && auditReport != null) {
+        val senderModel = remember { "${Build.MANUFACTURER} ${Build.MODEL}".trim() }
+        DecommissionAuditCard(
+            report = auditReport,
+            senderDeviceName = senderModel,
+            acknowledgedAppIds = acknowledgedAuditAppIds,
+            isRefreshing = isRefreshingAudit,
+            onToggleAcknowledge = onToggleAcknowledgeAudit,
+            onRefreshLiveAudit = onRefreshLiveAudit
+        )
     }
 
     if (progress.isCompleted) {

@@ -171,6 +171,13 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var skippedItems: [SkippedTransferItemRecord] = []
     @Published var spaceReliefOffer: SpaceReliefOffer? = nil
     @Published var resumableCheckpoint: TransferCheckpointRecord? = TransferCheckpointStore.load()
+    @Published var completedDeltaRecord: CompletedMigrationRecord? = CompletedMigrationStore.load()
+    @Published var healedTimelineCount: Int = 0
+    @Published var batteryTriageActive: Bool = false
+    @Published var deltaSyncModeActive: Bool = false
+    @Published var decommissionAuditReport: DecommissionAuditReport? = nil
+    @Published var overflowBridgePlan: OverflowSplitPlan? = nil
+    @Published var overflowBridgeNotice: String? = nil
     @Published var isSessionConnected: Bool = false
     @Published var isTransferring: Bool = false
     @Published var isBackgroundKeepAliveActive: Bool = false
@@ -233,6 +240,67 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var senderProgressAccounting: TransferProgressAccounting? = nil
     private var senderActiveUploadedIds: Set<String> = []
     private var senderSucceededDocURLs: [URL] = []
+    private var lastAuditSessionId: String = ""
+    private var lastAuditPeerName: String = ""
+    private var lastAuditPeerPlatform: DevicePlatform = .ANDROID
+    private var lastAuditSenderApps: [InstalledAppRecord] = []
+    private var lastAuditReceiverAppIds: [String]? = nil
+    private var lastAuditReceiverAppNames: [String] = []
+    private var lastAuditContactsMigrated: Bool = false
+    private var lastAuditPhantomCount: Int = 0
+    private var lastAuditSkippedCount: Int = 0
+    private var lastAuditCompletedFiles: Int = 0
+    private var lastAuditTransferredBytes: Int64 = 0
+
+    func dismissCompletedDeltaRecord() {
+        CompletedMigrationStore.clear()
+        completedDeltaRecord = nil
+    }
+
+    func launchOverflowBridgeToCloudSave() {
+        guard let plan = overflowBridgePlan else { return }
+        let res = iOSCloudSaveOverflowBridge.launchCloudSaveOverflow(
+            plan: plan,
+            targetDeviceName: peerName.isEmpty ? "Nuovo telefono" : peerName
+        )
+        overflowBridgeNotice = res.message
+    }
+
+    func refreshLiveDecommissionAudit(
+        qrPayload: QrPairingPayload?,
+        acknowledgedAppIds: Set<String> = []
+    ) async {
+        var receiverIds = lastAuditReceiverAppIds
+        var receiverNames = lastAuditReceiverAppNames
+        if let qr = qrPayload,
+           let activeIp = await findReachableIp(ips: qr.ips, port: qr.port),
+           let key = try? DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qr.sessionKeyHex) {
+            let req = DecommissionAuditRequest(sessionId: qr.sessionId)
+            if let data = try? await postEncryptedJson(url: "http://\(activeIp):\(qr.port)/v1/decommission-audit", payload: req, key: key),
+               let resp = try? JSONDecoder().decode(DecommissionAuditResponse.self, from: data) {
+                receiverIds = resp.installedAppIds
+                receiverNames = resp.installedAppNames
+                lastAuditReceiverAppIds = receiverIds
+                lastAuditReceiverAppNames = receiverNames
+            }
+        }
+        let localContacts = iOSDecommissionScanner.countLocalOnlyContacts()
+        decommissionAuditReport = DecommissionReadinessEvaluator.evaluate(
+            sessionId: lastAuditSessionId.isEmpty ? (qrPayload?.sessionId ?? "") : lastAuditSessionId,
+            peerName: lastAuditPeerName.isEmpty ? (qrPayload?.receiverName ?? peerName) : lastAuditPeerName,
+            peerPlatform: lastAuditPeerPlatform,
+            senderInstalledApps: lastAuditSenderApps,
+            receiverInstalledAppIds: receiverIds,
+            receiverInstalledAppNames: receiverNames,
+            localOnlyContactsCount: localContacts,
+            contactsWereMigrated: lastAuditContactsMigrated,
+            icloudPhantomMediaCount: lastAuditPhantomCount,
+            unresolvedSkippedItemsCount: lastAuditSkippedCount,
+            completedFilesCount: lastAuditCompletedFiles,
+            transferredBytes: lastAuditTransferredBytes,
+            acknowledgedAppIds: acknowledgedAppIds
+        )
+    }
     private var preparationAnimDone: Bool = false
     private var preparationAnimWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -1459,6 +1527,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 ? "Sto preparando la ricezione da \(req.senderName)..."
                 : "Spazio su iPhone insufficiente per completare il trasferimento."
 
+            let receiverKnownApps = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly()
             let resp = HandshakeResponse(
                 accepted: allowProceedToManifest,
                 receiverName: UIDevice.current.name,
@@ -1466,7 +1535,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 freeStorageBytes: free,
                 licenseTier: tier,
                 hasEnoughSpace: enough || allowProceedToManifest,
-                statusMessage: allowProceedToManifest ? "iPhone pronto a ricevere" : "Spazio su iPhone insufficiente"
+                statusMessage: allowProceedToManifest ? "iPhone pronto a ricevere" : "Spazio su iPhone insufficiente",
+                supportsCrossOsLiveMotion: true,
+                receiverInstalledAppIds: receiverKnownApps.map(\.packageName)
             )
             if let encoded = try? JSONEncoder().encode(resp),
                let jsonStr = String(data: encoded, encoding: .utf8) {
@@ -1477,6 +1548,31 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
         guard handshakeAuthenticated else {
             sendPlainJson(connection: connection, status: 401, json: #"{"error":"session_not_authenticated"}"#)
+            return
+        }
+
+        if method == "POST" && path == "/v1/decommission-audit" {
+            if !body.isEmpty {
+                guard let plain = try? DirectSwitchCrypto.openJsonEnvelope(body, key: key),
+                      let reqData = plain.data(using: .utf8),
+                      let req = try? JSONDecoder().decode(DecommissionAuditRequest.self, from: reqData),
+                      req.sessionId == activeSessionId else {
+                    sendPlainJson(connection: connection, status: 401, json: #"{"error":"audit_unauthorized"}"#)
+                    return
+                }
+            }
+            let installed = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly()
+            let auditResp = DecommissionAuditResponse(
+                receiverName: UIDevice.current.name,
+                receiverPlatform: .IOS,
+                installedAppIds: installed.map(\.packageName),
+                installedAppNames: installed.map(\.appName),
+                freeStorageBytes: iOSStorageCapacityChecker.freeStorageBytes()
+            )
+            if let encoded = try? JSONEncoder().encode(auditResp),
+               let jsonStr = String(data: encoded, encoding: .utf8) {
+                sendEncryptedJson(connection: connection, status: 200, plainJson: jsonStr, key: key)
+            }
             return
         }
 
@@ -1642,7 +1738,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 sendPlainJson(connection: connection, status: 404, json: #"{"error":"item_not_found"}"#)
                 return
             }
-            let rawLiveExt = URL(fileURLWithPath: item.livePhotoVideoFileName ?? "live.mov").pathExtension
+            let headerLiveExt = headers["x-ds-live-ext"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let rawLiveExt = !headerLiveExt.isEmpty
+                ? headerLiveExt
+                : URL(fileURLWithPath: item.livePhotoVideoFileName ?? "live.mov").pathExtension
             let liveExt = rawLiveExt.isEmpty ? "mov" : rawLiveExt
             let tempLivePlainURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ds_live_dec_\(UUID().uuidString).\(liveExt)")
@@ -1703,18 +1802,35 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 return
             }
 
-            let reconciledMedia: (fileName: String, mimeType: String, effectiveExt: String) =
-                (item.category == .PHOTOS || item.category == .VIDEOS)
-                ? MediaFallbackNaming.reconcileFileNameAndMime(
-                    fileName: item.fileName,
-                    originalMime: item.mimeType,
-                    actualExtension: headers["x-ds-actual-ext"]
-                )
-                : (
+            let actualExtHeader = headers["x-ds-actual-ext"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let reconciledMedia: (fileName: String, mimeType: String, effectiveExt: String) = {
+                if item.category == .PHOTOS || item.category == .VIDEOS {
+                    return MediaFallbackNaming.reconcileFileNameAndMime(
+                        fileName: item.fileName,
+                        originalMime: item.mimeType,
+                        actualExtension: actualExtHeader
+                    )
+                }
+                if item.category == .AUDIO && actualExtHeader == "m4a" {
+                    let stem = URL(fileURLWithPath: item.fileName).deletingPathExtension().lastPathComponent
+                    let safeStem = stem.isEmpty ? "audio_memo" : stem
+                    return ("\(safeStem).m4a", "audio/mp4", "m4a")
+                }
+                return (
                     fileName: item.fileName,
                     mimeType: item.mimeType,
                     effectiveExt: URL(fileURLWithPath: item.fileName).pathExtension.lowercased()
                 )
+            }()
+            if item.category == .PHOTOS || item.category == .VIDEOS {
+                let healedCheck = MediaTimelineHealer.resolveBestCaptureEpochMillis(
+                    fileName: reconciledMedia.fileName,
+                    reportedEpochMillis: item.capturedEpochMillis
+                )
+                if healedCheck.wasHealedFromFilename {
+                    healedTimelineCount += 1
+                }
+            }
             let effectiveItem = ManifestItem(
                 id: item.id,
                 category: item.category,
@@ -2255,7 +2371,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         pickedAudioFiles: [(ManifestItem, URL)] = [],
         mediaFilters: MediaTransferFilterOptions = MediaTransferFilterOptions(),
         onlyRetryItemIds: Set<String>? = nil,
-        isResume: Bool = false
+        isResume: Bool = false,
+        deltaBaseline: CompletedMigrationRecord? = nil,
+        forceBatteryTriage: Bool = false,
+        preserveOverflowBridgePlan: Bool = false
     ) async {
         Self.raiseOpenFileDescriptorLimitIfNeeded()
         var didAuthenticateSession = false
@@ -2410,15 +2529,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if includeContacts && !isResume {
                 updatePreparationItem(id: "contacts", targetCount: contacts.count, isReady: true)
             }
-            let calendars = (includeCalendars && previouslySentIds.isEmpty)
+            let rawCalendars = (includeCalendars && previouslySentIds.isEmpty)
                 ? iOSCalendarMigrator.readEvents(upToDate: calendarsUpToTodayOnly ? nowCutoff : nil)
                 : []
+            let calendars = deltaBaseline.map { CompletedMigrationStore.filterDeltaCalendars(rawCalendars, record: $0) } ?? rawCalendars
             if includeCalendars && !isResume {
                 updatePreparationItem(id: "calendars", targetCount: calendars.count, isReady: true)
             }
-            let reminders = (includeReminders && previouslySentIds.isEmpty)
+            let rawReminders = (includeReminders && previouslySentIds.isEmpty)
                 ? await iOSRemindersMigrator.readReminders(upToDate: remindersUpToTodayOnly ? nowCutoff : nil)
                 : []
+            let reminders = deltaBaseline.map { CompletedMigrationStore.filterDeltaReminders(rawReminders, record: $0) } ?? rawReminders
             if includeReminders && !isResume {
                 updatePreparationItem(id: "reminders", targetCount: reminders.count, isReady: true)
             }
@@ -2426,12 +2547,26 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 includePhotos: includePhotos,
                 includeVideos: includeVideos
             )
-            let scannedAssets = scanResult.items.filter { entry in
+            let filteredByUserAssets = scanResult.items.filter { entry in
                 if let retrySet = onlyRetryItemIds, !retrySet.isEmpty {
                     return retrySet.contains(entry.item.id)
                 }
                 return iOSPhotoFilterHelper.matchesFilter(item: entry.item, options: mediaFilters)
             }
+            let deltaFilteredAssets = deltaBaseline.map {
+                CompletedMigrationStore.filterDeltaEntries(filteredByUserAssets, record: $0) { $0.item }
+            } ?? filteredByUserAssets
+            let batterySnap = BatteryTriagePlanner.readCurrentBatterySnapshot()
+            let triageNow = forceBatteryTriage || batterySnap.recommendsAutoTriage
+            batteryTriageActive = triageNow
+            deltaSyncModeActive = (deltaBaseline != nil)
+            if !preserveOverflowBridgePlan {
+                overflowBridgePlan = nil
+                overflowBridgeNotice = nil
+            }
+            let scannedAssets = triageNow
+                ? BatteryTriagePlanner.sortByTriagePriority(deltaFilteredAssets) { $0.item }
+                : deltaFilteredAssets
             iCloudOptimizedSkippedHint = scanResult.iCloudOptimizedCount
             if includePhotos && !isResume {
                 let pCount = scannedAssets.filter { $0.item.category == .PHOTOS }.count
@@ -2448,12 +2583,18 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 includeWhatsAppVault: isTargetedRetry ? false : includeWhatsAppVault
             )
             let activeAudioEntries = includeAudio ? pickedAudioFiles : []
-            let filteredPickedDocs = (collectedDocs.items + activeAudioEntries).filter { pair in
+            let rawFilteredDocs = (collectedDocs.items + activeAudioEntries).filter { pair in
                 if let retrySet = onlyRetryItemIds, !retrySet.isEmpty {
                     return retrySet.contains(pair.0.id)
                 }
                 return true
             }
+            let deltaFilteredDocs = deltaBaseline.map {
+                CompletedMigrationStore.filterDeltaEntries(rawFilteredDocs, record: $0) { $0.0 }
+            } ?? rawFilteredDocs
+            let filteredPickedDocs = triageNow
+                ? BatteryTriagePlanner.sortByTriagePriority(deltaFilteredDocs) { $0.0 }
+                : deltaFilteredDocs
             if includeDocuments && !isResume {
                 let dCount = filteredPickedDocs.filter { $0.0.category == .DOCUMENTS }.count
                 updatePreparationItem(id: "documents", targetCount: dCount, isReady: true)
@@ -2499,11 +2640,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             guard hsResp.accepted && hsResp.hasEnoughSpace else {
                 sessionStage = .transferring
                 markPreparationAnimationCompleted()
+                let pendingItems = allItems.filter { !currentSentIds.contains($0.id) }
                 spaceReliefOffer = SpaceReliefPlanner.evaluate(
                     receiverName: hsResp.receiverName,
                     availableFreeBytes: hsResp.freeStorageBytes,
-                    items: allItems.filter { !currentSentIds.contains($0.id) }
+                    items: pendingItems
                 )
+                let split = OverflowBridgePlanner.buildSplitPlan(
+                    availableFreeBytes: hsResp.freeStorageBytes,
+                    items: pendingItems
+                )
+                overflowBridgePlan = split.overflowItems.isEmpty ? nil : split
                 errorMessage = hsResp.statusMessage.isEmpty
                     ? "Spazio di archiviazione insufficiente su \(hsResp.receiverName)."
                     : hsResp.statusMessage
@@ -2536,11 +2683,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             } catch {
                 let nsErr = error as NSError
                 if nsErr.code == 507 || error.localizedDescription.localizedCaseInsensitiveContains("spazio") {
+                    let pendingItems = allItems.filter { !currentSentIds.contains($0.id) }
                     spaceReliefOffer = SpaceReliefPlanner.evaluate(
                         receiverName: hsResp.receiverName,
                         availableFreeBytes: hsResp.freeStorageBytes,
-                        items: allItems.filter { !currentSentIds.contains($0.id) }
+                        items: pendingItems
                     )
+                    let split = OverflowBridgePlanner.buildSplitPlan(
+                        availableFreeBytes: hsResp.freeStorageBytes,
+                        items: pendingItems
+                    )
+                    overflowBridgePlan = split.overflowItems.isEmpty ? nil : split
                 }
                 throw error
             }
@@ -2576,7 +2729,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             let remainingPrimaryBytes = assetsToUpload.reduce(Int64(0)) { $0 + $1.item.sizeBytes }
                 + docsToUpload.reduce(Int64(0)) { $0 + $1.0.sizeBytes }
-            let remainingLiveBytes: Int64 = hsResp.receiverPlatform == .IOS
+            let remainingLiveBytes: Int64 = (hsResp.receiverPlatform == .IOS || hsResp.supportsCrossOsLiveMotion == true)
                 ? assetsToUpload.reduce(Int64(0)) { $0 + $1.liveVideoBytes }
                 : 0
 
@@ -2733,7 +2886,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
             @Sendable
             func uploadSingleMediaAsset(_ entry: iOSPhotoKitMigrator.ScannedLibraryAssetEntry) async throws {
-                let isIosLiveTarget = (hsResp.receiverPlatform == .IOS && entry.item.isLivePhoto == true)
+                let isIosLiveTarget = ((hsResp.receiverPlatform == .IOS || hsResp.supportsCrossOsLiveMotion == true) && entry.item.isLivePhoto == true)
                 let estLiveBytes = isIosLiveTarget ? entry.liveVideoBytes : 0
                 // Le foto/video ottimizzati su iCloud (o file >= 50 MB) prendono tutti e 3 i permessi:
                 // così il download da iCloud avviene uno alla volta a banda piena senza contesa né timeout!
@@ -3098,6 +3251,61 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             currentItemName = ""
             etaLabel = nil
             senderUploadedIdsBySession.removeValue(forKey: qrPayload.sessionId)
+
+            // Salva impronta di migrazione completata (valida 30 giorni) per Recupero Delta
+            if !isTargetedRetry {
+                let prevKeys = deltaBaseline?.transferredDedupKeys ?? []
+                let sentKeys = allItems
+                    .filter { senderActiveUploadedIds.contains($0.id) }
+                    .map(\.dedupKey)
+                let deltaRec = CompletedMigrationRecord(
+                    sessionId: qrPayload.sessionId,
+                    peerName: hsResp.receiverName,
+                    peerPlatform: hsResp.receiverPlatform,
+                    completedAtEpochMillis: Int64(Date().timeIntervalSince1970 * 1000.0),
+                    transferredFilesCount: completedItems,
+                    transferredBytes: transferredBytesCount,
+                    transferredDedupKeys: Array(Set(prevKeys + sentKeys)),
+                    lastScope: transferScope
+                )
+                CompletedMigrationStore.save(deltaRec)
+                completedDeltaRecord = deltaRec
+            }
+
+            // Audit Anti-Lockout Dinamico (Banche/SPID/2FA/Contatti solo iPhone/Foto solo iCloud)
+            let detectedKnown = iOSInstalledAppsScanner.scanLocallyInstalledProbesOnly()
+            let auditSenderApps = Array(
+                Dictionary(
+                    (detectedKnown + installedApps + photoMetadataDiscoveredApps).map { ($0.packageName.lowercased(), $0) },
+                    uniquingKeysWith: { first, _ in first }
+                ).values
+            )
+            let localContactsCount = iOSDecommissionScanner.countLocalOnlyContacts()
+            let iCloudPhantomSkipped = skippedItems.filter { $0.reason.localizedCaseInsensitiveContains("icloud") }.count
+            lastAuditSessionId = qrPayload.sessionId
+            lastAuditPeerName = hsResp.receiverName
+            lastAuditPeerPlatform = hsResp.receiverPlatform
+            lastAuditSenderApps = auditSenderApps
+            lastAuditReceiverAppIds = hsResp.receiverInstalledAppIds
+            lastAuditReceiverAppNames = []
+            lastAuditContactsMigrated = includeContacts && (mergedContacts > 0 || contactsAlreadyPresentCount > 0 || contacts.isEmpty)
+            lastAuditPhantomCount = iCloudPhantomSkipped
+            lastAuditSkippedCount = failedItemsCount
+            lastAuditCompletedFiles = completedItems
+            lastAuditTransferredBytes = transferredBytesCount
+            decommissionAuditReport = DecommissionReadinessEvaluator.evaluate(
+                sessionId: qrPayload.sessionId,
+                peerName: hsResp.receiverName,
+                peerPlatform: hsResp.receiverPlatform,
+                senderInstalledApps: auditSenderApps,
+                receiverInstalledAppIds: hsResp.receiverInstalledAppIds,
+                localOnlyContactsCount: localContactsCount,
+                contactsWereMigrated: lastAuditContactsMigrated,
+                icloudPhantomMediaCount: iCloudPhantomSkipped,
+                unresolvedSkippedItemsCount: failedItemsCount,
+                completedFilesCount: completedItems,
+                transferredBytes: transferredBytesCount
+            )
             senderUploadedBytesBySession.removeValue(forKey: qrPayload.sessionId)
             if skippedItems.isEmpty {
                 TransferCheckpointStore.clear()

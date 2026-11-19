@@ -125,6 +125,7 @@ object TransferCheckpointStore {
 }
 
 enum class SpaceReliefActionKind {
+    OVERFLOW_OLDER_TO_CLOUDSAVE,
     EXCLUDE_HEAVY_VIDEOS_300MB,
     LAST_YEAR_MEDIA_ONLY,
     EXCLUDE_ALL_VIDEOS
@@ -179,6 +180,31 @@ object SpaceReliefPlanner {
             .sumOf { it.sizeBytes.coerceAtLeast(0L) }
 
         val options = buildList {
+            if (olderMediaBytes > 0L) {
+                val finalBytes = (totalNeeded - olderMediaBytes).coerceAtLeast(0L)
+                add(
+                    SpaceReliefOption(
+                        kind = SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE,
+                        title = "Ultimo anno sul nuovo telefono + resto cifrato su CloudSave",
+                        subtitle = "Copia ${TransferDisplayFormatting.formatBytes(finalBytes)} ora e parcheggia ${TransferDisplayFormatting.formatBytes(olderMediaBytes)} su CloudSave (zero perdite)",
+                        estimatedSavingsBytes = olderMediaBytes,
+                        estimatedFinalBytes = finalBytes,
+                        fitsAvailableSpace = finalBytes <= usableFree
+                    )
+                )
+            } else if (heavyVideoBytes > 0L) {
+                val finalBytes = (totalNeeded - heavyVideoBytes).coerceAtLeast(0L)
+                add(
+                    SpaceReliefOption(
+                        kind = SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE,
+                        title = "Copia tutto tranne video > 300 MB + parcheggiali su CloudSave",
+                        subtitle = "Copia ${TransferDisplayFormatting.formatBytes(finalBytes)} ora e salva ${TransferDisplayFormatting.formatBytes(heavyVideoBytes)} cifrati su CloudSave",
+                        estimatedSavingsBytes = heavyVideoBytes,
+                        estimatedFinalBytes = finalBytes,
+                        fitsAvailableSpace = finalBytes <= usableFree
+                    )
+                )
+            }
             if (heavyVideoBytes > 0L) {
                 val finalBytes = (totalNeeded - heavyVideoBytes).coerceAtLeast(0L)
                 add(

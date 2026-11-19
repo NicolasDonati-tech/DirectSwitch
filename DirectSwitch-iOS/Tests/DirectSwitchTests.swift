@@ -1843,4 +1843,92 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(repDecoded.callLogsImportedCount, 1)
         XCTAssertEqual(repDecoded.transferredBytes, Int64(sampleBytes.count))
     }
+
+    func testTimelineHealerBatteryTriageDeltaAuditAndOverflowBridge() {
+        let nowMs: Int64 = 1_795_000_000_000
+
+        // 1. Timeline Healer
+        let healedWa = MediaTimelineHealer.resolveBestCaptureEpochMillis(
+            fileName: "IMG-20210814-WA0023.jpg",
+            reportedEpochMillis: nowMs - 1_000,
+            nowEpochMillis: nowMs
+        )
+        XCTAssertTrue(healedWa.wasHealedFromFilename)
+        XCTAssertEqual(healedWa.sourcePattern, "whatsapp_wa")
+
+        let authenticOld: Int64 = 1_600_000_000_000
+        let untouched = MediaTimelineHealer.resolveBestCaptureEpochMillis(
+            fileName: "IMG-20210814-WA0023.jpg",
+            reportedEpochMillis: authenticOld,
+            nowEpochMillis: nowMs
+        )
+        XCTAssertFalse(untouched.wasHealedFromFilename)
+        XCTAssertEqual(untouched.epochMillis, authenticOld)
+
+        // 2. Battery Triage
+        XCTAssertTrue(BatteryTriagePlanner.shouldAutoActivate(batteryPercent: 11, isCharging: false))
+        XCTAssertFalse(BatteryTriagePlanner.shouldAutoActivate(batteryPercent: 11, isCharging: true))
+        let triageItems: [ManifestItem] = [
+            ManifestItem(id: "v_big", category: .VIDEOS, fileName: "4k.mov", relativeAlbumOrFolder: "Camera", sizeBytes: 300_000_000, capturedEpochMillis: 5000, dedupKey: "k1", mimeType: "video/quicktime"),
+            ManifestItem(id: "p_fav", category: .PHOTOS, fileName: "fav.heic", relativeAlbumOrFolder: "Camera", sizeBytes: 3_000_000, capturedEpochMillis: 2000, dedupKey: "k2", mimeType: "image/heic", isFavorite: true),
+            ManifestItem(id: "pwd", category: .DOCUMENTS, fileName: "passwords.csv", relativeAlbumOrFolder: "Password_e_Accessi", sizeBytes: 12_000, capturedEpochMillis: 1000, dedupKey: "k3", mimeType: "text/csv")
+        ]
+        let sortedIds = BatteryTriagePlanner.sortByTriagePriority(triageItems) { $0 }.map(\.id)
+        XCTAssertEqual(sortedIds, ["pwd", "p_fav", "v_big"])
+
+        // 3. Delta Catch-Up Store
+        let tmpDelta = FileManager.default.temporaryDirectory.appendingPathComponent("ds_delta_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmpDelta) }
+        let completedAt: Int64 = 1_790_000_000_000
+        let rec = CompletedMigrationRecord(
+            sessionId: "ds_1",
+            peerName: "Pixel 9",
+            peerPlatform: .ANDROID,
+            completedAtEpochMillis: completedAt,
+            transferredFilesCount: 50,
+            transferredBytes: 100_000_000,
+            transferredDedupKeys: ["seen_1"],
+            lastScope: ActiveTransferScope(contacts: true, photos: true)
+        )
+        CompletedMigrationStore.save(rec, to: tmpDelta)
+        let loaded = CompletedMigrationStore.load(from: tmpDelta, nowEpochMillis: completedAt + 2 * 86_400_000)
+        XCTAssertNotNil(loaded)
+        let deltaCandidates: [ManifestItem] = [
+            ManifestItem(id: "old", category: .PHOTOS, fileName: "old.jpg", relativeAlbumOrFolder: "", sizeBytes: 100, capturedEpochMillis: completedAt - 86_400_000, dedupKey: "u1", mimeType: "image/jpeg"),
+            ManifestItem(id: "seen", category: .PHOTOS, fileName: "seen.jpg", relativeAlbumOrFolder: "", sizeBytes: 100, capturedEpochMillis: completedAt + 60_000, dedupKey: "seen_1", mimeType: "image/jpeg"),
+            ManifestItem(id: "new", category: .PHOTOS, fileName: "new.jpg", relativeAlbumOrFolder: "", sizeBytes: 100, capturedEpochMillis: completedAt + 600_000, dedupKey: "brand_new", mimeType: "image/jpeg")
+        ]
+        XCTAssertEqual(CompletedMigrationStore.filterDeltaEntries(deltaCandidates, record: loaded!) { $0 }.map(\.id), ["new"])
+
+        // 4. Decommission Audit Cross-OS
+        let senderApps = [
+            InstalledAppRecord(packageName: "it.poste.postebuy2", appName: "PosteID"),
+            InstalledAppRecord(packageName: "com.google.Authenticator", appName: "Google Authenticator")
+        ]
+        let redAudit = DecommissionReadinessEvaluator.evaluate(
+            sessionId: "ds_audit",
+            peerName: "Pixel 9",
+            peerPlatform: .ANDROID,
+            senderInstalledApps: senderApps,
+            receiverInstalledAppIds: ["posteitaliane.posteapp.appposteid"],
+            localOnlyContactsCount: 2,
+            contactsWereMigrated: true
+        )
+        XCTAssertEqual(redAudit.readinessLevel, .blockedRed)
+        XCTAssertEqual(redAudit.verifiedCriticalApps.count, 1)
+        XCTAssertEqual(redAudit.missingCriticalApps.count, 1)
+
+        // 5. Overflow Bridge
+        let oldMs = nowMs - 500 * 86_400_000
+        let recentMs = nowMs - 20 * 86_400_000
+        let splitItems: [ManifestItem] = [
+            ManifestItem(id: "r1", category: .PHOTOS, fileName: "r1.heic", relativeAlbumOrFolder: "", sizeBytes: 300_000_000, capturedEpochMillis: recentMs, dedupKey: "r1", mimeType: "image/heic"),
+            ManifestItem(id: "o1", category: .VIDEOS, fileName: "o1.mov", relativeAlbumOrFolder: "", sizeBytes: 900_000_000, capturedEpochMillis: oldMs, dedupKey: "o1", mimeType: "video/quicktime")
+        ]
+        let offer = SpaceReliefPlanner.evaluate(receiverName: "Pixel 9", availableFreeBytes: 700_000_000, items: splitItems, nowEpochMillis: nowMs)
+        XCTAssertTrue(offer?.options.contains(where: { $0.kind == .overflowOlderToCloudSave && $0.fitsAvailableSpace }) == true)
+        let split = OverflowBridgePlanner.buildSplitPlan(availableFreeBytes: 700_000_000, items: splitItems, nowEpochMillis: nowMs)
+        XCTAssertEqual(split.directItems.map(\.id), ["r1"])
+        XCTAssertEqual(split.overflowItems.map(\.id), ["o1"])
+    }
 }

@@ -129,6 +129,7 @@ enum TransferCheckpointStore {
 
 /// Proposta interattiva dell'Assistente "Salva-Spazio" quando il ricevente ha meno GB liberi del necessario.
 enum SpaceReliefActionKind: String, Codable, Equatable, Sendable {
+    case overflowOlderToCloudSave
     case compactVideosHevc1080p
     case excludeHeavyVideos300Mb
     case lastYearMediaOnly
@@ -179,6 +180,31 @@ enum SpaceReliefPlanner {
         }.reduce(Int64(0)) { $0 + max(0, $1.sizeBytes) }
 
         var options: [SpaceReliefOption] = []
+        if olderMediaBytes > 0 {
+            let finalBytes = max(0, totalNeeded - olderMediaBytes)
+            options.append(
+                SpaceReliefOption(
+                    kind: .overflowOlderToCloudSave,
+                    title: "Ultimo anno sul nuovo telefono + resto cifrato su CloudSave",
+                    subtitle: "Copia \(TransferDisplayFormatting.formatBytes(finalBytes)) ora e parcheggia \(TransferDisplayFormatting.formatBytes(olderMediaBytes)) su CloudSave (zero perdite)",
+                    estimatedSavingsBytes: olderMediaBytes,
+                    estimatedFinalBytes: finalBytes,
+                    fitsAvailableSpace: finalBytes <= usableFree
+                )
+            )
+        } else if heavyVideoBytes > 0 {
+            let finalBytes = max(0, totalNeeded - heavyVideoBytes)
+            options.append(
+                SpaceReliefOption(
+                    kind: .overflowOlderToCloudSave,
+                    title: "Copia tutto tranne video > 300 MB + parcheggiali su CloudSave",
+                    subtitle: "Copia \(TransferDisplayFormatting.formatBytes(finalBytes)) ora e salva \(TransferDisplayFormatting.formatBytes(heavyVideoBytes)) cifrati su CloudSave",
+                    estimatedSavingsBytes: heavyVideoBytes,
+                    estimatedFinalBytes: finalBytes,
+                    fitsAvailableSpace: finalBytes <= usableFree
+                )
+            )
+        }
         if videoBytes > 50 * 1024 * 1024 {
             let saved = Int64(Double(videoBytes) * 0.55)
             let finalBytes = max(0, totalNeeded - saved)

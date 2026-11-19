@@ -674,3 +674,274 @@ struct PostMigrationChecklistCard: View {
         )
     }
 }
+
+// MARK: - Recupero Delta 14–30 Giorni ("Copia solo le novità")
+
+struct DeltaCatchUpCard: View {
+    let record: CompletedMigrationRecord
+    var onStartDeltaSync: () -> Void
+    var onDismiss: () -> Void
+
+    private var formattedDate: String {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "it_IT")
+        df.dateFormat = "dd/MM HH:mm"
+        return df.string(from: Date(timeIntervalSince1970: TimeInterval(record.completedAtEpochMillis) / 1000.0))
+    }
+
+    var body: some View {
+        let days = record.daysSinceCompleted()
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "clock.arrow.circlepath", color: AppleTheme.teal)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Recupero Delta — Solo novità dal \(formattedDate)")
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("Già migrato verso \(record.peerName) (\(days == 0 ? "oggi" : "\(days) gg fa")). Copia solo foto, calendari e file nuovi.")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 10) {
+                Button(action: onStartDeltaSync) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("Copia solo novità")
+                            .font(.system(size: 13.5, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(AppleTheme.teal)
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onDismiss) {
+                    Text("Chiudi")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(AppleTheme.textSecondary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 40)
+                        .background(AppleTheme.inputSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(AppleTheme.teal.opacity(0.45), lineWidth: 1.1)
+        )
+    }
+}
+
+// MARK: - Triage Batteria Critica
+
+struct BatteryTriageActivePill: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "battery.25")
+                .font(.system(size: 11.5, weight: .semibold))
+            Text("Triage Batteria Critica")
+                .font(.system(size: 11.5, weight: .semibold))
+        }
+        .foregroundColor(AppleTheme.orange)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(AppleTheme.orange.opacity(0.14))
+        .clipShape(Capsule())
+    }
+}
+
+// MARK: - Audit Anti-Lockout Dinamico + Certificato Pronto per Reset
+
+struct DecommissionAuditCard: View {
+    let report: DecommissionAuditReport
+    let senderDeviceName: String
+    let acknowledgedAppIds: Set<String>
+    let isRefreshing: Bool
+    var onToggleAcknowledge: (String) -> Void
+    var onRefreshLiveAudit: () -> Void
+
+    private var accent: Color {
+        switch report.readinessLevel {
+        case .blockedRed: return AppleTheme.red
+        case .cautionAmber: return AppleTheme.orange
+        case .readyForResetGreen: return AppleTheme.green
+        }
+    }
+
+    private var statusBadge: String {
+        switch report.readinessLevel {
+        case .blockedRed: return "NON FORMATTARE ANCORA"
+        case .cautionAmber: return "VERIFICA ELEMENTI SECONDARI"
+        case .readyForResetGreen: return "PRONTO PER RESET / PERMUTA ✓"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(
+                    systemName: report.readinessLevel == .readyForResetGreen ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
+                    color: accent
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Audit Anti-Lockout & Reset")
+                        .font(.system(size: 15.5, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text(statusBadge)
+                        .font(.system(size: 11.5, weight: .heavy))
+                        .foregroundColor(accent)
+                }
+                Spacer()
+                Button(action: { if !isRefreshing { onRefreshLiveAudit() } }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(isRefreshing ? "..." : "Ricontrolla")
+                            .font(.system(size: 11.5, weight: .bold))
+                    }
+                    .foregroundColor(AppleTheme.blue)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(AppleTheme.blue.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !report.missingCriticalApps.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(report.missingCriticalApps.count) app critiche (SPID / Banche / 2FA) ancora assenti su \(report.peerName):")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(AppleTheme.red)
+
+                    ForEach(report.missingCriticalApps) { app in
+                        let ack = acknowledgedAppIds.contains(app.canonicalId)
+                        Button {
+                            onToggleAcknowledge(app.canonicalId)
+                        } label: {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: ack ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundColor(ack ? AppleTheme.green : AppleTheme.red)
+                                    .font(.system(size: 16))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(app.appName) • \(app.riskKind.rawValue)")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .foregroundColor(AppleTheme.textPrimary)
+                                    Text(app.guidance)
+                                        .font(.system(size: 11.5))
+                                        .foregroundColor(AppleTheme.textSecondary)
+                                    Text("Tocca per confermare di averla già migrata manualmente")
+                                        .font(.system(size: 10.5))
+                                        .foregroundColor(AppleTheme.blue)
+                                }
+                                Spacer()
+                            }
+                            .padding(9)
+                            .background(AppleTheme.inputSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if !report.verifiedCriticalApps.isEmpty {
+                let previewNames = report.verifiedCriticalApps.prefix(4).map(\.appName).joined(separator: ", ")
+                Text("✓ \(report.verifiedCriticalApps.count) app critiche già verificate sul nuovo telefono (\(previewNames))")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(AppleTheme.green)
+            }
+
+            if report.localOnlyContactsCount > 0 {
+                Text(report.contactsWereMigrated
+                     ? "✓ Rilevati \(report.localOnlyContactsCount) contatti solo su iPhone: inclusi nella migrazione."
+                     : "⚠ Rilevati \(report.localOnlyContactsCount) contatti salvati SOLO su iPhone e non migrati!")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(report.contactsWereMigrated ? AppleTheme.green : AppleTheme.orange)
+            }
+
+            if report.icloudPhantomMediaCount > 0 {
+                Text("⚠ \(report.icloudPhantomMediaCount) foto/video rimasti solo su iCloud (non scaricati offline).")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(AppleTheme.orange)
+            }
+
+            ShareLink(item: DecommissionReadinessEvaluator.buildResetCertificateText(report: report, senderDeviceName: senderDeviceName)) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 13.5, weight: .semibold))
+                    Text("Condividi Certificato Pronto per Reset")
+                        .font(.system(size: 13.5, weight: .bold))
+                }
+                .foregroundColor(accent)
+                .frame(maxWidth: .infinity)
+                .frame(height: 42)
+                .background(accent.opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
+        }
+        .padding(14)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(accent.opacity(0.55), lineWidth: 1.2)
+        )
+    }
+}
+
+// MARK: - Ponte Overflow DirectSwitch -> CloudSave
+
+struct OverflowBridgeCloudSaveCard: View {
+    let plan: OverflowSplitPlan
+    let statusNotice: String?
+    var onLaunchCloudSaveOverflow: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(systemName: "icloud.and.arrow.up.fill", color: AppleTheme.blue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ponte Overflow verso CloudSave")
+                        .font(.system(size: 15.5, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text("\(plan.overflowItems.count) file storici (\(TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes))) pronti da parcheggiare cifrati AES-256 prima del reset.")
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+                Spacer()
+            }
+
+            if let notice = statusNotice, !notice.isEmpty {
+                Text(notice)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(AppleTheme.teal)
+            }
+
+            ApplePrimaryButton(
+                title: "Salva \(plan.overflowItems.count) file eccedenti su CloudSave",
+                icon: "lock.icloud.fill",
+                color: AppleTheme.blue,
+                action: onLaunchCloudSaveOverflow
+            )
+        }
+        .padding(14)
+        .background(AppleTheme.cardSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(AppleTheme.blue.opacity(0.55), lineWidth: 1.2)
+        )
+    }
+}

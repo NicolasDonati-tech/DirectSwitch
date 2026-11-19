@@ -26,25 +26,33 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AddCircleOutline
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -66,10 +74,17 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.directswitch.android.migrators.AndroidDecommissionScanner
+import com.directswitch.android.migrators.BatterySnapshot
 import com.directswitch.android.migrators.InstalledAppCategoryGroup
+import com.directswitch.android.protocol.CompletedMigrationRecord
+import com.directswitch.android.protocol.DecommissionAuditReport
+import com.directswitch.android.protocol.DecommissionReadinessEvaluator
+import com.directswitch.android.protocol.DecommissionReadinessLevel
 import com.directswitch.android.protocol.DirectSwitchLanguage
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.MediaTransferFilterOptions
+import com.directswitch.android.protocol.OverflowSplitPlan
 import com.directswitch.android.protocol.PostMigrationChecklistItem
 import com.directswitch.android.protocol.SkippedTransferItemRecord
 import com.directswitch.android.protocol.SpaceReliefActionKind
@@ -77,6 +92,9 @@ import com.directswitch.android.protocol.SpaceReliefOffer
 import com.directswitch.android.protocol.TransferCheckpointRecord
 import com.directswitch.android.protocol.TransferConnectionMedium
 import com.directswitch.android.protocol.TransferDisplayFormatting
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.directswitch.android.ui.theme.AppleSettingsIcon
 import com.directswitch.android.ui.theme.DirectSwitchPrimaryButton
 import com.directswitch.android.ui.theme.DirectSwitchSecondaryButton
@@ -981,6 +999,417 @@ fun PostMigrationChecklistCard(
                     )
                 }
             }
+        }
+    }
+}
+
+// MARK: - Recupero Delta 14-30 Giorni ("Copia solo le novità")
+
+@Composable
+fun DeltaCatchUpCard(
+    record: CompletedMigrationRecord,
+    onStartDeltaSync: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val dateStr = remember(record.completedAtEpochMillis) {
+        SimpleDateFormat("dd/MM HH:mm", Locale.ITALY).format(Date(record.completedAtEpochMillis))
+    }
+    val daysAgo = record.daysSinceCompleted()
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = DirectSwitchTheme.cardSurface,
+        border = BorderStroke(1.1.dp, DirectSwitchTheme.teal.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.History, color = DirectSwitchTheme.teal)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Recupero Delta — Solo novità dal $dateStr",
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                    Text(
+                        text = "Già migrato verso ${record.peerName} (${if (daysAgo == 0) "oggi" else "$daysAgo gg fa"}). Copia solo foto, SMS, chiamate e file nuovi.",
+                        fontSize = 12.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    onClick = onStartDeltaSync,
+                    shape = RoundedCornerShape(11.dp),
+                    color = DirectSwitchTheme.teal,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.size(4.dp))
+                        Text("Copia solo novità", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+                Surface(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(11.dp),
+                    color = DirectSwitchTheme.inputSurface
+                ) {
+                    Text(
+                        text = "Chiudi",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.textSecondary,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Triage Batteria Critica
+
+@Composable
+fun BatteryTriageToggleCard(
+    battery: BatterySnapshot,
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit
+) {
+    val accent = if (battery.recommendsAutoTriage || enabled) DirectSwitchTheme.orange else DirectSwitchTheme.blue
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = DirectSwitchTheme.cardSurface,
+        border = BorderStroke(0.9.dp, accent.copy(alpha = if (enabled || battery.recommendsAutoTriage) 0.5f else 0.25f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.BatteryAlert,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(22.dp)
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = if (battery.recommendsAutoTriage) {
+                        "Triage Batteria Critica attivo (${battery.percent}%)"
+                    } else {
+                        "Modalità Triage Batteria (${battery.percent}%)"
+                    },
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = DirectSwitchTheme.textPrimary
+                )
+                Text(
+                    text = "Priorità automatica a password CSV, documenti, preferiti e ricordi recenti se il telefono sta per spegnersi.",
+                    fontSize = 11.5.sp,
+                    color = DirectSwitchTheme.textSecondary
+                )
+            }
+            Switch(
+                checked = enabled || battery.recommendsAutoTriage,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(checkedTrackColor = DirectSwitchTheme.orange)
+            )
+        }
+    }
+}
+
+@Composable
+fun BatteryTriageActivePill() {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = DirectSwitchTheme.orange.copy(alpha = 0.14f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Icon(Icons.Filled.BatteryAlert, contentDescription = null, tint = DirectSwitchTheme.orange, modifier = Modifier.size(13.dp))
+            Text(
+                text = "Triage Batteria Critica",
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = DirectSwitchTheme.orange
+            )
+        }
+    }
+}
+
+// MARK: - Audit Anti-Lockout Dinamico + Certificato Pronto per Reset
+
+@Composable
+fun DecommissionAuditCard(
+    report: DecommissionAuditReport,
+    senderDeviceName: String,
+    acknowledgedAppIds: Set<String>,
+    isRefreshing: Boolean,
+    onToggleAcknowledge: (String) -> Unit,
+    onRefreshLiveAudit: () -> Unit
+) {
+    val context = LocalContext.current
+    val (accent, badgeLabel) = when (report.readinessLevel) {
+        DecommissionReadinessLevel.BLOCKED_RED -> DirectSwitchTheme.red to "NON FORMATTARE ANCORA"
+        DecommissionReadinessLevel.CAUTION_AMBER -> DirectSwitchTheme.orange to "VERIFICA ELEMENTI SECONDARI"
+        DecommissionReadinessLevel.READY_FOR_RESET_GREEN -> DirectSwitchTheme.green to "PRONTO PER RESET / PERMUTA ✓"
+    }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = DirectSwitchTheme.cardSurface,
+        border = BorderStroke(1.2.dp, accent.copy(alpha = 0.55f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AppleSettingsIcon(
+                        icon = if (report.readinessLevel == DecommissionReadinessLevel.READY_FOR_RESET_GREEN) {
+                            Icons.Filled.VerifiedUser
+                        } else {
+                            Icons.Filled.Shield
+                        },
+                        color = accent
+                    )
+                    Column {
+                        Text(
+                            text = "Audit Anti-Lockout & Reset",
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.textPrimary
+                        )
+                        Text(
+                            text = badgeLabel,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = accent
+                        )
+                    }
+                }
+                Surface(
+                    onClick = { if (!isRefreshing) onRefreshLiveAudit() },
+                    shape = RoundedCornerShape(10.dp),
+                    color = DirectSwitchTheme.blue.copy(alpha = 0.12f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Ricontrolla", tint = DirectSwitchTheme.blue, modifier = Modifier.size(14.dp))
+                        Text(
+                            text = if (isRefreshing) "..." else "Ricontrolla",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DirectSwitchTheme.blue
+                        )
+                    }
+                }
+            }
+
+            if (report.missingCriticalApps.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "${report.missingCriticalApps.size} app critiche (SPID / Banche / 2FA) ancora assenti su ${report.peerName}:",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DirectSwitchTheme.red
+                    )
+                    report.missingCriticalApps.forEach { app ->
+                        val ack = app.canonicalId in acknowledgedAppIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DirectSwitchTheme.inputSurface)
+                                .clickable { onToggleAcknowledge(app.canonicalId) }
+                                .padding(9.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (ack) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                                contentDescription = null,
+                                tint = if (ack) DirectSwitchTheme.green else DirectSwitchTheme.red,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = "${app.appName} • ${app.riskKind.displayLabel}",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = DirectSwitchTheme.textPrimary
+                                )
+                                Text(
+                                    text = app.guidance,
+                                    fontSize = 11.5.sp,
+                                    color = DirectSwitchTheme.textSecondary
+                                )
+                                Text(
+                                    text = "Tocca per confermare di averla già migrata manualmente",
+                                    fontSize = 10.5.sp,
+                                    color = DirectSwitchTheme.blue
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (report.verifiedCriticalApps.isNotEmpty()) {
+                Text(
+                    text = "✓ ${report.verifiedCriticalApps.size} app critiche già verificate sul nuovo telefono (${report.verifiedCriticalApps.take(4).joinToString { it.appName }})",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = DirectSwitchTheme.green
+                )
+            }
+
+            if (report.localOnlyContactsCount > 0) {
+                Text(
+                    text = if (report.contactsWereMigrated) {
+                        "✓ Rilevati ${report.localOnlyContactsCount} contatti solo-SIM/locali: inclusi nella migrazione."
+                    } else {
+                        "⚠ Rilevati ${report.localOnlyContactsCount} contatti salvati SOLO su SIM/telefono e non migrati!"
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (report.contactsWereMigrated) DirectSwitchTheme.green else DirectSwitchTheme.orange
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    onClick = {
+                        val certText = DecommissionReadinessEvaluator.buildResetCertificateText(report, senderDeviceName)
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "DirectSwitch — Certificato Pronto per Reset")
+                            putExtra(Intent.EXTRA_TEXT, certText)
+                        }
+                        runCatching {
+                            context.startActivity(Intent.createChooser(shareIntent, "Condividi Certificato Audit"))
+                        }
+                    },
+                    shape = RoundedCornerShape(11.dp),
+                    color = accent.copy(alpha = 0.14f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.Share, contentDescription = null, tint = accent, modifier = Modifier.size(15.dp))
+                        Spacer(modifier = Modifier.size(6.dp))
+                        Text("Certificato Reset", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = accent)
+                    }
+                }
+
+                if (report.readinessLevel == DecommissionReadinessLevel.READY_FOR_RESET_GREEN) {
+                    Surface(
+                        onClick = { AndroidDecommissionScanner.openDeviceResetSettings(context) },
+                        shape = RoundedCornerShape(11.dp),
+                        color = DirectSwitchTheme.inputSurface
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 10.dp, horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(Icons.Filled.SettingsBackupRestore, contentDescription = null, tint = DirectSwitchTheme.textPrimary, modifier = Modifier.size(15.dp))
+                            Text("Impostazioni Reset", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Ponte Overflow DirectSwitch -> CloudSave
+
+@Composable
+fun OverflowBridgeCloudSaveCard(
+    plan: OverflowSplitPlan,
+    statusNotice: String?,
+    onLaunchCloudSaveOverflow: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = DirectSwitchTheme.cardSurface,
+        border = BorderStroke(1.2.dp, DirectSwitchTheme.blue.copy(alpha = 0.55f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.CloudUpload, color = DirectSwitchTheme.blue)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Ponte Overflow verso CloudSave",
+                        fontSize = 15.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                    Text(
+                        text = "${plan.overflowItems.size} file storici (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) pronti da parcheggiare cifrati AES-256 prima del reset.",
+                        fontSize = 12.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                }
+            }
+            if (!statusNotice.isNullOrBlank()) {
+                Text(
+                    text = statusNotice,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = DirectSwitchTheme.teal
+                )
+            }
+            DirectSwitchPrimaryButton(
+                text = "Salva ${plan.overflowItems.size} file eccedenti su CloudSave",
+                onClick = onLaunchCloudSaveOverflow
+            )
         }
     }
 }
