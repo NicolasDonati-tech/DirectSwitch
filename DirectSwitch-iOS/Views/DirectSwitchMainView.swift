@@ -43,6 +43,7 @@ struct DirectSwitchMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var transport = DirectSwitchTransportViewModel()
     @StateObject private var appInstaller = iOSSequentialAppInstaller()
+    @ObservedObject private var l10n = DirectSwitchLocalizationStore.shared
 
     @State private var activeStep: DirectSwitchWizardStep = .home
     @State private var isReceiverMode: Bool = false
@@ -66,11 +67,15 @@ struct DirectSwitchMainView: View {
     @State private var includeCalendars: Bool = false
     @State private var includeReminders: Bool = false
     @State private var includeDocuments: Bool = false
+    @State private var includeAudio: Bool = false
     @State private var includeApps: Bool = false
     @State private var includeWhatsApp: Bool = false
 
     @State private var calendarsUpToTodayOnly: Bool = false
     @State private var remindersUpToTodayOnly: Bool = false
+    @State private var mediaFilters: MediaTransferFilterOptions = MediaTransferFilterOptions()
+    @State private var availablePhotoAlbums: [String] = []
+    @State private var pickedAudioFiles: [(ManifestItem, URL)] = []
     @State private var contactsPreload: ContactsPreloadState = ContactsPreloadState()
     @State private var photosPreload: PhotosPreloadState = PhotosPreloadState()
     @State private var videosPreload: VideosPreloadState = VideosPreloadState()
@@ -125,15 +130,15 @@ struct DirectSwitchMainView: View {
         case .home:
             return "DirectSwitch"
         case .receiveWaitCode:
-            return "Ricevi"
+            return l10n.text("nav_receive", fallbackItalian: "Ricevi")
         case .receiveConnected:
             return "Collegato"
         case .sendConnect:
-            return "Invia"
+            return l10n.text("nav_connect", fallbackItalian: "Invia")
         case .sendSelectCategories:
-            return "Cosa inviare"
+            return l10n.text("nav_select", fallbackItalian: "Cosa inviare")
         case .transferPreparing:
-            return "Preparazione"
+            return l10n.text("nav_preparing", fallbackItalian: "Preparazione")
         case .transferProgress:
             if isDedicatedWhatsAppScreenActive {
                 return "Chat WhatsApp"
@@ -141,7 +146,9 @@ struct DirectSwitchMainView: View {
             if isReceiverMode && transport.isCompleted && transport.activeTransferScope.isAppsOnly {
                 return "App pronte"
             }
-            return transport.isCompleted ? "Completato" : "Copia dati"
+            return transport.isCompleted
+                ? l10n.text("nav_done", fallbackItalian: "Completato")
+                : l10n.text("nav_copying", fallbackItalian: "Copia dati")
         }
     }
 
@@ -189,6 +196,9 @@ struct DirectSwitchMainView: View {
                         switch activeStep {
                         case .home:
                             DirectSwitchHomeView(
+                                resumableCheckpoint: transport.resumableCheckpoint,
+                                onResumeCheckpoint: { cp in resumeSavedCheckpoint(cp) },
+                                onDismissCheckpoint: { transport.dismissResumableCheckpoint() },
                                 onStartReceive: startReceiveWizard,
                                 onStartSendToIPhone: { startSendWizard(destination: .newIPhone) },
                                 onStartSendToAndroid: { startSendWizard(destination: .newAndroid) }
@@ -272,6 +282,8 @@ struct DirectSwitchMainView: View {
                                     scanSummary: scanSummary,
                                     isLocalProUnlocked: true,
                                     pickedDocuments: pickedDocuments,
+                                    pickedAudioFiles: pickedAudioFiles,
+                                    availablePhotoAlbums: availablePhotoAlbums,
                                     documentPrecheck: documentPrecheckReport,
                                     isLoadingPositions: isLoadingDocumentPositions,
                                     contactsPreload: contactsPreload,
@@ -296,8 +308,10 @@ struct DirectSwitchMainView: View {
                                     includeReminders: $includeReminders,
                                     remindersUpToTodayOnly: $remindersUpToTodayOnly,
                                     includeDocuments: $includeDocuments,
+                                    includeAudio: $includeAudio,
                                     includeApps: $includeApps,
                                     includeWhatsApp: $includeWhatsApp,
+                                    mediaFilters: $mediaFilters,
                                     onPreloadContacts: { enqueuePreloadContacts() },
                                     onPreloadPhotos: { enqueuePreloadPhotos() },
                                     onPreloadVideos: { enqueuePreloadVideos() },
@@ -318,6 +332,9 @@ struct DirectSwitchMainView: View {
                                     onRequestPhotoScanForApps: { requestPhotoLibraryAndRescanApps() },
                                     onResetAppsToDetectedOnly: resetSenderAppsToVerifiedOnly,
                                     onAddFolders: { presentDocumentPicker(mode: .positions) },
+                                    onPickAudioOrNotes: { presentDocumentPicker(mode: .audioOrNotes) },
+                                    onClearAudioFiles: { pickedAudioFiles.removeAll() },
+                                    onPickPasswordCsv: { presentDocumentPicker(mode: .passwordCsv) },
                                     onTogglePositionSelection: { locId, selected in
                                         iOSDocumentsSandboxBridge.setPositionSelected(locationId: locId, isSelected: selected)
                                         refreshAuthorizedSummary()
@@ -373,6 +390,14 @@ struct DirectSwitchMainView: View {
                                         handleBackNavigation()
                                     }
                                 },
+                                onRetrySkippedOnly: { ids in
+                                    if !isReceiverMode, let paired = pairedTargetPayload, !ids.isEmpty {
+                                        launchSenderTransferWithPayload(paired, isResume: false, onlyRetryItemIds: Set(ids))
+                                    }
+                                },
+                                onApplySpaceRelief: { action in
+                                    applySpaceReliefAndRestart(action)
+                                },
                                 onReconnectNewCode: {
                                     pairedTargetPayload = nil
                                     selectedBeacon = nil
@@ -404,7 +429,6 @@ struct DirectSwitchMainView: View {
             .animation(.easeInOut(duration: 0.2), value: appInstaller.showsFloatingBottomBar)
             .navigationBarHidden(true)
         }
-        .preferredColorScheme(.light)
         .task {
             refreshAuthorizedSummary()
             refreshSenderAppsCatalog()
@@ -521,7 +545,7 @@ struct DirectSwitchMainView: View {
                         launchSenderTransferWithPayload(paired, isResume: false)
                     }
                 }
-            } else if includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeApps || includeWhatsApp {
+            } else if includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeAudio || includeApps || includeWhatsApp {
                 Button("Invia escludendo Documenti") {
                     includeDocuments = false
                     let paired = pairedTargetPayload
@@ -692,6 +716,44 @@ struct DirectSwitchMainView: View {
                         documentPrecheckReport = precheck
                         isLoadingDocumentPositions = false
                     }
+                case .audioOrNotes:
+                    Task {
+                        let imported = await Task.detached(priority: .userInitiated) {
+                            iOSAudioAndCallLogMigrator.importPickedAudioOrNoteURLs(urls)
+                        }.value
+                        if !imported.isEmpty {
+                            pickedAudioFiles.append(contentsOf: imported)
+                            includeAudio = true
+                            sharedVaultToast = "\(imported.count) file audio/note pronti per la copia"
+                        }
+                    }
+                case .passwordCsv:
+                    isLoadingDocumentPositions = true
+                    let existingStaged = pickedDocuments.map(\.0)
+                    let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
+                    Task {
+                        let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
+                            let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
+                            let allStaged = existingStaged + imp.map(\.0)
+                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                                stagedItems: allStaged,
+                                includePairedLiveVideoBytes: includeLiveBytes
+                            )
+                            let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                                stagedItems: allStaged,
+                                includeWhatsAppVault: false
+                            )
+                            return (imp, sum, pre)
+                        }.value
+                        if !imported.isEmpty {
+                            pickedDocuments.append(contentsOf: imported)
+                            includeDocuments = true
+                            sharedVaultToast = "CSV Password pronto (verrà sovrascritto a zeri a fine trasferimento)"
+                        }
+                        scanSummary = summary
+                        documentPrecheckReport = precheck
+                        isLoadingDocumentPositions = false
+                    }
                 }
             }
         )
@@ -731,18 +793,58 @@ struct DirectSwitchMainView: View {
         launchSenderTransferWithPayload(paired, isResume: false)
     }
 
-    private func launchSenderTransferWithPayload(_ paired: QrPairingPayload, isResume: Bool) {
+    private func resumeSavedCheckpoint(_ checkpoint: TransferCheckpointRecord) {
+        guard let parsed = try? QrPairingPayload.fromJson(checkpoint.qrPayloadJson) else {
+            transport.dismissResumableCheckpoint()
+            return
+        }
+        pairedTargetPayload = parsed
+        includeContacts = checkpoint.scope.contacts
+        includePhotos = checkpoint.scope.photos
+        includeVideos = checkpoint.scope.videos
+        includeCalendars = checkpoint.scope.calendars
+        includeReminders = checkpoint.scope.reminders
+        includeDocuments = checkpoint.scope.documents
+        includeAudio = checkpoint.scope.audio
+        includeApps = checkpoint.scope.apps
+        includeWhatsApp = checkpoint.scope.whatsApp
+        mediaFilters = checkpoint.filterOptions
+        transport.restoreCheckpointIntoMemory(checkpoint)
+        launchSenderTransferWithPayload(parsed, isResume: true)
+    }
+
+    private func applySpaceReliefAndRestart(_ action: SpaceReliefActionKind) {
+        guard let paired = pairedTargetPayload else { return }
+        switch action {
+        case .compactVideosHevc1080p:
+            mediaFilters.compactVideo1080pHevc = true
+        case .excludeHeavyVideos300Mb:
+            mediaFilters.maxVideoBytes = SpaceReliefPlanner.heavyVideoThresholdBytes
+        case .lastYearMediaOnly:
+            mediaFilters.photosLastYearOnly = true
+            mediaFilters.videosLastYearOnly = true
+        }
+        launchSenderTransferWithPayload(paired, isResume: false)
+    }
+
+    private func launchSenderTransferWithPayload(
+        _ paired: QrPairingPayload,
+        isResume: Bool,
+        onlyRetryItemIds: Set<String>? = nil
+    ) {
         sharedVaultToast = nil
         isReceiverMode = false
+        let isTargetedRetry = !(onlyRetryItemIds?.isEmpty ?? true)
         let currentScope = ActiveTransferScope(
-            contacts: includeContacts,
+            contacts: isTargetedRetry ? false : includeContacts,
             photos: includePhotos,
             videos: includeVideos,
-            calendars: includeCalendars,
-            reminders: includeReminders,
+            calendars: isTargetedRetry ? false : includeCalendars,
+            reminders: isTargetedRetry ? false : includeReminders,
             documents: includeDocuments,
-            apps: includeApps,
-            whatsApp: includeWhatsApp
+            audio: includeAudio,
+            apps: isTargetedRetry ? false : includeApps,
+            whatsApp: isTargetedRetry ? false : includeWhatsApp
         )
         if !isResume {
             appInstaller.reset()
@@ -754,10 +856,12 @@ struct DirectSwitchMainView: View {
             )
         }
         withAnimation(.easeInOut(duration: 0.22)) {
-            activeStep = (!isResume && !currentScope.isWhatsAppOnly) ? .transferPreparing : .transferProgress
+            activeStep = (!isResume && !isTargetedRetry && !currentScope.isWhatsAppOnly) ? .transferPreparing : .transferProgress
         }
         let docsSnapshot = pickedDocuments
-        let appsSnapshot: [InstalledAppRecord] = includeApps
+        let audioSnapshot = pickedAudioFiles
+        let filtersSnapshot = mediaFilters
+        let appsSnapshot: [InstalledAppRecord] = (includeApps && !isTargetedRetry)
             ? selectedSenderApps.filter {
                 paired.receiverPlatform != .ANDROID || !iOSInstalledAppsScanner.isGoogleAppPreinstalledOnAndroid($0)
             }
@@ -775,14 +879,19 @@ struct DirectSwitchMainView: View {
                 includeReminders: includeReminders,
                 remindersUpToTodayOnly: remCutoff,
                 includeDocuments: includeDocuments,
+                includeAudio: includeAudio,
                 includeApps: includeApps,
                 includeWhatsAppVault: includeWhatsApp,
                 installedApps: appsSnapshot,
                 pickedDocuments: docsSnapshot,
+                pickedAudioFiles: audioSnapshot,
+                mediaFilters: filtersSnapshot,
+                onlyRetryItemIds: onlyRetryItemIds,
                 isResume: isResume
             )
             if transport.isCompleted && transport.failedItemsCount == 0 {
                 pickedDocuments.removeAll()
+                pickedAudioFiles.removeAll()
                 refreshAuthorizedSummary()
             }
         }
@@ -815,10 +924,13 @@ struct DirectSwitchMainView: View {
         includeCalendars = false
         includeReminders = false
         includeDocuments = false
+        includeAudio = false
         includeApps = false
         includeWhatsApp = false
         calendarsUpToTodayOnly = false
         remindersUpToTodayOnly = false
+        mediaFilters = MediaTransferFilterOptions()
+        pickedAudioFiles.removeAll()
         contactsPreload = ContactsPreloadState()
         photosPreload = PhotosPreloadState()
         videosPreload = VideosPreloadState()
@@ -894,6 +1006,9 @@ struct DirectSwitchMainView: View {
                 isLoading: false,
                 isCompleted: true
             )
+            availablePhotoAlbums = await Task.detached(priority: .utility) {
+                iOSPhotoFilterHelper.fetchUserAlbumTitles()
+            }.value
             refreshAuthorizedSummary()
             if includeApps {
                 refreshSenderAppsCatalog()
@@ -1219,6 +1334,9 @@ struct DirectSwitchMainView: View {
 // MARK: - Schermata Home pulita (solo Invia sopra e Ricevi sotto, sottotitoli dentro ⓘ)
 
 private struct DirectSwitchHomeView: View {
+    let resumableCheckpoint: TransferCheckpointRecord?
+    var onResumeCheckpoint: (TransferCheckpointRecord) -> Void
+    var onDismissCheckpoint: () -> Void
     var onStartReceive: () -> Void
     var onStartSendToIPhone: () -> Void
     var onStartSendToAndroid: () -> Void
@@ -1226,10 +1344,16 @@ private struct DirectSwitchHomeView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
+                HStack {
+                    Spacer()
+                    LanguageSelectorPill()
+                }
+                .padding(.top, 8)
+
                 // Hero centrale con icona ingrandita (88pt) e sottotitolo racchiuso nel pulsante ⓘ
                 VStack(spacing: 12) {
                     DirectSwitchAppleEmblem(size: 88)
-                        .padding(.top, 22)
+                        .padding(.top, 4)
                         .padding(.bottom, 4)
 
                     HStack(spacing: 6) {
@@ -1238,11 +1362,19 @@ private struct DirectSwitchHomeView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "DirectSwitch",
-                            message: "Copia i tuoi dati senza formattare: trasferisce rubrica, foto con album, video originali, calendari, file e chat WhatsApp direttamente tra due telefoni già configurati, senza passare dal cloud."
+                            message: "Copia i tuoi dati senza formattare: trasferisce rubrica, foto con album, video originali, calendari, audio, file e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud."
                         )
                     }
                 }
-                .padding(.bottom, 10)
+                .padding(.bottom, 6)
+
+                if let cp = resumableCheckpoint {
+                    ResumableCheckpointCard(
+                        checkpoint: cp,
+                        onResume: { onResumeCheckpoint(cp) },
+                        onDismiss: onDismissCheckpoint
+                    )
+                }
 
                 // Sezione 1 (SOPRA): Invia (freccia verso destra ->, sottotitolo dentro ⓘ, pulsante unico "Invia")
                 VStack(alignment: .leading, spacing: 12) {
@@ -1306,6 +1438,8 @@ private struct DirectSwitchTransferProgressView: View {
     let canSendAnotherCategory: Bool
     var onOpenProSheet: () -> Void
     var onRetryIfFailed: () -> Void
+    var onRetrySkippedOnly: ([String]) -> Void
+    var onApplySpaceRelief: (SpaceReliefActionKind) -> Void
     var onReconnectNewCode: () -> Void
     var onTransferAnotherCategory: () -> Void
     var onFinish: () -> Void
@@ -1422,7 +1556,7 @@ private struct DirectSwitchTransferProgressView: View {
             )
         }
 
-        if scope.photos || scope.videos || scope.documents || (scope.whatsApp && transport.totalItems > 0) {
+        if scope.photos || scope.videos || scope.documents || scope.audio || (scope.whatsApp && transport.totalItems > 0) {
             rows.append(
                 ScopedSummaryItem(
                     id: "media_docs",
@@ -1484,6 +1618,18 @@ private struct DirectSwitchTransferProgressView: View {
                     color: AppleTheme.green,
                     title: "Messaggi salvati",
                     value: "\(transport.importedSms)"
+                )
+            )
+        }
+
+        if transport.importedCallLogs > 0 {
+            rows.append(
+                ScopedSummaryItem(
+                    id: "call_logs",
+                    icon: "phone.fill",
+                    color: AppleTheme.teal,
+                    title: "Cronologia chiamate salvata",
+                    value: "\(transport.importedCallLogs)"
                 )
             )
         }
@@ -2006,6 +2152,12 @@ private struct DirectSwitchTransferProgressView: View {
                         }
                         .padding(.top, 2)
                     }
+
+                    HStack {
+                        ConnectionMediumPill(medium: transport.connectionMedium)
+                        Spacer()
+                    }
+                    .padding(.top, 2)
                 }
                 .appleCard()
 
@@ -2027,7 +2179,21 @@ private struct DirectSwitchTransferProgressView: View {
                     .appleCard(padding: 0)
                 }
 
-                if !isReceiverMode && transport.isCompleted && transport.canResumeInterruptedTransfer && transport.failedItemsCount > 0 {
+                if !isReceiverMode, let offer = transport.spaceReliefOffer {
+                    SpaceReliefAssistantCard(offer: offer) { action in
+                        onApplySpaceRelief(action)
+                    }
+                }
+
+                if !transport.skippedItems.isEmpty {
+                    SkippedItemsReportCard(
+                        items: transport.skippedItems,
+                        canRetry: !isReceiverMode && !transport.isTransferring,
+                        onRetrySkippedOnly: {
+                            onRetrySkippedOnly(transport.skippedItems.map(\.id))
+                        }
+                    )
+                } else if !isReceiverMode && transport.isCompleted && transport.canResumeInterruptedTransfer && transport.failedItemsCount > 0 {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
                             Image(systemName: "arrow.clockwise.circle.fill")
@@ -2139,6 +2305,28 @@ private struct DirectSwitchTransferProgressView: View {
                 }
 
                 if transport.isCompleted {
+                    PostMigrationChecklistCard(
+                        items: MigrationReceiptBuilder.defaultChecklist(
+                            hasWhatsApp: scope.whatsApp || transport.pendingNativeWhatsAppMigration,
+                            hasApps: scope.apps,
+                            hasSkipped: !transport.skippedItems.isEmpty || transport.failedItemsCount > 0
+                        ),
+                        receiptText: MigrationReceiptBuilder.buildReceiptText(
+                            peerName: transport.peerName,
+                            isReceiver: isReceiverMode,
+                            connectionMedium: transport.connectionMedium,
+                            completedFiles: transport.completedItems,
+                            totalBytes: transport.transferredBytesCount > 0 ? transport.transferredBytesCount : transport.totalBytesCount,
+                            mergedContacts: transport.mergedContacts,
+                            importedCalendars: transport.importedCalendars,
+                            importedReminders: transport.importedReminders,
+                            importedSms: transport.importedSms,
+                            importedCallLogs: transport.importedCallLogs,
+                            appsCount: isReceiverMode ? transport.receivedInstalledApps.count : transport.sentInstalledAppsCount,
+                            skippedCount: max(transport.skippedItems.count, transport.failedItemsCount)
+                        )
+                    )
+
                     if canSendAnotherCategory {
                         AppleSecondaryButton(
                             title: "Trasferisci un'altra voce a questo telefono",

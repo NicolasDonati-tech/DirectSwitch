@@ -10,40 +10,104 @@ import SwiftUI
 import CoreImage.CIFilterBuiltins
 import UIKit
 
-// MARK: - Tema grafico Apple HIG (Base Perla + Colori Neutri ed Eleganti, Zero Viola)
+// MARK: - Tema grafico Apple HIG (Base Perla / Grafite Dark Mode Nativa, Zero Viola)
 
 enum AppleTheme {
-    static let canvasTop = Color(red: 0.878, green: 0.906, blue: 0.945)      // #E0E7F1
-    static let canvasMid = Color(red: 0.914, green: 0.933, blue: 0.965)      // #E9EEF6
-    static let canvasBottom = Color(red: 0.855, green: 0.886, blue: 0.933)   // #DAE2EE
+    private static func dynamic(light: UIColor, dark: UIColor) -> Color {
+        Color(UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
+        })
+    }
 
-    static let headerBg = Color(red: 0.898, green: 0.922, blue: 0.957).opacity(0.95)
-    static let cardSurface = Color(red: 0.973, green: 0.980, blue: 0.992)    // #F8FAFD Perla morbido
-    static let cardSelected = Color(red: 0.918, green: 0.949, blue: 0.996)   // #EAF2FE
-    static let inputSurface = Color(red: 0.918, green: 0.937, blue: 0.965)   // #EAEFF6
-    static let cardBorder = Color(red: 0.812, green: 0.847, blue: 0.898)     // #CFD8E5
-    static let hairline = Color(red: 0.780, green: 0.816, blue: 0.871)       // #C7D0DE
+    static let canvasTop = dynamic(
+        light: UIColor(red: 0.878, green: 0.906, blue: 0.945, alpha: 1),
+        dark: UIColor(red: 0.055, green: 0.075, blue: 0.110, alpha: 1)
+    )
+    static let canvasMid = dynamic(
+        light: UIColor(red: 0.914, green: 0.933, blue: 0.965, alpha: 1),
+        dark: UIColor(red: 0.075, green: 0.102, blue: 0.149, alpha: 1)
+    )
+    static let canvasBottom = dynamic(
+        light: UIColor(red: 0.855, green: 0.886, blue: 0.933, alpha: 1),
+        dark: UIColor(red: 0.043, green: 0.059, blue: 0.090, alpha: 1)
+    )
 
-    static let blue = Color(red: 0.000, green: 0.478, blue: 1.000)           // Apple #007AFF
-    static let teal = Color(red: 0.000, green: 0.541, blue: 0.659)           // Ocean Teal #008AA8
-    static let green = Color(red: 0.204, green: 0.780, blue: 0.349)          // Apple #34C759
-    static let orange = Color(red: 1.000, green: 0.584, blue: 0.000)         // Apple #FF9500
-    static let red = Color(red: 1.000, green: 0.231, blue: 0.188)            // Apple #FF3B30
-    static let slate = Color(red: 0.216, green: 0.255, blue: 0.318)          // Grigio Ardesia Neutro #374151
-    static let charcoal = Color(red: 0.110, green: 0.118, blue: 0.137)       // Grafite Scuro Neutro #1C1E23
+    static let headerBg = dynamic(
+        light: UIColor(red: 0.898, green: 0.922, blue: 0.957, alpha: 0.95),
+        dark: UIColor(red: 0.067, green: 0.090, blue: 0.133, alpha: 0.95)
+    )
+    static let cardSurface = dynamic(
+        light: UIColor(red: 0.973, green: 0.980, blue: 0.992, alpha: 1),
+        dark: UIColor(red: 0.110, green: 0.145, blue: 0.204, alpha: 1)
+    )
+    static let cardSelected = dynamic(
+        light: UIColor(red: 0.918, green: 0.949, blue: 0.996, alpha: 1),
+        dark: UIColor(red: 0.118, green: 0.196, blue: 0.306, alpha: 1)
+    )
+    static let inputSurface = dynamic(
+        light: UIColor(red: 0.918, green: 0.937, blue: 0.965, alpha: 1),
+        dark: UIColor(red: 0.149, green: 0.192, blue: 0.263, alpha: 1)
+    )
+    static let cardBorder = dynamic(
+        light: UIColor(red: 0.812, green: 0.847, blue: 0.898, alpha: 1),
+        dark: UIColor(red: 0.212, green: 0.267, blue: 0.353, alpha: 1)
+    )
+    static let hairline = dynamic(
+        light: UIColor(red: 0.780, green: 0.816, blue: 0.871, alpha: 1),
+        dark: UIColor(red: 0.204, green: 0.255, blue: 0.337, alpha: 1)
+    )
 
-    // Palette dedicata per il badge "Premium Direct" (Oro/Ambra stile funzionalità Premium)
-    static let premiumGold = Color(red: 0.780, green: 0.451, blue: 0.020)    // #C77305
-    static let premiumAmber = Color(red: 0.945, green: 0.588, blue: 0.039)   // #F1960A
-    static let premiumSurface = Color(red: 1.000, green: 0.965, blue: 0.863) // #FFF6DC
-    static let premiumBorder = Color(red: 0.922, green: 0.659, blue: 0.145)  // #EBA825
+    static let blue = dynamic(
+        light: UIColor(red: 0.000, green: 0.478, blue: 1.000, alpha: 1),
+        dark: UIColor(red: 0.239, green: 0.612, blue: 1.000, alpha: 1)
+    )
+    static let teal = dynamic(
+        light: UIColor(red: 0.000, green: 0.541, blue: 0.659, alpha: 1),
+        dark: UIColor(red: 0.180, green: 0.761, blue: 0.859, alpha: 1)
+    )
+    static let green = dynamic(
+        light: UIColor(red: 0.204, green: 0.780, blue: 0.349, alpha: 1),
+        dark: UIColor(red: 0.251, green: 0.835, blue: 0.420, alpha: 1)
+    )
+    static let orange = dynamic(
+        light: UIColor(red: 1.000, green: 0.584, blue: 0.000, alpha: 1),
+        dark: UIColor(red: 1.000, green: 0.667, blue: 0.157, alpha: 1)
+    )
+    static let red = dynamic(
+        light: UIColor(red: 1.000, green: 0.231, blue: 0.188, alpha: 1),
+        dark: UIColor(red: 1.000, green: 0.369, blue: 0.337, alpha: 1)
+    )
+    static let slate = dynamic(
+        light: UIColor(red: 0.216, green: 0.255, blue: 0.318, alpha: 1),
+        dark: UIColor(red: 0.580, green: 0.639, blue: 0.722, alpha: 1)
+    )
+    static let charcoal = dynamic(
+        light: UIColor(red: 0.110, green: 0.118, blue: 0.137, alpha: 1),
+        dark: UIColor(red: 0.941, green: 0.957, blue: 0.980, alpha: 1)
+    )
 
-    // Alias neutro al posto del vecchio indaco/viola
+    static let premiumGold = Color(red: 0.780, green: 0.451, blue: 0.020)
+    static let premiumAmber = Color(red: 0.945, green: 0.588, blue: 0.039)
+    static let premiumSurface = dynamic(
+        light: UIColor(red: 1.000, green: 0.965, blue: 0.863, alpha: 1),
+        dark: UIColor(red: 0.235, green: 0.180, blue: 0.075, alpha: 1)
+    )
+    static let premiumBorder = Color(red: 0.922, green: 0.659, blue: 0.145)
+
     static let indigo = slate
 
-    static let textPrimary = Color(red: 0.110, green: 0.110, blue: 0.118)    // #1C1C1E
-    static let textSecondary = Color(red: 0.388, green: 0.388, blue: 0.400)  // #636366
-    static let textTertiary = Color(red: 0.557, green: 0.557, blue: 0.576)   // #8E8E93
+    static let textPrimary = dynamic(
+        light: UIColor(red: 0.110, green: 0.110, blue: 0.118, alpha: 1),
+        dark: UIColor(red: 0.957, green: 0.969, blue: 0.984, alpha: 1)
+    )
+    static let textSecondary = dynamic(
+        light: UIColor(red: 0.388, green: 0.388, blue: 0.400, alpha: 1),
+        dark: UIColor(red: 0.690, green: 0.733, blue: 0.796, alpha: 1)
+    )
+    static let textTertiary = dynamic(
+        light: UIColor(red: 0.557, green: 0.557, blue: 0.576, alpha: 1),
+        dark: UIColor(red: 0.514, green: 0.561, blue: 0.631, alpha: 1)
+    )
 
     static var backgroundGradient: LinearGradient {
         LinearGradient(
@@ -295,7 +359,6 @@ struct InfoCircleButton: View {
             .background(AppleTheme.backgroundGradient.ignoresSafeArea())
             .presentationDetents([.height(290), .medium])
             .presentationDragIndicator(.visible)
-            .preferredColorScheme(.light)
         }
     }
 }

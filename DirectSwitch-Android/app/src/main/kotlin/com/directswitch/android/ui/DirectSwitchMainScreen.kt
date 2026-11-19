@@ -25,6 +25,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,7 +48,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
@@ -114,7 +117,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.directswitch.android.DirectSwitchLog
+import com.directswitch.android.migrators.AndroidMediaFilterHelper
+import com.directswitch.android.migrators.AudioAndMemoMigrator
 import com.directswitch.android.migrators.CalendarMigrator
+import com.directswitch.android.migrators.CallLogMigrator
 import com.directswitch.android.migrators.ContactsPreloadState
 import com.directswitch.android.migrators.ContactsSmartMerger
 import com.directswitch.android.migrators.DateSyncPreloadState
@@ -127,13 +133,21 @@ import com.directswitch.android.migrators.InstalledAppsScanner
 import com.directswitch.android.migrators.LocalDeviceScanSummary
 import com.directswitch.android.migrators.MediaExifScannerAndImporter
 import com.directswitch.android.migrators.PhotosPreloadState
-import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.VideosPreloadState
 import com.directswitch.android.protocol.DevicePlatform
+import com.directswitch.android.protocol.DirectSwitchL10n
+import com.directswitch.android.protocol.DirectSwitchLanguage
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
 import com.directswitch.android.protocol.InstalledAppRecord
+import com.directswitch.android.protocol.MediaTransferFilterOptions
+import com.directswitch.android.protocol.MigrationReceiptBuilder
 import com.directswitch.android.protocol.QrPairingPayload
+import com.directswitch.android.protocol.SpaceReliefActionKind
+import com.directswitch.android.protocol.SpaceReliefPlanner
+import com.directswitch.android.protocol.TransferCheckpointRecord
+import com.directswitch.android.protocol.TransferCheckpointStore
+import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.protocol.TransferPreparationItem
 import com.directswitch.android.protocol.TransferSessionStage
 import com.directswitch.android.transport.DirectSwitchAutoDiscovery
@@ -165,6 +179,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -186,6 +201,8 @@ private data class CategorySelectionState(
     val videos: Boolean = false,
     val calendars: Boolean = false,
     val sms: Boolean = false,
+    val callLogs: Boolean = false,
+    val audio: Boolean = false,
     val documents: Boolean = false,
     val whatsAppVault: Boolean = false,
     val installedApps: Boolean = false
@@ -197,9 +214,12 @@ fun DirectSwitchMainScreen(
     externalVaultNote: String? = null,
     externalVaultTrigger: Int = 0
 ) {
+    DirectSwitchTheme.isDarkMode = isSystemInDarkTheme()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    var currentLanguage by remember { mutableStateOf(DirectSwitchLanguage.load(context)) }
+    var resumableCheckpoint by remember { mutableStateOf(TransferCheckpointStore.load(context)) }
     var step by remember { mutableStateOf(WizardStep.HOME) }
     var scanSummary by remember { mutableStateOf<LocalDeviceScanSummary?>(null) }
 
@@ -233,14 +253,22 @@ fun DirectSwitchMainScreen(
     var categories by remember { mutableStateOf(CategorySelectionState()) }
     var calendarsUpToTodayOnly by remember { mutableStateOf(false) }
     var smsUpToTodayOnly by remember { mutableStateOf(false) }
+    var mediaFilters by remember { mutableStateOf(MediaTransferFilterOptions()) }
+    var availablePhotoAlbums by remember { mutableStateOf<List<String>>(emptyList()) }
     var contactsPreload by remember { mutableStateOf(ContactsPreloadState()) }
     var photosPreload by remember { mutableStateOf(PhotosPreloadState()) }
     var videosPreload by remember { mutableStateOf(VideosPreloadState()) }
     var calendarsSync by remember { mutableStateOf(DateSyncPreloadState()) }
     var smsSync by remember { mutableStateOf(DateSyncPreloadState()) }
+    var audioFilesCount by remember { mutableIntStateOf(0) }
+    var isLoadingAudio by remember { mutableStateOf(false) }
+    var callLogsCount by remember { mutableIntStateOf(0) }
+    var isLoadingCallLogs by remember { mutableStateOf(false) }
     var detectedAppsCatalog by remember { mutableStateOf<List<InstalledAppRecord>>(emptyList()) }
     var groupedAppCategories by remember { mutableStateOf<List<InstalledAppCategoryGroup>>(emptyList()) }
     var deselectedAppPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var extraSelectedCuratedApps by remember { mutableStateOf<List<InstalledAppRecord>>(emptyList()) }
+    var stagedPasswordCsvFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var isLoadingAppsCatalog by remember { mutableStateOf(false) }
     var isReceiverFlow by remember { mutableStateOf(false) }
 
@@ -277,6 +305,29 @@ fun DirectSwitchMainScreen(
         }
     }
 
+    val passwordCsvPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val staged = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val dest = File(context.cacheDir, "ds_pwd_${System.currentTimeMillis()}.csv")
+                        context.contentResolver.openInputStream(uri)?.use { inp ->
+                            dest.outputStream().use { out -> inp.copyTo(out) }
+                        }
+                        if (dest.exists() && dest.length() > 0L) dest else null
+                    }.getOrNull()
+                }
+                if (staged != null) {
+                    stagedPasswordCsvFiles = stagedPasswordCsvFiles + staged
+                    categories = categories.copy(documents = true)
+                    vaultStatusNote = "File CSV Password pronto (sarà sovrascritto a zeri a fine trasferimento)."
+                }
+            }
+        }
+    }
+
     val currentLifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(currentLifecycleOwner, step) {
         val observer = LifecycleEventObserver { _, event ->
@@ -297,16 +348,20 @@ fun DirectSwitchMainScreen(
             Manifest.permission.READ_CALENDAR,
             Manifest.permission.WRITE_CALENDAR,
             Manifest.permission.READ_SMS,
+            Manifest.permission.READ_CALL_LOG,
+            Manifest.permission.WRITE_CALL_LOG,
             Manifest.permission.CAMERA
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.READ_MEDIA_IMAGES)
             perms.add(Manifest.permission.READ_MEDIA_VIDEO)
+            perms.add(Manifest.permission.READ_MEDIA_AUDIO)
             perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
         return perms
     }
@@ -357,6 +412,7 @@ fun DirectSwitchMainScreen(
                 photosPreload = PhotosPreloadState(loadedCount = loaded, totalCount = tot, albumsCount = alb, estimatedBytes = b, isLoading = true, isCompleted = false)
             }
             photosPreload = PhotosPreloadState(loadedCount = total, totalCount = total, albumsCount = albums, estimatedBytes = bytes, isLoading = false, isCompleted = true)
+            availablePhotoAlbums = withContext(Dispatchers.IO) { AndroidMediaFilterHelper.listPhotoAlbumNames(context) }
         }
     }
 
@@ -404,6 +460,24 @@ fun DirectSwitchMainScreen(
                 lastUpdatedEpochMillis = System.currentTimeMillis(),
                 isLoading = false
             )
+        }
+    }
+
+    fun refreshAudioSync() {
+        if (!AudioAndMemoMigrator.hasReadPermission(context)) return
+        isLoadingAudio = true
+        scope.launch {
+            audioFilesCount = withContext(Dispatchers.IO) { AudioAndMemoMigrator.scanAudioAndVoiceMemos(context).size }
+            isLoadingAudio = false
+        }
+    }
+
+    fun refreshCallLogsSync() {
+        if (!CallLogMigrator.hasReadPermission(context)) return
+        isLoadingCallLogs = true
+        scope.launch {
+            callLogsCount = withContext(Dispatchers.IO) { CallLogMigrator.readCallLogs(context).size }
+            isLoadingCallLogs = false
         }
     }
 
@@ -457,6 +531,12 @@ fun DirectSwitchMainScreen(
         if (!prev.sms && next.sms) {
             schedule(SmsSystemScanner.hasReadPermission(context), listOf(Manifest.permission.READ_SMS)) { refreshSmsSync() }
         }
+        if (!prev.audio && next.audio) {
+            schedule(AudioAndMemoMigrator.hasReadPermission(context), listOf(AudioAndMemoMigrator.requiredReadPermission())) { refreshAudioSync() }
+        }
+        if (!prev.callLogs && next.callLogs) {
+            schedule(CallLogMigrator.hasReadPermission(context), listOf(Manifest.permission.READ_CALL_LOG)) { refreshCallLogsSync() }
+        }
         if (missingPerms.isNotEmpty()) {
             requestSpecificPermissionsThen(missingPerms.toList()) {
                 // Ogni azione verifica di nuovo il proprio permesso e non fa nulla se l'utente lo ha negato
@@ -478,12 +558,17 @@ fun DirectSwitchMainScreen(
         categories = CategorySelectionState()
         calendarsUpToTodayOnly = false
         smsUpToTodayOnly = false
+        mediaFilters = MediaTransferFilterOptions()
         contactsPreload = ContactsPreloadState()
         photosPreload = PhotosPreloadState()
         videosPreload = VideosPreloadState()
         calendarsSync = DateSyncPreloadState()
         smsSync = DateSyncPreloadState()
+        audioFilesCount = 0
+        callLogsCount = 0
         deselectedAppPackages = emptySet()
+        extraSelectedCuratedApps = emptyList()
+        stagedPasswordCsvFiles = emptyList()
     }
 
     fun resetAndGoHome() {
@@ -620,19 +705,32 @@ fun DirectSwitchMainScreen(
         }
     }
 
-    fun launchSenderTransfer(targetPayload: QrPairingPayload) {
+    fun launchSenderTransfer(
+        targetPayload: QrPairingPayload,
+        onlyRetryItemIds: Set<String>? = null,
+        resumeCheckpoint: TransferCheckpointRecord? = null
+    ) {
         pendingDocPrecheckReport = null
         isReceiverFlow = false
         vaultStatusNote = null
-        val appsOverride = if (categories.installedApps && detectedAppsCatalog.isNotEmpty()) {
+        val selectedDetected = if (categories.installedApps && detectedAppsCatalog.isNotEmpty()) {
             detectedAppsCatalog.filter { it.packageName !in deselectedAppPackages }
-        } else null
-        val isWhatsAppOnly = targetPayload.receiverPlatform != DevicePlatform.IOS &&
+        } else {
+            emptyList()
+        }
+        val mergedApps = (selectedDetected + extraSelectedCuratedApps).distinctBy { it.packageName }
+        val appsOverride = if (categories.installedApps && mergedApps.isNotEmpty()) mergedApps else null
+        val isWhatsAppOnly = onlyRetryItemIds == null &&
+            resumeCheckpoint == null &&
+            targetPayload.receiverPlatform != DevicePlatform.IOS &&
             categories.whatsAppVault &&
             !categories.contacts && !categories.photos && !categories.videos &&
-            !categories.calendars && !categories.sms && !categories.documents &&
+            !categories.calendars && !categories.sms && !categories.audio &&
+            !categories.callLogs && !categories.documents &&
             !categories.installedApps
-        step = if (isWhatsAppOnly) WizardStep.TRANSFER_PROGRESS else WizardStep.TRANSFER_PREPARING
+        val skipPrep = isWhatsAppOnly || resumeCheckpoint != null || !onlyRetryItemIds.isNullOrEmpty()
+        step = if (skipPrep) WizardStep.TRANSFER_PROGRESS else WizardStep.TRANSFER_PREPARING
+        val pwdFilesSnapshot = stagedPasswordCsvFiles
         scope.launch {
             client.executeTransfer(
                 qrPayload = targetPayload,
@@ -646,21 +744,70 @@ fun DirectSwitchMainScreen(
                 includeDocuments = categories.documents,
                 includeWhatsAppVault = if (targetPayload.receiverPlatform == DevicePlatform.IOS) false else categories.whatsAppVault,
                 includeInstalledApps = categories.installedApps,
-                installedAppsOverride = appsOverride
+                installedAppsOverride = appsOverride,
+                includeAudio = categories.audio,
+                includeCallLogs = categories.callLogs,
+                mediaFilters = mediaFilters,
+                onlyRetryItemIds = onlyRetryItemIds,
+                resumeCheckpoint = resumeCheckpoint,
+                stagedPasswordCsvFiles = pwdFilesSnapshot
             )
+            stagedPasswordCsvFiles = emptyList()
+            resumableCheckpoint = TransferCheckpointStore.load(context)
         }
+    }
+
+    fun resumeSavedCheckpoint(cp: TransferCheckpointRecord) {
+        val parsed = runCatching { QrPairingPayload.fromJson(cp.qrPayloadJson) }.getOrNull()
+        if (parsed == null) {
+            TransferCheckpointStore.clear(context)
+            resumableCheckpoint = null
+            return
+        }
+        pairedTargetPayload = parsed
+        categories = CategorySelectionState(
+            contacts = cp.scope.contacts,
+            photos = cp.scope.photos,
+            videos = cp.scope.videos,
+            calendars = cp.scope.calendars,
+            sms = true,
+            callLogs = cp.scope.callLogs,
+            audio = cp.scope.audio,
+            documents = cp.scope.documents,
+            whatsAppVault = cp.scope.whatsApp,
+            installedApps = cp.scope.apps
+        )
+        mediaFilters = cp.filterOptions
+        launchSenderTransfer(parsed, resumeCheckpoint = cp)
+    }
+
+    fun applySpaceReliefAndRestart(action: SpaceReliefActionKind) {
+        val target = pairedTargetPayload ?: return
+        when (action) {
+            SpaceReliefActionKind.EXCLUDE_HEAVY_VIDEOS_300MB -> {
+                mediaFilters = mediaFilters.copy(maxVideoBytes = SpaceReliefPlanner.HEAVY_VIDEO_THRESHOLD_BYTES)
+            }
+            SpaceReliefActionKind.LAST_YEAR_MEDIA_ONLY -> {
+                mediaFilters = mediaFilters.copy(photosLastYearOnly = true, videosLastYearOnly = true)
+            }
+            SpaceReliefActionKind.EXCLUDE_ALL_VIDEOS -> {
+                categories = categories.copy(videos = false)
+            }
+        }
+        launchSenderTransfer(target)
     }
 
     val topTitle = when (step) {
         WizardStep.HOME -> "DirectSwitch"
-        WizardStep.RECEIVER_WAIT_CODE -> "Ricevi dati"
+        WizardStep.RECEIVER_WAIT_CODE -> DirectSwitchL10n.text("nav_receive", currentLanguage, "Ricevi dati")
         WizardStep.RECEIVER_CONNECTED -> "Collegato"
-        WizardStep.SENDER_CONNECT -> "Collega telefono"
-        WizardStep.SENDER_SELECT_CATEGORIES -> "Cosa copiare"
-        WizardStep.TRANSFER_PREPARING -> "Preparazione"
+        WizardStep.SENDER_CONNECT -> DirectSwitchL10n.text("nav_connect", currentLanguage, "Collega telefono")
+        WizardStep.SENDER_SELECT_CATEGORIES -> DirectSwitchL10n.text("nav_select", currentLanguage, "Cosa copiare")
+        WizardStep.TRANSFER_PREPARING -> DirectSwitchL10n.text("nav_preparing", currentLanguage, "Preparazione")
         WizardStep.TRANSFER_PROGRESS -> {
             val done = if (isReceiverFlow) serverProgress.isCompleted else clientProgress.isCompleted
-            if (done) "Completato" else "Copia dati"
+            if (done) DirectSwitchL10n.text("nav_done", currentLanguage, "Completato")
+            else DirectSwitchL10n.text("nav_copying", currentLanguage, "Copia dati")
         }
         WizardStep.QUICK_PORTAL -> "QR Rapido"
     }
@@ -714,6 +861,17 @@ fun DirectSwitchMainScreen(
             when (step) {
                 WizardStep.HOME -> {
                     AndroidHomeView(
+                        currentLanguage = currentLanguage,
+                        onSelectLanguage = { lang ->
+                            currentLanguage = lang
+                            DirectSwitchLanguage.save(context, lang)
+                        },
+                        resumableCheckpoint = resumableCheckpoint,
+                        onResumeCheckpoint = { cp -> resumeSavedCheckpoint(cp) },
+                        onDismissCheckpoint = {
+                            TransferCheckpointStore.clear(context)
+                            resumableCheckpoint = null
+                        },
                         onStartReceive = {
                             requestPermissionsThen {
                                 isReceiverFlow = true
@@ -883,19 +1041,28 @@ fun DirectSwitchMainScreen(
                             categories = categories,
                             calendarsUpToTodayOnly = calendarsUpToTodayOnly,
                             smsUpToTodayOnly = smsUpToTodayOnly,
+                            mediaFilters = mediaFilters,
+                            availablePhotoAlbums = availablePhotoAlbums,
                             contactsPreload = contactsPreload,
                             photosPreload = photosPreload,
                             videosPreload = videosPreload,
                             calendarsSync = calendarsSync,
                             smsSync = smsSync,
+                            audioFilesCount = audioFilesCount,
+                            isLoadingAudio = isLoadingAudio,
+                            callLogsCount = callLogsCount,
+                            isLoadingCallLogs = isLoadingCallLogs,
+                            stagedPasswordCsvCount = stagedPasswordCsvFiles.size,
                             detectedAppsCatalog = detectedAppsCatalog,
                             groupedAppCategories = groupedAppCategories,
                             deselectedAppPackages = deselectedAppPackages,
+                            extraSelectedCuratedApps = extraSelectedCuratedApps,
                             isLoadingApps = isLoadingAppsCatalog,
                             vaultStatusNote = vaultStatusNote,
                             onUpdateCategories = { updateCategoriesAndTriggerPreloads(it) },
                             onToggleCalendarsUpToToday = { calendarsUpToTodayOnly = it },
                             onToggleSmsUpToToday = { smsUpToTodayOnly = it },
+                            onFiltersChange = { mediaFilters = it },
                             onRequestContactsPermission = {
                                 requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)) { startContactsPreload() }
                             },
@@ -913,11 +1080,29 @@ fun DirectSwitchMainScreen(
                             onRequestSmsPermission = {
                                 requestSpecificPermissionsThen(listOf(Manifest.permission.READ_SMS)) { refreshSmsSync() }
                             },
+                            onRequestAudioPermission = {
+                                requestSpecificPermissionsThen(listOf(AudioAndMemoMigrator.requiredReadPermission())) { refreshAudioSync() }
+                            },
+                            onRequestCallLogsPermission = {
+                                requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CALL_LOG)) { refreshCallLogsSync() }
+                            },
                             onReloadContacts = { startContactsPreload() },
                             onReloadPhotos = { startPhotosPreload() },
                             onReloadVideos = { startVideosPreload() },
                             onRefreshCalendars = { refreshCalendarsSync() },
                             onRefreshSms = { refreshSmsSync() },
+                            onReloadAudio = { refreshAudioSync() },
+                            onReloadCallLogs = { refreshCallLogsSync() },
+                            onPickPasswordCsv = {
+                                passwordCsvPickerLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain", "*/*"))
+                            },
+                            onToggleExtraCuratedApp = { extraApp ->
+                                extraSelectedCuratedApps = if (extraSelectedCuratedApps.any { it.packageName == extraApp.packageName }) {
+                                    extraSelectedCuratedApps.filterNot { it.packageName == extraApp.packageName }
+                                } else {
+                                    extraSelectedCuratedApps + extraApp
+                                }
+                            },
                             onToggleSingleApp = { app ->
                                 deselectedAppPackages = if (app.packageName in deselectedAppPackages) {
                                     deselectedAppPackages - app.packageName
@@ -1021,6 +1206,13 @@ fun DirectSwitchMainScreen(
                     TransferProgressWizardView(
                         progress = if (isReceiverFlow) serverProgress else clientProgress,
                         isReceiver = isReceiverFlow,
+                        onApplySpaceRelief = { action -> applySpaceReliefAndRestart(action) },
+                        onRetrySkippedOnly = { ids ->
+                            val target = pairedTargetPayload
+                            if (!isReceiverFlow && target != null && ids.isNotEmpty()) {
+                                launchSenderTransfer(target, onlyRetryItemIds = ids.toSet())
+                            }
+                        },
                         onFinish = { resetAndGoHome() }
                     )
                 }
@@ -1158,15 +1350,30 @@ fun DirectSwitchMainScreen(
 
 @Composable
 private fun AndroidHomeView(
+    currentLanguage: DirectSwitchLanguage,
+    onSelectLanguage: (DirectSwitchLanguage) -> Unit,
+    resumableCheckpoint: TransferCheckpointRecord?,
+    onResumeCheckpoint: (TransferCheckpointRecord) -> Unit,
+    onDismissCheckpoint: () -> Unit,
     onStartReceive: () -> Unit,
     onStartSend: () -> Unit,
     onOpenGoogleBridge: () -> Unit,
     onOpenQuickPortal: () -> Unit
 ) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End
+    ) {
+        LanguageSelectorChip(
+            currentLanguage = currentLanguage,
+            onSelectLanguage = onSelectLanguage
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 20.dp, bottom = 12.dp),
+            .padding(top = 6.dp, bottom = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -1184,9 +1391,17 @@ private fun AndroidHomeView(
             )
             InfoCircleButton(
                 title = "DirectSwitch",
-                message = "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, documenti e chat WhatsApp direttamente tra due telefoni già configurati, senza passare dal cloud."
+                message = "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud."
             )
         }
+    }
+
+    if (resumableCheckpoint != null) {
+        ResumableCheckpointCard(
+            checkpoint = resumableCheckpoint,
+            onResume = { onResumeCheckpoint(resumableCheckpoint) },
+            onDismiss = onDismissCheckpoint
+        )
     }
 
     // Sezione 1 (SOPRA): Invia (freccia verso destra ->, sottotitolo dentro ⓘ)
@@ -1327,7 +1542,7 @@ private fun ReceiverPairingWizardView(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (active) Color.White else Color.Transparent)
+                        .background(if (active) DirectSwitchTheme.cardSurface else Color.Transparent)
                         .clickable { selectedTab = idx }
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
@@ -1724,29 +1939,44 @@ private fun SenderCategoriesWizardView(
     categories: CategorySelectionState,
     calendarsUpToTodayOnly: Boolean,
     smsUpToTodayOnly: Boolean,
+    mediaFilters: MediaTransferFilterOptions,
+    availablePhotoAlbums: List<String>,
     contactsPreload: ContactsPreloadState,
     photosPreload: PhotosPreloadState,
     videosPreload: VideosPreloadState,
     calendarsSync: DateSyncPreloadState,
     smsSync: DateSyncPreloadState,
+    audioFilesCount: Int,
+    isLoadingAudio: Boolean,
+    callLogsCount: Int,
+    isLoadingCallLogs: Boolean,
+    stagedPasswordCsvCount: Int,
     detectedAppsCatalog: List<InstalledAppRecord>,
     groupedAppCategories: List<InstalledAppCategoryGroup>,
     deselectedAppPackages: Set<String>,
+    extraSelectedCuratedApps: List<InstalledAppRecord>,
     isLoadingApps: Boolean,
     vaultStatusNote: String?,
     onUpdateCategories: (CategorySelectionState) -> Unit,
     onToggleCalendarsUpToToday: (Boolean) -> Unit,
     onToggleSmsUpToToday: (Boolean) -> Unit,
+    onFiltersChange: (MediaTransferFilterOptions) -> Unit,
     onRequestContactsPermission: () -> Unit,
     onRequestPhotosPermission: () -> Unit,
     onRequestVideosPermission: () -> Unit,
     onRequestCalendarsPermission: () -> Unit,
     onRequestSmsPermission: () -> Unit,
+    onRequestAudioPermission: () -> Unit,
+    onRequestCallLogsPermission: () -> Unit,
     onReloadContacts: () -> Unit,
     onReloadPhotos: () -> Unit,
     onReloadVideos: () -> Unit,
     onRefreshCalendars: () -> Unit,
     onRefreshSms: () -> Unit,
+    onReloadAudio: () -> Unit,
+    onReloadCallLogs: () -> Unit,
+    onPickPasswordCsv: () -> Unit,
+    onToggleExtraCuratedApp: (InstalledAppRecord) -> Unit,
     onToggleSingleApp: (InstalledAppRecord) -> Unit,
     onToggleAppCategoryAll: (InstalledAppCategoryGroup, Boolean) -> Unit,
     onToggleAllDetectedApps: (Boolean) -> Unit,
@@ -1762,11 +1992,11 @@ private fun SenderCategoriesWizardView(
     val wizardContext = LocalContext.current
     val isCrossOs = pairedPayload.receiverPlatform == DevicePlatform.IOS
     val allSelected = categories.contacts && categories.photos && categories.videos &&
-        categories.calendars && categories.sms && categories.documents &&
-        (isCrossOs || categories.whatsAppVault) && categories.installedApps
+        categories.calendars && categories.sms && categories.callLogs && categories.audio &&
+        categories.documents && (isCrossOs || categories.whatsAppVault) && categories.installedApps
     val anySelected = categories.contacts || categories.photos || categories.videos ||
-        categories.calendars || categories.sms || categories.documents ||
-        (!isCrossOs && categories.whatsAppVault) || categories.installedApps
+        categories.calendars || categories.sms || categories.callLogs || categories.audio ||
+        categories.documents || (!isCrossOs && categories.whatsAppVault) || categories.installedApps
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1788,6 +2018,8 @@ private fun SenderCategoriesWizardView(
                         videos = next,
                         calendars = next,
                         sms = next,
+                        callLogs = next,
+                        audio = next,
                         documents = next,
                         whatsAppVault = if (isCrossOs) false else next,
                         installedApps = next
@@ -1894,6 +2126,13 @@ private fun SenderCategoriesWizardView(
             accentColor = DirectSwitchTheme.orange,
             onReload = onReloadPhotos
         )
+        if (MediaExifScannerAndImporter.hasPhotoPermission(wizardContext)) {
+            PhotoFilterChipsBar(
+                filters = mediaFilters,
+                availableAlbums = availablePhotoAlbums,
+                onFiltersChange = onFiltersChange
+            )
+        }
     }
 
     val videosTotal = maxOf(videosPreload.totalCount, summary?.videosCount ?: 0)
@@ -1920,6 +2159,12 @@ private fun SenderCategoriesWizardView(
             accentColor = DirectSwitchTheme.red,
             onReload = onReloadVideos
         )
+        if (MediaExifScannerAndImporter.hasVideoPermission(wizardContext)) {
+            VideoFilterChipsBar(
+                filters = mediaFilters,
+                onFiltersChange = onFiltersChange
+            )
+        }
     }
 
     val activeCalCount = if (calendarsUpToTodayOnly) {
@@ -1976,6 +2221,56 @@ private fun SenderCategoriesWizardView(
         )
     }
 
+    CategoryDropdownCard(
+        icon = Icons.Filled.Call,
+        iconColor = DirectSwitchTheme.teal,
+        title = "Cronologia Chiamate",
+        countBadge = if (callLogsCount > 0) "$callLogsCount chiamate" else "Registro + archivio",
+        checked = categories.callLogs,
+        onCheckedChange = { onUpdateCategories(categories.copy(callLogs = it)) }
+    ) {
+        ProgressivePreloadDropdownBody(
+            hasPermission = CallLogMigrator.hasReadPermission(wizardContext),
+            permissionTitle = "Permesso Registro Chiamate richiesto per esportare la cronologia.",
+            onRequestPermission = onRequestCallLogsPermission,
+            isLoading = isLoadingCallLogs,
+            loadedCount = callLogsCount,
+            totalCount = callLogsCount,
+            loadingLabel = "Lettura registro chiamate...",
+            readyLabel = "$callLogsCount chiamate pronte",
+            detailLabel = if (isCrossOs) {
+                "Salvata su iPhone come archivio HTML/JSON leggibile in Cronologia_Chiamate."
+            } else {
+                "Importata nativamente nel registro chiamate Android + archivio di backup."
+            },
+            accentColor = DirectSwitchTheme.teal,
+            onReload = onReloadCallLogs
+        )
+    }
+
+    CategoryDropdownCard(
+        icon = Icons.Filled.AudioFile,
+        iconColor = DirectSwitchTheme.blue,
+        title = "Audio e Memo Vocali",
+        countBadge = if (audioFilesCount > 0) "$audioFilesCount tracce" else "Registrazioni e MP3",
+        checked = categories.audio,
+        onCheckedChange = { onUpdateCategories(categories.copy(audio = it)) }
+    ) {
+        ProgressivePreloadDropdownBody(
+            hasPermission = AudioAndMemoMigrator.hasReadPermission(wizardContext),
+            permissionTitle = "Permesso Audio richiesto per trovare Memo Vocali e tracce.",
+            onRequestPermission = onRequestAudioPermission,
+            isLoading = isLoadingAudio,
+            loadedCount = audioFilesCount,
+            totalCount = audioFilesCount,
+            loadingLabel = "Ricerca memo vocali e audio...",
+            readyLabel = "$audioFilesCount file audio/memo pronti",
+            detailLabel = "Copia registrazioni vocali, .m4a, .mp3 e file audio nella cartella Musica / Audio_e_Memo.",
+            accentColor = DirectSwitchTheme.blue,
+            onReload = onReloadAudio
+        )
+    }
+
     val locationSummaries = summary?.documentLocationSummaries.orEmpty()
     val hasAllFiles = summary?.hasAllFilesAccess ?: DocumentsAndWhatsAppScanner.hasAllFilesAccess(wizardContext)
     val hasPickedLocations = !vaultStatusNote.isNullOrBlank() ||
@@ -2003,6 +2298,10 @@ private fun SenderCategoriesWizardView(
             onClearPickedDocuments = onClearPickedDocuments,
             hasPickedLocations = hasPickedLocations
         )
+        GuidedPasswordsCard(
+            stagedCsvCount = stagedPasswordCsvCount,
+            onPickPasswordCsv = onPickPasswordCsv
+        )
     }
 
     if (!isCrossOs) {
@@ -2019,11 +2318,14 @@ private fun SenderCategoriesWizardView(
     }
 
     val effectiveAppsCatalog = detectedAppsCatalog
-    val selectedAppsCount = if (effectiveAppsCatalog.isNotEmpty()) {
+    val selectedExtraPackages = remember(extraSelectedCuratedApps) {
+        extraSelectedCuratedApps.map { it.packageName }.toSet()
+    }
+    val selectedAppsCount = (if (effectiveAppsCatalog.isNotEmpty()) {
         effectiveAppsCatalog.count { it.packageName !in deselectedAppPackages }
     } else {
         summary?.installedAppsCount ?: 0
-    }
+    }) + extraSelectedCuratedApps.size
     CategoryDropdownCard(
         icon = Icons.Filled.Apps,
         iconColor = DirectSwitchTheme.blue,
@@ -2040,7 +2342,10 @@ private fun SenderCategoriesWizardView(
             onToggleApp = onToggleSingleApp,
             onToggleCategoryAll = onToggleAppCategoryAll,
             onToggleAllDetected = onToggleAllDetectedApps,
-            onRefreshApps = onRefreshApps
+            onRefreshApps = onRefreshApps,
+            extraCuratedCategories = InstalledAppsScanner.curatedExtraAndroidCategories,
+            selectedExtraPackages = selectedExtraPackages,
+            onToggleExtraApp = onToggleExtraCuratedApp
         )
     }
 
@@ -2072,7 +2377,8 @@ private fun SenderCategoriesWizardView(
 
     val isOnlyWhatsAppSelected = !isCrossOs && categories.whatsAppVault &&
         !categories.contacts && !categories.photos && !categories.videos &&
-        !categories.calendars && !categories.sms && !categories.documents &&
+        !categories.calendars && !categories.sms && !categories.callLogs &&
+        !categories.audio && !categories.documents &&
         !categories.installedApps
 
     DirectSwitchPrimaryButton(
@@ -2088,6 +2394,8 @@ private fun SenderCategoriesWizardView(
 private fun TransferProgressWizardView(
     progress: LiveTransferProgress,
     isReceiver: Boolean,
+    onApplySpaceRelief: (SpaceReliefActionKind) -> Unit,
+    onRetrySkippedOnly: (List<String>) -> Unit,
     onFinish: () -> Unit
 ) {
     val context = LocalContext.current
@@ -2284,6 +2592,10 @@ private fun TransferProgressWizardView(
                 )
             }
         }
+
+        Row(modifier = Modifier.fillMaxWidth()) {
+            ConnectionMediumPill(medium = progress.connectionMedium)
+        }
     }
 
     DirectSwitchCard(padding = 0.dp, spacing = 0.dp) {
@@ -2319,6 +2631,10 @@ private fun TransferProgressWizardView(
         if (progress.importedSms > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
             SummaryItemRow(Icons.Filled.Sms, DirectSwitchTheme.green, "Messaggi salvati", "${progress.importedSms}")
+        }
+        if (progress.importedCallLogs > 0) {
+            HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
+            SummaryItemRow(Icons.Filled.Call, DirectSwitchTheme.teal, "Chiamate salvate", "${progress.importedCallLogs}")
         }
         if (progress.skippedDuplicates > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
@@ -2438,10 +2754,56 @@ private fun TransferProgressWizardView(
         )
     }
 
+    val reliefOffer = progress.spaceReliefOffer
+    if (!isReceiver && reliefOffer != null) {
+        SpaceReliefAssistantCard(
+            offer = reliefOffer,
+            onSelectAction = onApplySpaceRelief
+        )
+    }
+
+    if (progress.skippedItems.isNotEmpty()) {
+        SkippedItemsReportCard(
+            items = progress.skippedItems,
+            canRetry = !isReceiver && (progress.isCompleted || progress.errorMessage != null),
+            onRetrySkippedOnly = { onRetrySkippedOnly(progress.skippedItems.map { it.id }) }
+        )
+    }
+
     if (progress.errorMessage != null) {
         DirectSwitchCard(padding = 14.dp) {
             Text(progress.errorMessage, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
         }
+    }
+
+    if (progress.isCompleted) {
+        val checklistItems = remember(progress.pendingNativeWhatsAppMigration, progress.receivedInstalledApps.size, progress.skippedItems.size, progress.failedItemsCount) {
+            MigrationReceiptBuilder.defaultChecklist(
+                hasWhatsApp = progress.activeTransferScope.whatsApp || progress.pendingNativeWhatsAppMigration,
+                hasApps = progress.activeTransferScope.apps || progress.receivedInstalledApps.isNotEmpty(),
+                hasSkipped = progress.skippedItems.isNotEmpty() || progress.failedItemsCount > 0
+            )
+        }
+        val receiptText = remember(progress) {
+            MigrationReceiptBuilder.buildReceiptText(
+                peerName = progress.peerDeviceName,
+                isReceiver = isReceiver,
+                connectionMedium = progress.connectionMedium,
+                completedFiles = progress.completedItems,
+                totalBytes = if (progress.transferredBytes > 0L) progress.transferredBytes else progress.totalBytes,
+                mergedContacts = progress.mergedContacts,
+                importedCalendars = progress.importedCalendars,
+                importedReminders = progress.importedReminders,
+                importedSms = progress.importedSms,
+                importedCallLogs = progress.importedCallLogs,
+                appsCount = progress.receivedInstalledApps.size,
+                skippedCount = maxOf(progress.skippedItems.size, progress.failedItemsCount)
+            )
+        }
+        PostMigrationChecklistCard(
+            items = checklistItems,
+            receiptText = receiptText
+        )
     }
 
     if (isReceiver && stillDefaultSms && (progress.isCompleted || progress.errorMessage != null)) {
@@ -2552,7 +2914,7 @@ private fun ReceiverAppsMirrorCard(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var refreshTick by remember { mutableStateOf(0) }
+    var refreshTick by remember { mutableIntStateOf(0) }
     var showAlreadyInstalled by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner) {

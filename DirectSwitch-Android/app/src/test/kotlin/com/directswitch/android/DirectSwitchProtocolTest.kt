@@ -974,4 +974,86 @@ class DirectSwitchProtocolTest {
         assertEquals(null, report.remindersImportedCount)
         assertEquals(null, report.calendarsAlreadyPresentCount)
     }
+
+    @Test
+    fun transferProgressAccountingPreservesProgressAcrossResume() {
+        val acc = com.directswitch.android.protocol.TransferProgressAccounting(
+            queuedItemsCount = 13,
+            remainingEstimatedBytes = 150_000_000L,
+            previouslyCompletedItems = 85,
+            previouslySentBytes = 850_000_000L,
+            previouslyFailedItems = 2
+        )
+        assertEquals(100, acc.initialTotalItems)
+        assertEquals(85, acc.succeededItemsCount)
+        assertEquals(2, acc.failedItemsCount)
+        assertEquals(87, acc.processedItemsCount)
+        assertEquals(1_000_000_000L, acc.totalBytesForProgress)
+        assertEquals(0.85f, acc.progressFraction, 0.0001f)
+
+        acc.recordUploaded(estimatedBytes = 10_000_000L, actualBytes = 10_000_000L)
+        assertEquals(86, acc.succeededItemsCount)
+        assertEquals(860_000_000L, acc.transferredBytes)
+        assertEquals(1_000_000_000L, acc.totalBytesForProgress)
+        assertEquals(0.86f, acc.progressFraction, 0.0001f)
+    }
+
+    @Test
+    fun calendarAllDayUtcMidnightAndUndatedRemindersDedup() {
+        val romeTz = java.util.TimeZone.getTimeZone("Europe/Rome")
+        val nyTz = java.util.TimeZone.getTimeZone("America/New_York")
+        val utcTz = java.util.TimeZone.getTimeZone("UTC")
+
+        val expectedUtcMay14 = java.util.Calendar.getInstance(utcTz).apply {
+            clear()
+            set(2026, java.util.Calendar.MAY, 14, 0, 0, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        // iOS in Italia (CEST = UTC+2): 14 maggio 2026 00:00 locale = 13 maggio 22:00 UTC -> deve allinearsi al 14 maggio 00:00 UTC
+        val romeLocalMay14 = java.util.Calendar.getInstance(romeTz).apply {
+            clear()
+            set(2026, java.util.Calendar.MAY, 14, 0, 0, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        assertEquals(
+            expectedUtcMay14,
+            com.directswitch.android.migrators.CalendarMigrator.utcMidnightMillis(romeLocalMay14, romeTz)
+        )
+
+        // iOS a New York (EDT = UTC-4): 14 maggio 2026 00:00 locale = 14 maggio 04:00 UTC -> 14 maggio 00:00 UTC
+        val nyLocalMay14 = java.util.Calendar.getInstance(nyTz).apply {
+            clear()
+            set(2026, java.util.Calendar.MAY, 14, 0, 0, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        assertEquals(
+            expectedUtcMay14,
+            com.directswitch.android.migrators.CalendarMigrator.utcMidnightMillis(nyLocalMay14, nyTz)
+        )
+
+        // Android->Android già in mezzanotte UTC su fuso orario negativo non deve slittare al giorno precedente
+        assertEquals(
+            expectedUtcMay14,
+            com.directswitch.android.migrators.CalendarMigrator.utcMidnightMillis(expectedUtcMay14, nyTz)
+        )
+
+        // Chiave dedup coerente tra iOS locale e Android UTC
+        assertEquals(
+            com.directswitch.android.migrators.CalendarMigrator.dedupKeyForEvent("Compleanno", expectedUtcMay14, allDay = true, sourceTimeZone = romeTz),
+            com.directswitch.android.migrators.CalendarMigrator.dedupKeyForEvent("Compleanno", romeLocalMay14, allDay = true, sourceTimeZone = romeTz)
+        )
+
+        // Promemoria Apple senza scadenza: chiave dedup stabile nel tempo (zero duplicati su riesecuzioni)
+        val remMigrator = com.directswitch.android.migrators.AndroidRemindersMigrator
+        assertEquals("[Completato] Comprare latte", remMigrator.reminderEventTitle(" Comprare latte ", isCompleted = true))
+        assertEquals(
+            remMigrator.reminderCalendarDedupKey("Pagare bolletta", dueEpochMillis = null),
+            remMigrator.reminderCalendarDedupKey("  pagare bolletta  ", dueEpochMillis = null)
+        )
+        assertTrue(
+            remMigrator.reminderCalendarDedupKey("Bolletta", dueEpochMillis = 1_760_000_000_000L) !=
+                remMigrator.reminderCalendarDedupKey("Bolletta", dueEpochMillis = null)
+        )
+    }
 }

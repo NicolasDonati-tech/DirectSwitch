@@ -639,7 +639,10 @@ fun InstalledAppsDropdownBody(
     onToggleApp: (InstalledAppRecord) -> Unit,
     onToggleCategoryAll: (InstalledAppCategoryGroup, Boolean) -> Unit,
     onToggleAllDetected: (Boolean) -> Unit,
-    onRefreshApps: () -> Unit
+    onRefreshApps: () -> Unit,
+    extraCuratedCategories: List<InstalledAppCategoryGroup> = emptyList(),
+    selectedExtraPackages: Set<String> = emptySet(),
+    onToggleExtraApp: (InstalledAppRecord) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var expandedCategoryIds by remember(groupedCategories) {
@@ -905,6 +908,16 @@ fun InstalledAppsDropdownBody(
             }
         }
     }
+
+    if (extraCuratedCategories.isNotEmpty()) {
+        val installedPkgs = remember(allApps) { allApps.map { it.packageName }.toSet() }
+        ExtraCuratedAppsBrowser(
+            curatedCategories = extraCuratedCategories,
+            alreadyInCatalogPackages = installedPkgs,
+            selectedExtraPackages = selectedExtraPackages,
+            onToggleExtraApp = onToggleExtraApp
+        )
+    }
 }
 
 @Composable
@@ -1083,11 +1096,12 @@ fun WhatsAppDropdownBody(isCrossOs: Boolean) {
 private fun categoryIconForId(categoryId: String): ImageVector = when (categoryId) {
     "social_messaging" -> Icons.AutoMirrored.Filled.Chat
     "banks_payments" -> Icons.Filled.AccountBalance
-    "spid_office" -> Icons.Filled.Badge
+    "spid_office", "work_cloud_mail" -> Icons.Filled.Badge
     "transport_travel" -> Icons.Filled.DirectionsTransit
     "shopping_food" -> Icons.Filled.ShoppingBag
-    "music_streaming" -> Icons.Filled.MusicNote
-    "photo_video_sport" -> Icons.Filled.PhotoCamera
+    "music_streaming", "streaming_tv" -> Icons.Filled.MusicNote
+    "photo_video_sport", "health_fitness" -> Icons.Filled.PhotoCamera
+    "games_entertainment", "news_books", "utilities_security" -> Icons.Filled.Apps
     else -> Icons.Filled.Home
 }
 

@@ -15,6 +15,8 @@ enum iOSDocumentPickerMode: String, Identifiable {
     case positions
     case folders
     case files
+    case audioOrNotes
+    case passwordCsv
     case receiverDestinations
     case receiverFallbackRoot
 
@@ -56,12 +58,18 @@ final class iOSNativeDocumentPickerPresenter: NSObject, UIDocumentPickerDelegate
         case .files:
             contentTypes = [.item]
             asCopy = false
+        case .audioOrNotes:
+            contentTypes = [.audio, .plainText, .pdf, .item]
+            asCopy = false
+        case .passwordCsv:
+            contentTypes = [.commaSeparatedText, .plainText]
+            asCopy = false
         case .positions, .folders, .receiverDestinations, .receiverFallbackRoot:
             contentTypes = [.folder]
             asCopy = false
         }
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: asCopy)
-        picker.allowsMultipleSelection = (mode == .files)
+        picker.allowsMultipleSelection = (mode == .files || mode == .audioOrNotes)
         picker.shouldShowFileExtensions = true
         picker.delegate = self
         picker.modalPresentationStyle = .formSheet
@@ -510,7 +518,6 @@ private struct WiFiShareQrSheetView: View {
         .background(AppleTheme.backgroundGradient.ignoresSafeArea())
         .presentationDetents([.height(470), .large])
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.light)
     }
 }
 
@@ -521,6 +528,8 @@ struct SendCategoriesStepView: View {
     let scanSummary: iOSLocalDeviceScanSummary?
     let isLocalProUnlocked: Bool
     let pickedDocuments: [(ManifestItem, URL)]
+    let pickedAudioFiles: [(ManifestItem, URL)]
+    let availablePhotoAlbums: [String]
     let documentPrecheck: iOSDocumentsPrecheckReport?
     var isLoadingPositions: Bool = false
 
@@ -548,8 +557,10 @@ struct SendCategoriesStepView: View {
     @Binding var includeReminders: Bool
     @Binding var remindersUpToTodayOnly: Bool
     @Binding var includeDocuments: Bool
+    @Binding var includeAudio: Bool
     @Binding var includeApps: Bool
     @Binding var includeWhatsApp: Bool
+    @Binding var mediaFilters: MediaTransferFilterOptions
 
     var onPreloadContacts: () -> Void
     var onPreloadPhotos: () -> Void
@@ -564,6 +575,9 @@ struct SendCategoriesStepView: View {
     var onRequestPhotoScanForApps: () -> Void
     var onResetAppsToDetectedOnly: (() -> Void)? = nil
     var onAddFolders: () -> Void
+    var onPickAudioOrNotes: () -> Void
+    var onClearAudioFiles: () -> Void
+    var onPickPasswordCsv: () -> Void
     var onTogglePositionSelection: ((String, Bool) -> Void)? = nil
     var onRemovePosition: ((String) -> Void)? = nil
     var onRefreshDocumentCheck: () -> Void
@@ -573,20 +587,21 @@ struct SendCategoriesStepView: View {
     var onStartCopy: () -> Void
 
     @State private var expandedAppCategoryIds: Set<String> = ["social_messaging", "banks_payments"]
+    @State private var catalogFilterQuery: String = ""
     @State private var appSearchQuery: String = ""
     @State private var appSearchResults: [AppStoreSearchHit] = []
     @State private var isSearchingAppStore: Bool = false
 
     private var allSelected: Bool {
-        includeContacts && includePhotos && includeVideos && includeCalendars && includeReminders && includeDocuments && includeApps && includeWhatsApp
+        includeContacts && includePhotos && includeVideos && includeCalendars && includeReminders && includeDocuments && includeAudio && includeApps && includeWhatsApp
     }
 
     private var anySelected: Bool {
-        includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeDocuments || includeApps || includeWhatsApp
+        includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeDocuments || includeAudio || includeApps || includeWhatsApp
     }
 
     private var isOnlyWhatsAppSelected: Bool {
-        includeWhatsApp && !includeContacts && !includePhotos && !includeVideos && !includeCalendars && !includeReminders && !includeDocuments && !includeApps
+        includeWhatsApp && !includeContacts && !includePhotos && !includeVideos && !includeCalendars && !includeReminders && !includeDocuments && !includeAudio && !includeApps
     }
 
     private var isCrossOs: Bool {
@@ -658,6 +673,7 @@ struct SendCategoriesStepView: View {
                             includeCalendars = target
                             includeReminders = target
                             includeDocuments = target
+                            includeAudio = target
                             includeApps = target
                             includeWhatsApp = target
                         }
@@ -802,6 +818,22 @@ struct SendCategoriesStepView: View {
                     isOn: $includeDocuments
                 ) {
                     documentsDropdownContent
+                }
+
+                // 6b. Audio, Memo Vocali & Note
+                categoryDropdownCard(
+                    icon: "waveform",
+                    iconColor: AppleTheme.teal,
+                    title: "Audio, Memo Vocali & Note",
+                    countBadge: pickedAudioFiles.isEmpty ? "Memo vocali, MP3, Note" : "\(pickedAudioFiles.count) file pronti",
+                    infoMessage: "Trasferisce registrazioni vocali, file audio (.m4a, .mp3, .wav) e Note esportate (.txt, .pdf) nella cartella dedicata del nuovo telefono.",
+                    isOn: $includeAudio
+                ) {
+                    AudioAndNotesDropdownBody(
+                        pickedAudioFiles: pickedAudioFiles,
+                        onPickAudioOrNotes: onPickAudioOrNotes,
+                        onClearAudio: onClearAudioFiles
+                    )
                 }
 
                 // 7. App scaricate
@@ -998,6 +1030,8 @@ struct SendCategoriesStepView: View {
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(AppleTheme.blue)
             }
+
+            PhotoFilterChipsBar(filters: $mediaFilters, availableAlbums: availablePhotoAlbums)
         }
     }
 
@@ -1056,6 +1090,8 @@ struct SendCategoriesStepView: View {
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(AppleTheme.blue)
             }
+
+            VideoFilterChipsBar(filters: $mediaFilters)
         }
     }
 
@@ -1265,6 +1301,11 @@ struct SendCategoriesStepView: View {
             icon: "externaldrive.fill",
             tint: AppleTheme.blue,
             action: onAddFolders
+        )
+
+        GuidedPasswordsSectionBody(
+            stagedCsvCount: pickedDocuments.filter { $0.0.fileName.lowercased().hasSuffix(".csv") }.count,
+            onPickPasswordCsv: onPickPasswordCsv
         )
 
         if hasAuthorizedAnyPositions {
@@ -1494,13 +1535,63 @@ struct SendCategoriesStepView: View {
 
         // Blocco 2: Categorie estese in stile iPhone (icona + nome per ogni app)
         VStack(alignment: .leading, spacing: 9) {
-            Text("Categorie estese stile iPhone")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(AppleTheme.textPrimary)
+            let totalCuratedAppsCount = visibleQuickCategories.reduce(0) { $0 + $1.apps.count }
+            HStack {
+                Text("Categorie estese stile iPhone")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(AppleTheme.textPrimary)
+                Spacer()
+                Text("\(visibleQuickCategories.count) cat. • \(totalCuratedAppsCount) app")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(AppleTheme.blue)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .foregroundColor(AppleTheme.textSecondary)
+                TextField("Filtra velocemente tra le \(totalCuratedAppsCount) app del catalogo...", text: $catalogFilterQuery)
+                    .font(.system(size: 13))
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                if !catalogFilterQuery.isEmpty {
+                    Button {
+                        catalogFilterQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(AppleTheme.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 11)
+            .frame(height: 38)
+            .background(AppleTheme.cardSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(AppleTheme.cardBorder, lineWidth: 0.8)
+            )
+
+            let cleanFilter = catalogFilterQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let filteredQuickCategories: [AppQuickCategory] = {
+                guard !cleanFilter.isEmpty else { return visibleQuickCategories }
+                return visibleQuickCategories.compactMap { cat in
+                    if cat.title.lowercased().contains(cleanFilter) { return cat }
+                    let matching = cat.apps.filter { $0.appName.lowercased().contains(cleanFilter) || $0.packageName.lowercased().contains(cleanFilter) }
+                    guard !matching.isEmpty else { return nil }
+                    return AppQuickCategory(
+                        id: cat.id,
+                        title: cat.title,
+                        iconName: cat.iconName,
+                        isGoogleAndroidPreinstalledCategory: cat.isGoogleAndroidPreinstalledCategory,
+                        apps: matching
+                    )
+                }
+            }()
 
             VStack(spacing: 8) {
-                ForEach(visibleQuickCategories) { category in
-                    let isExpanded = expandedAppCategoryIds.contains(category.id)
+                ForEach(filteredQuickCategories) { category in
+                    let isExpanded = !cleanFilter.isEmpty || expandedAppCategoryIds.contains(category.id)
                     iPhoneAppCategoryAccordionCard(
                         category: category,
                         iconOverrides: categoryIconOverrides,
@@ -1508,7 +1599,7 @@ struct SendCategoriesStepView: View {
                         isAppSelected: isQuickAppSelected,
                         onToggleExpand: {
                             withAnimation(.easeInOut(duration: 0.18)) {
-                                if isExpanded {
+                                if expandedAppCategoryIds.contains(category.id) {
                                     expandedAppCategoryIds.remove(category.id)
                                 } else {
                                     expandedAppCategoryIds.insert(category.id)
@@ -1884,6 +1975,5 @@ struct WhatsAppMigrationQrScannerSheet: View {
         .background(AppleTheme.backgroundGradient.ignoresSafeArea())
         .presentationDetents([.height(540), .large])
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.light)
     }
 }

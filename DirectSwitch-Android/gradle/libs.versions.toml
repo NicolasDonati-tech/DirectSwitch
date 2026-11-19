@@ -13,7 +13,6 @@ exifinterface = "1.4.1"
 documentfile = "1.1.0"
 zxing = "3.5.3"
 camerax = "1.4.2"
-billing = "7.1.1"
 junit = "4.13.2"
 
 [libraries]
@@ -39,7 +38,6 @@ androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
 androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
 androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
-billing-ktx = { module = "com.android.billingclient:billing-ktx", version.ref = "billing" }
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 

@@ -14,8 +14,8 @@ android {
         applicationId = "com.directswitch.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.5.1"
+        versionCode = 9
+        versionName = "1.6.0"
     }
 
     // Credenziali firma: mai nel codice. Lette da keystore.properties (ignorato da git) oppure da
@@ -106,7 +106,6 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-    implementation(libs.billing.ktx)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

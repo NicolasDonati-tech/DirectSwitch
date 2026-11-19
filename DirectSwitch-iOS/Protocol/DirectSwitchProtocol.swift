@@ -27,6 +27,7 @@ enum TransferCategory: String, Codable, Sendable {
     case VIDEOS
     case CALENDARS
     case DOCUMENTS
+    case AUDIO
     case SMS_HISTORY
     case WHATSAPP_VAULT
 }
@@ -43,6 +44,48 @@ struct QrPairingPayload: Codable, Equatable, Sendable {
     var wifiSsid: String? = nil
     var wifiPass: String? = nil
     var receiverHasPro: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case proto, sessionId, receiverName, receiverPlatform, ips, port, sessionKeyHex, wifiSsid, wifiPass, receiverHasPro
+    }
+
+    init(
+        proto: String = "DSWITCH_V1",
+        sessionId: String,
+        receiverName: String,
+        receiverPlatform: DevicePlatform,
+        ips: [String],
+        port: Int,
+        sessionKeyHex: String,
+        wifiSsid: String? = nil,
+        wifiPass: String? = nil,
+        receiverHasPro: Bool = false
+    ) {
+        self.proto = proto
+        self.sessionId = sessionId
+        self.receiverName = receiverName
+        self.receiverPlatform = receiverPlatform
+        self.ips = ips
+        self.port = port
+        self.sessionKeyHex = sessionKeyHex
+        self.wifiSsid = wifiSsid
+        self.wifiPass = wifiPass
+        self.receiverHasPro = receiverHasPro
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        proto = try c.decodeIfPresent(String.self, forKey: .proto) ?? "DSWITCH_V1"
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        receiverName = try c.decode(String.self, forKey: .receiverName)
+        receiverPlatform = try c.decode(DevicePlatform.self, forKey: .receiverPlatform)
+        ips = try c.decode([String].self, forKey: .ips)
+        port = try c.decode(Int.self, forKey: .port)
+        sessionKeyHex = try c.decode(String.self, forKey: .sessionKeyHex)
+        wifiSsid = try c.decodeIfPresent(String.self, forKey: .wifiSsid)
+        wifiPass = try c.decodeIfPresent(String.self, forKey: .wifiPass)
+        receiverHasPro = try c.decodeIfPresent(Bool.self, forKey: .receiverHasPro) ?? false
+    }
 
     func toCompactJson() -> String {
         guard let data = try? JSONEncoder().encode(self),
@@ -80,6 +123,39 @@ struct DiscoveryBeaconPayload: Codable, Equatable, Sendable {
     let ips: [String]
     let port: Int
     var receiverHasPro: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case proto, sessionId, receiverName, receiverPlatform, ips, port, receiverHasPro
+    }
+
+    init(
+        proto: String = "DSWITCH_BEACON_V1",
+        sessionId: String,
+        receiverName: String,
+        receiverPlatform: DevicePlatform,
+        ips: [String],
+        port: Int,
+        receiverHasPro: Bool = false
+    ) {
+        self.proto = proto
+        self.sessionId = sessionId
+        self.receiverName = receiverName
+        self.receiverPlatform = receiverPlatform
+        self.ips = ips
+        self.port = port
+        self.receiverHasPro = receiverHasPro
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        proto = try c.decodeIfPresent(String.self, forKey: .proto) ?? "DSWITCH_BEACON_V1"
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        receiverName = try c.decode(String.self, forKey: .receiverName)
+        receiverPlatform = try c.decode(DevicePlatform.self, forKey: .receiverPlatform)
+        ips = try c.decode([String].self, forKey: .ips)
+        port = try c.decode(Int.self, forKey: .port)
+        receiverHasPro = try c.decodeIfPresent(Bool.self, forKey: .receiverHasPro) ?? false
+    }
 
     func toCompactJson() -> String {
         guard let data = try? JSONEncoder().encode(self),
@@ -130,11 +206,55 @@ struct ActiveTransferScope: Codable, Equatable, Sendable {
     var calendars: Bool = false
     var reminders: Bool = false
     var documents: Bool = false
+    var audio: Bool = false
+    var callLogs: Bool = false
     var apps: Bool = false
     var whatsApp: Bool = false
 
+    enum CodingKeys: String, CodingKey {
+        case contacts, photos, videos, calendars, reminders, documents, audio, callLogs, apps, whatsApp
+    }
+
+    init(
+        contacts: Bool = false,
+        photos: Bool = false,
+        videos: Bool = false,
+        calendars: Bool = false,
+        reminders: Bool = false,
+        documents: Bool = false,
+        audio: Bool = false,
+        callLogs: Bool = false,
+        apps: Bool = false,
+        whatsApp: Bool = false
+    ) {
+        self.contacts = contacts
+        self.photos = photos
+        self.videos = videos
+        self.calendars = calendars
+        self.reminders = reminders
+        self.documents = documents
+        self.audio = audio
+        self.callLogs = callLogs
+        self.apps = apps
+        self.whatsApp = whatsApp
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        contacts = try c.decodeIfPresent(Bool.self, forKey: .contacts) ?? false
+        photos = try c.decodeIfPresent(Bool.self, forKey: .photos) ?? false
+        videos = try c.decodeIfPresent(Bool.self, forKey: .videos) ?? false
+        calendars = try c.decodeIfPresent(Bool.self, forKey: .calendars) ?? false
+        reminders = try c.decodeIfPresent(Bool.self, forKey: .reminders) ?? false
+        documents = try c.decodeIfPresent(Bool.self, forKey: .documents) ?? false
+        audio = try c.decodeIfPresent(Bool.self, forKey: .audio) ?? false
+        callLogs = try c.decodeIfPresent(Bool.self, forKey: .callLogs) ?? false
+        apps = try c.decodeIfPresent(Bool.self, forKey: .apps) ?? false
+        whatsApp = try c.decodeIfPresent(Bool.self, forKey: .whatsApp) ?? false
+    }
+
     var hasAnyStandardDataCategory: Bool {
-        contacts || photos || videos || calendars || reminders || documents || apps
+        contacts || photos || videos || calendars || reminders || documents || audio || callLogs || apps
     }
 
     var isWhatsAppOnly: Bool {
@@ -142,17 +262,18 @@ struct ActiveTransferScope: Codable, Equatable, Sendable {
     }
 
     var isAppsOnly: Bool {
-        apps && !contacts && !photos && !videos && !calendars && !reminders && !documents && !whatsApp
+        apps && !contacts && !photos && !videos && !calendars && !reminders && !documents && !audio && !callLogs && !whatsApp
     }
 
     var hasMediaOrDocuments: Bool {
-        photos || videos || documents
+        photos || videos || documents || audio
     }
 
     static func inferred(from manifest: TransferManifest) -> ActiveTransferScope {
         let hasPhotos = manifest.items.contains { $0.category == .PHOTOS }
         let hasVideos = manifest.items.contains { $0.category == .VIDEOS }
         let hasDocs = manifest.items.contains { $0.category == .DOCUMENTS }
+        let hasAudio = manifest.items.contains { $0.category == .AUDIO }
         let hasWaVault = manifest.items.contains { $0.category == .WHATSAPP_VAULT }
         return ActiveTransferScope(
             contacts: !manifest.contactsPayload.isEmpty,
@@ -161,6 +282,8 @@ struct ActiveTransferScope: Codable, Equatable, Sendable {
             calendars: !manifest.calendarsPayload.isEmpty,
             reminders: !(manifest.remindersPayload ?? []).isEmpty,
             documents: hasDocs,
+            audio: hasAudio,
+            callLogs: !(manifest.callLogsPayload ?? []).isEmpty,
             apps: !(manifest.installedAppsPayload ?? []).isEmpty,
             whatsApp: (manifest.requestNativeWhatsAppMigration == true) || hasWaVault
         )
@@ -176,6 +299,42 @@ struct HandshakeRequest: Codable, Sendable {
     var totalEstimatedBytes: Int64 = 0
     var isResume: Bool? = nil
     var transferScope: ActiveTransferScope? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId, senderName, senderPlatform, senderHasPro, senderHasCloudSavePro, totalEstimatedBytes, isResume, transferScope
+    }
+
+    init(
+        sessionId: String,
+        senderName: String,
+        senderPlatform: DevicePlatform,
+        senderHasPro: Bool,
+        senderHasCloudSavePro: Bool = false,
+        totalEstimatedBytes: Int64 = 0,
+        isResume: Bool? = nil,
+        transferScope: ActiveTransferScope? = nil
+    ) {
+        self.sessionId = sessionId
+        self.senderName = senderName
+        self.senderPlatform = senderPlatform
+        self.senderHasPro = senderHasPro
+        self.senderHasCloudSavePro = senderHasCloudSavePro
+        self.totalEstimatedBytes = totalEstimatedBytes
+        self.isResume = isResume
+        self.transferScope = transferScope
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        senderName = try c.decode(String.self, forKey: .senderName)
+        senderPlatform = try c.decode(DevicePlatform.self, forKey: .senderPlatform)
+        senderHasPro = try c.decodeIfPresent(Bool.self, forKey: .senderHasPro) ?? false
+        senderHasCloudSavePro = try c.decodeIfPresent(Bool.self, forKey: .senderHasCloudSavePro) ?? false
+        totalEstimatedBytes = try c.decodeIfPresent(Int64.self, forKey: .totalEstimatedBytes) ?? 0
+        isResume = try c.decodeIfPresent(Bool.self, forKey: .isResume)
+        transferScope = try c.decodeIfPresent(ActiveTransferScope.self, forKey: .transferScope)
+    }
 }
 
 struct HandshakeResponse: Codable, Sendable {
@@ -200,6 +359,36 @@ struct PostalAddressTransferRecord: Codable, Equatable, Sendable {
     var state: String = ""
     var postalCode: String = ""
     var country: String = ""
+
+    enum CodingKeys: String, CodingKey {
+        case label, street, city, state, postalCode, country
+    }
+
+    init(
+        label: String? = nil,
+        street: String = "",
+        city: String = "",
+        state: String = "",
+        postalCode: String = "",
+        country: String = ""
+    ) {
+        self.label = label
+        self.street = street
+        self.city = city
+        self.state = state
+        self.postalCode = postalCode
+        self.country = country
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        street = try c.decodeIfPresent(String.self, forKey: .street) ?? ""
+        city = try c.decodeIfPresent(String.self, forKey: .city) ?? ""
+        state = try c.decodeIfPresent(String.self, forKey: .state) ?? ""
+        postalCode = try c.decodeIfPresent(String.self, forKey: .postalCode) ?? ""
+        country = try c.decodeIfPresent(String.self, forKey: .country) ?? ""
+    }
 }
 
 struct ContactTransferRecord: Codable, Identifiable, Sendable {
@@ -221,6 +410,75 @@ struct ContactTransferRecord: Codable, Identifiable, Sendable {
     var urls: [String]? = nil
     var postalAddresses: [PostalAddressTransferRecord]? = nil
     var avatarJpegBase64: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, displayName, phones, emails, organization, note
+        case givenName, familyName, nickname, jobTitle
+        case birthdayYear, birthdayMonth, birthdayDay
+        case labeledPhones, labeledEmails, urls, postalAddresses, avatarJpegBase64
+    }
+
+    init(
+        id: String,
+        displayName: String,
+        phones: [String],
+        emails: [String] = [],
+        organization: String? = nil,
+        note: String? = nil,
+        givenName: String? = nil,
+        familyName: String? = nil,
+        nickname: String? = nil,
+        jobTitle: String? = nil,
+        birthdayYear: Int? = nil,
+        birthdayMonth: Int? = nil,
+        birthdayDay: Int? = nil,
+        labeledPhones: [LabeledValueRecord]? = nil,
+        labeledEmails: [LabeledValueRecord]? = nil,
+        urls: [String]? = nil,
+        postalAddresses: [PostalAddressTransferRecord]? = nil,
+        avatarJpegBase64: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.phones = phones
+        self.emails = emails
+        self.organization = organization
+        self.note = note
+        self.givenName = givenName
+        self.familyName = familyName
+        self.nickname = nickname
+        self.jobTitle = jobTitle
+        self.birthdayYear = birthdayYear
+        self.birthdayMonth = birthdayMonth
+        self.birthdayDay = birthdayDay
+        self.labeledPhones = labeledPhones
+        self.labeledEmails = labeledEmails
+        self.urls = urls
+        self.postalAddresses = postalAddresses
+        self.avatarJpegBase64 = avatarJpegBase64
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        phones = try c.decodeIfPresent([String].self, forKey: .phones) ?? []
+        emails = try c.decodeIfPresent([String].self, forKey: .emails) ?? []
+        organization = try c.decodeIfPresent(String.self, forKey: .organization)
+        note = try c.decodeIfPresent(String.self, forKey: .note)
+        givenName = try c.decodeIfPresent(String.self, forKey: .givenName)
+        familyName = try c.decodeIfPresent(String.self, forKey: .familyName)
+        nickname = try c.decodeIfPresent(String.self, forKey: .nickname)
+        jobTitle = try c.decodeIfPresent(String.self, forKey: .jobTitle)
+        birthdayYear = try c.decodeIfPresent(Int.self, forKey: .birthdayYear)
+        birthdayMonth = try c.decodeIfPresent(Int.self, forKey: .birthdayMonth)
+        birthdayDay = try c.decodeIfPresent(Int.self, forKey: .birthdayDay)
+        labeledPhones = try c.decodeIfPresent([LabeledValueRecord].self, forKey: .labeledPhones)
+        labeledEmails = try c.decodeIfPresent([LabeledValueRecord].self, forKey: .labeledEmails)
+        urls = try c.decodeIfPresent([String].self, forKey: .urls)
+        postalAddresses = try c.decodeIfPresent([PostalAddressTransferRecord].self, forKey: .postalAddresses)
+        avatarJpegBase64 = try c.decodeIfPresent(String.self, forKey: .avatarJpegBase64)
+    }
 }
 
 struct CalendarEventRecord: Codable, Identifiable, Sendable {
@@ -236,6 +494,55 @@ struct CalendarEventRecord: Codable, Identifiable, Sendable {
     var recurrenceFrequency: String? = nil
     var recurrenceInterval: Int? = nil
     var alarmOffsetSeconds: Double? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, description, location, startEpochMillis, endEpochMillis
+        case allDay, rrule, calendarTitle, recurrenceFrequency, recurrenceInterval, alarmOffsetSeconds
+    }
+
+    init(
+        id: String,
+        title: String,
+        description: String? = nil,
+        location: String? = nil,
+        startEpochMillis: Int64,
+        endEpochMillis: Int64,
+        allDay: Bool = false,
+        rrule: String? = nil,
+        calendarTitle: String? = nil,
+        recurrenceFrequency: String? = nil,
+        recurrenceInterval: Int? = nil,
+        alarmOffsetSeconds: Double? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.location = location
+        self.startEpochMillis = startEpochMillis
+        self.endEpochMillis = endEpochMillis
+        self.allDay = allDay
+        self.rrule = rrule
+        self.calendarTitle = calendarTitle
+        self.recurrenceFrequency = recurrenceFrequency
+        self.recurrenceInterval = recurrenceInterval
+        self.alarmOffsetSeconds = alarmOffsetSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        description = try c.decodeIfPresent(String.self, forKey: .description)
+        location = try c.decodeIfPresent(String.self, forKey: .location)
+        startEpochMillis = try c.decode(Int64.self, forKey: .startEpochMillis)
+        endEpochMillis = try c.decode(Int64.self, forKey: .endEpochMillis)
+        allDay = try c.decodeIfPresent(Bool.self, forKey: .allDay) ?? false
+        rrule = try c.decodeIfPresent(String.self, forKey: .rrule)
+        calendarTitle = try c.decodeIfPresent(String.self, forKey: .calendarTitle)
+        recurrenceFrequency = try c.decodeIfPresent(String.self, forKey: .recurrenceFrequency)
+        recurrenceInterval = try c.decodeIfPresent(Int.self, forKey: .recurrenceInterval)
+        alarmOffsetSeconds = try c.decodeIfPresent(Double.self, forKey: .alarmOffsetSeconds)
+    }
 }
 
 struct ReminderTransferRecord: Codable, Identifiable, Equatable, Sendable {
@@ -246,6 +553,39 @@ struct ReminderTransferRecord: Codable, Identifiable, Equatable, Sendable {
     var isCompleted: Bool = false
     var priority: Int = 0
     var dueEpochMillis: Int64? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, notes, listName, isCompleted, priority, dueEpochMillis
+    }
+
+    init(
+        id: String,
+        title: String,
+        notes: String? = nil,
+        listName: String? = nil,
+        isCompleted: Bool = false,
+        priority: Int = 0,
+        dueEpochMillis: Int64? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.notes = notes
+        self.listName = listName
+        self.isCompleted = isCompleted
+        self.priority = priority
+        self.dueEpochMillis = dueEpochMillis
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        listName = try c.decodeIfPresent(String.self, forKey: .listName)
+        isCompleted = try c.decodeIfPresent(Bool.self, forKey: .isCompleted) ?? false
+        priority = try c.decodeIfPresent(Int.self, forKey: .priority) ?? 0
+        dueEpochMillis = try c.decodeIfPresent(Int64.self, forKey: .dueEpochMillis)
+    }
 }
 
 struct SmsTransferRecord: Codable, Identifiable, Sendable {
@@ -254,6 +594,73 @@ struct SmsTransferRecord: Codable, Identifiable, Sendable {
     let body: String
     let dateEpochMillis: Int64
     var messageType: Int = 1
+
+    enum CodingKeys: String, CodingKey {
+        case id, address, body, dateEpochMillis, messageType
+    }
+
+    init(
+        id: String,
+        address: String,
+        body: String,
+        dateEpochMillis: Int64,
+        messageType: Int = 1
+    ) {
+        self.id = id
+        self.address = address
+        self.body = body
+        self.dateEpochMillis = dateEpochMillis
+        self.messageType = messageType
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        address = try c.decode(String.self, forKey: .address)
+        body = try c.decode(String.self, forKey: .body)
+        dateEpochMillis = try c.decode(Int64.self, forKey: .dateEpochMillis)
+        messageType = try c.decodeIfPresent(Int.self, forKey: .messageType) ?? 1
+    }
+}
+
+struct CallLogTransferRecord: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let number: String
+    var cachedName: String? = nil
+    /// 1 = Ricevuta, 2 = Effettuata, 3 = Persa, 5 = Rifiutata
+    var callType: Int = 1
+    let dateEpochMillis: Int64
+    var durationSeconds: Int64 = 0
+
+    enum CodingKeys: String, CodingKey {
+        case id, number, cachedName, callType, dateEpochMillis, durationSeconds
+    }
+
+    init(
+        id: String,
+        number: String,
+        cachedName: String? = nil,
+        callType: Int = 1,
+        dateEpochMillis: Int64,
+        durationSeconds: Int64 = 0
+    ) {
+        self.id = id
+        self.number = number
+        self.cachedName = cachedName
+        self.callType = callType
+        self.dateEpochMillis = dateEpochMillis
+        self.durationSeconds = durationSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        number = try c.decode(String.self, forKey: .number)
+        cachedName = try c.decodeIfPresent(String.self, forKey: .cachedName)
+        callType = try c.decodeIfPresent(Int.self, forKey: .callType) ?? 1
+        dateEpochMillis = try c.decode(Int64.self, forKey: .dateEpochMillis)
+        durationSeconds = try c.decodeIfPresent(Int64.self, forKey: .durationSeconds) ?? 0
+    }
 }
 
 struct InstalledAppRecord: Codable, Identifiable, Equatable, Sendable {
@@ -280,6 +687,58 @@ struct ManifestItem: Codable, Identifiable, Sendable {
     var longitude: Double? = nil
     var isLivePhoto: Bool? = nil
     var livePhotoVideoFileName: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, category, fileName, relativeAlbumOrFolder, sizeBytes, capturedEpochMillis
+        case dedupKey, mimeType, isFavorite, latitude, longitude, isLivePhoto, livePhotoVideoFileName
+    }
+
+    init(
+        id: String,
+        category: TransferCategory,
+        fileName: String,
+        relativeAlbumOrFolder: String = "",
+        sizeBytes: Int64,
+        capturedEpochMillis: Int64 = 0,
+        dedupKey: String,
+        mimeType: String = "application/octet-stream",
+        isFavorite: Bool? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        isLivePhoto: Bool? = nil,
+        livePhotoVideoFileName: String? = nil
+    ) {
+        self.id = id
+        self.category = category
+        self.fileName = fileName
+        self.relativeAlbumOrFolder = relativeAlbumOrFolder
+        self.sizeBytes = sizeBytes
+        self.capturedEpochMillis = capturedEpochMillis
+        self.dedupKey = dedupKey
+        self.mimeType = mimeType
+        self.isFavorite = isFavorite
+        self.latitude = latitude
+        self.longitude = longitude
+        self.isLivePhoto = isLivePhoto
+        self.livePhotoVideoFileName = livePhotoVideoFileName
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        category = try c.decode(TransferCategory.self, forKey: .category)
+        fileName = try c.decode(String.self, forKey: .fileName)
+        relativeAlbumOrFolder = try c.decodeIfPresent(String.self, forKey: .relativeAlbumOrFolder) ?? ""
+        sizeBytes = try c.decode(Int64.self, forKey: .sizeBytes)
+        capturedEpochMillis = try c.decodeIfPresent(Int64.self, forKey: .capturedEpochMillis) ?? 0
+        dedupKey = try c.decode(String.self, forKey: .dedupKey)
+        mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType) ?? "application/octet-stream"
+        isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite)
+        latitude = try c.decodeIfPresent(Double.self, forKey: .latitude)
+        longitude = try c.decodeIfPresent(Double.self, forKey: .longitude)
+        isLivePhoto = try c.decodeIfPresent(Bool.self, forKey: .isLivePhoto)
+        livePhotoVideoFileName = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoFileName)
+    }
 }
 
 struct TransferManifest: Codable, Sendable {
@@ -290,6 +749,7 @@ struct TransferManifest: Codable, Sendable {
     var calendarsPayload: [CalendarEventRecord] = []
     var remindersPayload: [ReminderTransferRecord]? = nil
     var smsPayload: [SmsTransferRecord] = []
+    var callLogsPayload: [CallLogTransferRecord]? = nil
     var installedAppsPayload: [InstalledAppRecord]? = nil
     var requestNativeWhatsAppMigration: Bool? = nil
     var transferScope: ActiveTransferScope? = nil
@@ -302,6 +762,7 @@ struct TransferManifest: Codable, Sendable {
         case calendarsPayload
         case remindersPayload
         case smsPayload
+        case callLogsPayload
         case installedAppsPayload
         case requestNativeWhatsAppMigration
         case transferScope
@@ -315,6 +776,7 @@ struct TransferManifest: Codable, Sendable {
         calendarsPayload: [CalendarEventRecord] = [],
         remindersPayload: [ReminderTransferRecord]? = nil,
         smsPayload: [SmsTransferRecord] = [],
+        callLogsPayload: [CallLogTransferRecord]? = nil,
         installedAppsPayload: [InstalledAppRecord]? = nil,
         requestNativeWhatsAppMigration: Bool? = nil,
         transferScope: ActiveTransferScope? = nil
@@ -326,6 +788,7 @@ struct TransferManifest: Codable, Sendable {
         self.calendarsPayload = calendarsPayload
         self.remindersPayload = remindersPayload
         self.smsPayload = smsPayload
+        self.callLogsPayload = callLogsPayload
         self.installedAppsPayload = installedAppsPayload
         self.requestNativeWhatsAppMigration = requestNativeWhatsAppMigration
         self.transferScope = transferScope
@@ -340,6 +803,7 @@ struct TransferManifest: Codable, Sendable {
         calendarsPayload = try container.decodeIfPresent([CalendarEventRecord].self, forKey: .calendarsPayload) ?? []
         remindersPayload = try container.decodeIfPresent([ReminderTransferRecord].self, forKey: .remindersPayload)
         smsPayload = try container.decodeIfPresent([SmsTransferRecord].self, forKey: .smsPayload) ?? []
+        callLogsPayload = try container.decodeIfPresent([CallLogTransferRecord].self, forKey: .callLogsPayload)
         installedAppsPayload = try container.decodeIfPresent([InstalledAppRecord].self, forKey: .installedAppsPayload)
         requestNativeWhatsAppMigration = try container.decodeIfPresent(Bool.self, forKey: .requestNativeWhatsAppMigration)
         transferScope = try container.decodeIfPresent(ActiveTransferScope.self, forKey: .transferScope)
@@ -356,6 +820,7 @@ struct ManifestResponse: Codable, Sendable {
     var remindersImportedCount: Int? = nil
     var remindersAlreadyPresentCount: Int? = nil
     var smsImportedCount: Int = 0
+    var callLogsImportedCount: Int? = nil
     var gatedByCrossOsPreviewCount: Int = 0
 
     enum CodingKeys: String, CodingKey {
@@ -368,6 +833,7 @@ struct ManifestResponse: Codable, Sendable {
         case remindersImportedCount
         case remindersAlreadyPresentCount
         case smsImportedCount
+        case callLogsImportedCount
         case gatedByCrossOsPreviewCount
     }
 
@@ -381,6 +847,7 @@ struct ManifestResponse: Codable, Sendable {
         remindersImportedCount: Int? = nil,
         remindersAlreadyPresentCount: Int? = nil,
         smsImportedCount: Int = 0,
+        callLogsImportedCount: Int? = nil,
         gatedByCrossOsPreviewCount: Int = 0
     ) {
         self.acceptedItemIds = acceptedItemIds
@@ -392,6 +859,7 @@ struct ManifestResponse: Codable, Sendable {
         self.remindersImportedCount = remindersImportedCount
         self.remindersAlreadyPresentCount = remindersAlreadyPresentCount
         self.smsImportedCount = smsImportedCount
+        self.callLogsImportedCount = callLogsImportedCount
         self.gatedByCrossOsPreviewCount = gatedByCrossOsPreviewCount
     }
 
@@ -406,6 +874,7 @@ struct ManifestResponse: Codable, Sendable {
         remindersImportedCount = try c.decodeIfPresent(Int.self, forKey: .remindersImportedCount)
         remindersAlreadyPresentCount = try c.decodeIfPresent(Int.self, forKey: .remindersAlreadyPresentCount)
         smsImportedCount = try c.decodeIfPresent(Int.self, forKey: .smsImportedCount) ?? 0
+        callLogsImportedCount = try c.decodeIfPresent(Int.self, forKey: .callLogsImportedCount)
         gatedByCrossOsPreviewCount = try c.decodeIfPresent(Int.self, forKey: .gatedByCrossOsPreviewCount) ?? 0
     }
 }
@@ -422,6 +891,7 @@ struct TransferCompletionReport: Codable, Sendable {
     var remindersAlreadyPresentCount: Int? = nil
     var livePhotosSavedCount: Int? = nil
     var importedSmsCount: Int = 0
+    var callLogsImportedCount: Int? = nil
     let skippedDuplicatesCount: Int
     let elapsedMillis: Int64
 
@@ -437,6 +907,7 @@ struct TransferCompletionReport: Codable, Sendable {
         case remindersAlreadyPresentCount
         case livePhotosSavedCount
         case importedSmsCount
+        case callLogsImportedCount
         case skippedDuplicatesCount
         case elapsedMillis
     }
@@ -453,6 +924,7 @@ struct TransferCompletionReport: Codable, Sendable {
         remindersAlreadyPresentCount: Int? = nil,
         livePhotosSavedCount: Int? = nil,
         importedSmsCount: Int = 0,
+        callLogsImportedCount: Int? = nil,
         skippedDuplicatesCount: Int,
         elapsedMillis: Int64
     ) {
@@ -467,6 +939,7 @@ struct TransferCompletionReport: Codable, Sendable {
         self.remindersAlreadyPresentCount = remindersAlreadyPresentCount
         self.livePhotosSavedCount = livePhotosSavedCount
         self.importedSmsCount = importedSmsCount
+        self.callLogsImportedCount = callLogsImportedCount
         self.skippedDuplicatesCount = skippedDuplicatesCount
         self.elapsedMillis = elapsedMillis
     }
@@ -484,6 +957,7 @@ struct TransferCompletionReport: Codable, Sendable {
         remindersAlreadyPresentCount = try c.decodeIfPresent(Int.self, forKey: .remindersAlreadyPresentCount)
         livePhotosSavedCount = try c.decodeIfPresent(Int.self, forKey: .livePhotosSavedCount)
         importedSmsCount = try c.decodeIfPresent(Int.self, forKey: .importedSmsCount) ?? 0
+        callLogsImportedCount = try c.decodeIfPresent(Int.self, forKey: .callLogsImportedCount)
         skippedDuplicatesCount = try c.decodeIfPresent(Int.self, forKey: .skippedDuplicatesCount) ?? 0
         elapsedMillis = try c.decodeIfPresent(Int64.self, forKey: .elapsedMillis) ?? 0
     }

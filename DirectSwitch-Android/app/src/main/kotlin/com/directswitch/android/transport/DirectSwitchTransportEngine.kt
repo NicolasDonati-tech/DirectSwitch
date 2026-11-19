@@ -22,12 +22,16 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import com.directswitch.android.DirectSwitchLog
+import com.directswitch.android.migrators.AndroidMediaFilterHelper
 import com.directswitch.android.migrators.AndroidRemindersMigrator
+import com.directswitch.android.migrators.AudioAndMemoMigrator
 import com.directswitch.android.migrators.CalendarMigrator
+import com.directswitch.android.migrators.CallLogMigrator
 import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.ContactsSmartMerger
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.InstalledAppsScanner
+import com.directswitch.android.migrators.LocalMediaEntry
 import com.directswitch.android.migrators.MediaExifScannerAndImporter
 import com.directswitch.android.migrators.PublicDownloadsSaver
 import com.directswitch.android.migrators.SmsSystemScanner
@@ -46,14 +50,23 @@ import com.directswitch.android.protocol.LicensePolicyEvaluator
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.ManifestResponse
 import com.directswitch.android.protocol.MediaFallbackNaming
+import com.directswitch.android.protocol.MediaTransferFilterOptions
 import com.directswitch.android.protocol.PairAckRequest
 import com.directswitch.android.protocol.PinPairingRequest
 import com.directswitch.android.protocol.QrPairingPayload
+import com.directswitch.android.protocol.SecureTempFileShredder
 import com.directswitch.android.protocol.SessionLicenseTier
+import com.directswitch.android.protocol.SkippedTransferItemRecord
 import com.directswitch.android.protocol.SlidingTransferSpeedMeter
+import com.directswitch.android.protocol.SpaceReliefOffer
+import com.directswitch.android.protocol.SpaceReliefPlanner
 import com.directswitch.android.protocol.TenPercentSteppedEtaTracker
 import com.directswitch.android.protocol.TransferCategory
+import com.directswitch.android.protocol.TransferCheckpointRecord
+import com.directswitch.android.protocol.TransferCheckpointStore
 import com.directswitch.android.protocol.TransferCompletionReport
+import com.directswitch.android.protocol.TransferConnectionMedium
+import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.protocol.TransferManifest
 import com.directswitch.android.protocol.TransferPreparationItem
 import com.directswitch.android.protocol.TransferPrepareRequest
@@ -61,12 +74,11 @@ import com.directswitch.android.protocol.TransferProgressAccounting
 import com.directswitch.android.protocol.TransferSessionStage
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -99,6 +111,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 data class LiveTransferProgress(
     val phaseLabel: String = "In attesa di connessione...",
@@ -119,8 +132,12 @@ data class LiveTransferProgress(
     val importedReminders: Int = 0,
     val remindersAlreadyPresent: Int = 0,
     val importedSms: Int = 0,
+    val importedCallLogs: Int = 0,
     val skippedDuplicates: Int = 0,
     val failedItemsCount: Int = 0,
+    val skippedItems: List<SkippedTransferItemRecord> = emptyList(),
+    val spaceReliefOffer: SpaceReliefOffer? = null,
+    val connectionMedium: TransferConnectionMedium = TransferConnectionMedium.LOCAL_WIFI,
     val receivedInstalledApps: List<InstalledAppRecord> = emptyList(),
     val receivedDocumentFolders: Map<String, Int> = emptyMap(),
     val activeTransferScope: ActiveTransferScope = ActiveTransferScope(),
@@ -134,6 +151,19 @@ data class LiveTransferProgress(
 )
 
 object LocalNetworkAddresses {
+    private val wiredInterfacePrefixes = listOf("rndis", "usb", "eth", "ncm", "enx")
+    private val p2pInterfacePrefixes = listOf("ap", "p2p", "swlan", "softap")
+
+    fun isWiredInterfaceName(name: String): Boolean {
+        val lower = name.lowercase()
+        return wiredInterfacePrefixes.any { lower.startsWith(it) }
+    }
+
+    fun isP2pInterfaceName(name: String): Boolean {
+        val lower = name.lowercase()
+        return p2pInterfacePrefixes.any { lower.startsWith(it) }
+    }
+
     /**
      * Il canale HTTP è in chiaro solo sul trasporto locale (il payload è interamente cifrato AES-256-GCM):
      * accettiamo ESCLUSIVAMENTE destinazioni di rete locale privata (10/8, 172.16/12, 192.168/16, link-local 169.254/16).
@@ -149,17 +179,28 @@ object LocalNetworkAddresses {
             (o[0] == 169 && o[1] == 254)
     }
 
+    /** Restituisce gli IPv4 locali dando priorità assoluta a Cavo USB-C / Ethernet / Tethering, poi Hotspot P2P, poi Wi-Fi. */
     fun listPrivateIpv4Addresses(): List<String> {
-        val out = mutableListOf<String>()
+        val ranked = mutableListOf<Pair<Int, String>>()
         try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
             for (nif in interfaces) {
                 if (!nif.isUp || nif.isLoopback) continue
+                val name = nif.name.orEmpty()
+                val wired = isWiredInterfaceName(name)
+                val p2p = isP2pInterfaceName(name)
+                val priority = when {
+                    wired -> 0
+                    p2p -> 1
+                    name.lowercase().startsWith("wlan") -> 2
+                    else -> 3
+                }
                 for (addr in Collections.list(nif.inetAddresses)) {
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
                         val ip = addr.hostAddress ?: continue
-                        if (isLocalNetworkIpv4(ip) && !ip.startsWith("169.254.")) {
-                            out.add(ip)
+                        val allowLinkLocal = wired
+                        if (isLocalNetworkIpv4(ip) && (allowLinkLocal || !ip.startsWith("169.254."))) {
+                            ranked.add(priority to ip)
                         }
                     }
                 }
@@ -167,7 +208,30 @@ object LocalNetworkAddresses {
         } catch (t: Throwable) {
             DirectSwitchLog.warn("Lettura indirizzi di rete fallita", t)
         }
-        return out.distinct()
+        return ranked.sortedBy { it.first }.map { it.second }.distinct()
+    }
+
+    fun detectConnectionMedium(targetIp: String? = null, isHotspotOrP2p: Boolean = false): TransferConnectionMedium {
+        val targetPrefix = targetIp?.split(".")?.take(3)?.joinToString(".")
+        runCatching {
+            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+            for (nif in interfaces) {
+                if (!nif.isUp || nif.isLoopback) continue
+                val name = nif.name.orEmpty()
+                for (addr in Collections.list(nif.inetAddresses)) {
+                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                        val ip = addr.hostAddress ?: continue
+                        val matches = targetIp == null || ip == targetIp ||
+                            (targetPrefix != null && ip.startsWith("$targetPrefix."))
+                        if (matches) {
+                            if (isWiredInterfaceName(name)) return TransferConnectionMedium.USB_CABLE
+                            if (isP2pInterfaceName(name)) return TransferConnectionMedium.PEER_TO_PEER_WIFI
+                        }
+                    }
+                }
+            }
+        }
+        return if (isHotspotOrP2p) TransferConnectionMedium.PEER_TO_PEER_WIFI else TransferConnectionMedium.LOCAL_WIFI
     }
 }
 
@@ -267,6 +331,7 @@ class DirectSwitchTransferServer(
     private var bootstrapSecretToken: String? = null
     private var activeTier: SessionLicenseTier = SessionLicenseTier.INTRA_OS_FREE
     private val handshakeCompleted = AtomicBoolean(false)
+    private val activeRunIsResume = AtomicBoolean(false)
     private val requestedWhatsAppMigration = AtomicBoolean(false)
     private val pinPairingConsumed = AtomicBoolean(false)
     private val pinFailedAttempts = AtomicInteger(0)
@@ -297,6 +362,7 @@ class DirectSwitchTransferServer(
         pinFailedAttempts.set(0)
         sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(sessionKeyHex)
         handshakeCompleted.set(false)
+        activeRunIsResume.set(false)
         requestedWhatsAppMigration.set(false)
         manifestMap.clear()
         completedIds.clear()
@@ -622,6 +688,7 @@ class DirectSwitchTransferServer(
                     docFolderCounts.clear()
                     transferredBytesCounter.set(0L)
                     completedFilesCounter.set(0)
+                    activeRunIsResume.set(false)
                     requestedWhatsAppMigration.set(req.transferScope.whatsApp)
                     synchronized(rxProgressLock) {
                         rxProgressAccounting = null
@@ -676,33 +743,102 @@ class DirectSwitchTransferServer(
                         senderHasCloudSavePro = req.senderHasCloudSavePro,
                         receiverHasCloudSavePro = receiverHasCloudSavePro
                     )
-                    val enoughSpace = req.totalEstimatedBytes < (freeBytes - 200L * 1024L * 1024L)
-                    docFolderCounts.clear()
-                    transferStartMillis = System.currentTimeMillis()
-                    handshakeCompleted.set(enoughSpace)
+                    val isResume = req.isResume == true
+                    activeRunIsResume.set(isResume)
 
-                    val nextScope = req.transferScope ?: _progress.value.activeTransferScope
-                    _progress.value = _progress.value.copy(
-                        phaseLabel = "Sto preparando la ricezione da ${req.senderName}...",
-                        peerDeviceName = req.senderName,
-                        peerPlatform = req.senderPlatform,
-                        licenseTier = activeTier,
-                        activeTransferScope = nextScope,
-                        sessionStage = if (nextScope.isWhatsAppOnly) {
-                            TransferSessionStage.TRANSFERRING
+                    // Su nuovo trasferimento azzeriamo lo stato precedente; su ripresa (`isResume = true`)
+                    // conserviamo file completati, byte già scritti e contatori così la barra prosegue senza tornare a 0%.
+                    if (!isResume) {
+                        manifestMap.clear()
+                        completedIds.clear()
+                        skippedIds.clear()
+                        docFolderCounts.clear()
+                        transferredBytesCounter.set(0L)
+                        completedFilesCounter.set(0)
+                        requestedWhatsAppMigration.set(false)
+                        synchronized(rxProgressLock) {
+                            rxProgressAccounting = null
+                            rxSpeedMeter = SlidingTransferSpeedMeter()
+                            rxEtaTracker.reset()
+                        }
+                        transferStartMillis = System.currentTimeMillis()
+                    } else if (transferStartMillis == 0L) {
+                        transferStartMillis = System.currentTimeMillis()
+                    }
+
+                    // All'handshake verifichiamo un margine minimo operativo (250 MB): il controllo esatto
+                    // sui byte ancora da scrivere viene eseguito in `/v1/manifest` dopo la deduplica (fondamentale su Resume!).
+                    val hasMinimalWorkingRoom = freeBytes > 250L * 1024L * 1024L
+                    val enoughSpace = hasMinimalWorkingRoom && (
+                        if (completedIds.isEmpty()) {
+                            req.totalEstimatedBytes < (freeBytes - 150L * 1024L * 1024L).coerceAtLeast(0L) ||
+                                req.totalEstimatedBytes == 0L
                         } else {
-                            TransferSessionStage.PREPARING
+                            true
                         }
                     )
+                    val allowProceedToManifest = hasMinimalWorkingRoom || req.totalEstimatedBytes == 0L
+                    handshakeCompleted.set(allowProceedToManifest)
+
+                    val nextScope = req.transferScope ?: _progress.value.activeTransferScope
+                    val spaceError = if (!allowProceedToManifest) {
+                        "Spazio su dispositivo insufficiente (meno di 250 MB liberi)."
+                    } else {
+                        null
+                    }
+                    val detectedMedium = LocalNetworkAddresses.detectConnectionMedium(
+                        targetIp = socket.localAddress?.hostAddress,
+                        isHotspotOrP2p = !activeQrPayloadSnapshot?.wifiSsid.isNullOrBlank()
+                    )
+                    if (!isResume) {
+                        _progress.value = LiveTransferProgress(
+                            phaseLabel = if (allowProceedToManifest) {
+                                "Sto preparando la ricezione da ${req.senderName}..."
+                            } else {
+                                "Spazio su disco insufficiente per completare il trasferimento."
+                            },
+                            peerDeviceName = req.senderName,
+                            peerPlatform = req.senderPlatform,
+                            licenseTier = activeTier,
+                            connectionMedium = detectedMedium,
+                            activeTransferScope = nextScope,
+                            sessionStage = if (nextScope.isWhatsAppOnly) {
+                                TransferSessionStage.TRANSFERRING
+                            } else {
+                                TransferSessionStage.PREPARING
+                            },
+                            errorMessage = spaceError
+                        )
+                    } else {
+                        val prev = _progress.value
+                        _progress.value = prev.copy(
+                            phaseLabel = if (allowProceedToManifest) {
+                                "Ripresa connessione con ${req.senderName}..."
+                            } else {
+                                "Spazio su disco insufficiente per riprendere il trasferimento."
+                            },
+                            peerDeviceName = req.senderName,
+                            peerPlatform = req.senderPlatform,
+                            licenseTier = activeTier,
+                            connectionMedium = detectedMedium,
+                            activeTransferScope = nextScope,
+                            sessionStage = if (prev.sessionStage == TransferSessionStage.TRANSFERRING || nextScope.isWhatsAppOnly) {
+                                TransferSessionStage.TRANSFERRING
+                            } else {
+                                TransferSessionStage.PREPARING
+                            },
+                            errorMessage = spaceError
+                        )
+                    }
 
                     val resp = HandshakeResponse(
-                        accepted = enoughSpace,
+                        accepted = allowProceedToManifest,
                         receiverName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
                         receiverPlatform = DevicePlatform.ANDROID,
                         freeStorageBytes = freeBytes,
                         licenseTier = activeTier,
-                        hasEnoughSpace = enoughSpace,
-                        statusMessage = if (enoughSpace) "Pronto al trasferimento diretto" else "Spazio su disco insufficiente"
+                        hasEnoughSpace = enoughSpace || allowProceedToManifest,
+                        statusMessage = if (allowProceedToManifest) "Pronto al trasferimento diretto" else "Spazio su disco insufficiente"
                     )
                     writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(resp))
                 }
@@ -728,9 +864,12 @@ class DirectSwitchTransferServer(
                         writeJsonResponse(output, 401, """{"error":"SessionId manifesto non valido"}""")
                         return
                     }
+                    val isResume = activeRunIsResume.get()
                     val effectiveScope = manifest.transferScope ?: ActiveTransferScope.inferred(manifest)
                     val wantsWa = manifest.requestNativeWhatsAppMigration || effectiveScope.whatsApp
-                    requestedWhatsAppMigration.set(wantsWa)
+                    if (!isResume || wantsWa) {
+                        requestedWhatsAppMigration.set(wantsWa)
+                    }
 
                     // 1. Smart Merge Contatti (sempre abilitato), Calendari & SMS (se consentito dal tier)
                     val (mergedContacts, skippedContacts) = ContactsSmartMerger.mergeIncomingContacts(
@@ -755,6 +894,14 @@ class DirectSwitchTransferServer(
                     } else {
                         0
                     }
+                    val importedCallLogs = if (
+                        LicensePolicyEvaluator.allowsFullCategories(activeTier) &&
+                        !manifest.callLogsPayload.isNullOrEmpty()
+                    ) {
+                        CallLogMigrator.importCallLogsWithArchive(context, manifest.callLogsPayload)
+                    } else {
+                        0
+                    }
 
                     // 2. Filtro Licenza (Intra-OS Free vs Cross-OS Pro/Preview) + Dedup Media
                     val (tierFilteredItems, gatedCount) = LicensePolicyEvaluator.filterItemsForTier(
@@ -773,7 +920,7 @@ class DirectSwitchTransferServer(
                         val isDocDup = (item.category == TransferCategory.DOCUMENTS || item.category == TransferCategory.WHATSAPP_VAULT) &&
                             docKey in existingDocKeys
 
-                        if (item.id in completedIds || isMediaDup || isDocDup) {
+                        if (item.id in completedIds || item.id in skippedIds || isMediaDup || isDocDup) {
                             skippedMediaDups++
                         } else {
                             manifestMap[item.id] = item
@@ -786,48 +933,88 @@ class DirectSwitchTransferServer(
                     } else {
                         emptyList()
                     }
-                    val totalBytesToReceive = acceptedItems.sumOf { it.sizeBytes }
-                    val initialEtaLabel = synchronized(rxProgressLock) {
-                        val acc = TransferProgressAccounting(
-                            queuedItemsCount = acceptedItems.size,
-                            remainingEstimatedBytes = totalBytesToReceive
+                    val remainingBytesToReceive = acceptedItems.sumOf { it.sizeBytes }
+                    val (freeNow, _) = StorageCapacityChecker.getFreeAndTotalBytes(context)
+                    if (remainingBytesToReceive > 0L &&
+                        remainingBytesToReceive > (freeNow - 150L * 1024L * 1024L).coerceAtLeast(0L)
+                    ) {
+                        val neededText = TransferDisplayFormatting.formatBytes(remainingBytesToReceive)
+                        _progress.value = _progress.value.copy(
+                            errorMessage = "Spazio libero insufficiente su questo telefono per i restanti $neededText."
                         )
-                        rxProgressAccounting = acc
-                        rxSpeedMeter = SlidingTransferSpeedMeter()
-                        rxEtaTracker.reset(initialFraction = acc.progressFraction)
-                        rxEtaTracker.currentLabel(
-                            isCompleted = false,
-                            hasTransferableItems = acc.initialTotalItems > 0
-                        )
+                        writeJsonResponse(output, 507, """{"error":"insufficient_storage"}""")
+                        return
                     }
-                    _progress.value = _progress.value.copy(
-                        phaseLabel = if (acceptedItems.isEmpty()) "Finalizzazione dati ricevuti..." else "Pronto per la ricezione (${acceptedItems.size} elementi)...",
-                        totalItems = acceptedItems.size,
-                        totalBytes = totalBytesToReceive,
+
+                    val previouslyCompletedInSession = completedIds.size
+                    val previouslyFailedInSession = skippedIds.size
+                    val previouslySentBytes = transferredBytesCounter.get()
+                    val (acc, initialEtaLabel) = synchronized(rxProgressLock) {
+                        val accounting = TransferProgressAccounting(
+                            queuedItemsCount = acceptedItems.size,
+                            remainingEstimatedBytes = remainingBytesToReceive,
+                            previouslyCompletedItems = previouslyCompletedInSession,
+                            previouslySentBytes = previouslySentBytes,
+                            previouslyFailedItems = previouslyFailedInSession
+                        )
+                        rxProgressAccounting = accounting
+                        rxSpeedMeter = SlidingTransferSpeedMeter()
+                        rxEtaTracker.reset(initialFraction = accounting.progressFraction)
+                        val eta = rxEtaTracker.currentLabel(
+                            isCompleted = false,
+                            hasTransferableItems = accounting.initialTotalItems > 0
+                        )
+                        accounting to eta
+                    }
+
+                    val prev = _progress.value
+                    val totalMergedContacts = if (isResume) prev.mergedContacts + mergedContacts else mergedContacts
+                    val totalImportedCalendars = if (isResume) prev.importedCalendars + importedCalendars else importedCalendars
+                    val totalCalendarsAlreadyPresent = if (isResume) maxOf(prev.calendarsAlreadyPresent, calendarsAlreadyPresent) else calendarsAlreadyPresent
+                    val totalImportedReminders = if (isResume) prev.importedReminders + importedReminders else importedReminders
+                    val totalRemindersAlreadyPresent = if (isResume) maxOf(prev.remindersAlreadyPresent, remindersAlreadyPresent) else remindersAlreadyPresent
+                    val totalImportedSms = if (isResume) prev.importedSms + importedSms else importedSms
+                    val totalImportedCallLogs = if (isResume) prev.importedCallLogs + importedCallLogs else importedCallLogs
+                    val finalApps = if (isResume && receivedApps.isEmpty()) prev.receivedInstalledApps else receivedApps
+
+                    _progress.value = prev.copy(
+                        phaseLabel = when {
+                            isResume && acceptedItems.isNotEmpty() -> "Ripresa ricezione (${acceptedItems.size} elementi rimanenti)..."
+                            acceptedItems.isEmpty() -> "Finalizzazione dati ricevuti..."
+                            else -> "Pronto per la ricezione (${acceptedItems.size} elementi)..."
+                        },
+                        completedItems = previouslyCompletedInSession,
+                        totalItems = previouslyCompletedInSession + previouslyFailedInSession + acceptedItems.size,
+                        transferredBytes = previouslySentBytes,
+                        totalBytes = acc.totalBytesForProgress,
+                        failedItemsCount = previouslyFailedInSession,
                         etaLabel = initialEtaLabel,
-                        mergedContacts = mergedContacts,
+                        mergedContacts = totalMergedContacts,
                         contactsAlreadyPresent = skippedContacts,
-                        importedCalendars = importedCalendars,
-                        calendarsAlreadyPresent = calendarsAlreadyPresent,
-                        importedReminders = importedReminders,
-                        remindersAlreadyPresent = remindersAlreadyPresent,
-                        importedSms = importedSms,
+                        importedCalendars = totalImportedCalendars,
+                        calendarsAlreadyPresent = totalCalendarsAlreadyPresent,
+                        importedReminders = totalImportedReminders,
+                        remindersAlreadyPresent = totalRemindersAlreadyPresent,
+                        importedSms = totalImportedSms,
+                        importedCallLogs = totalImportedCallLogs,
                         skippedDuplicates = skippedContacts + skippedMediaDups,
-                        receivedInstalledApps = receivedApps,
+                        receivedInstalledApps = finalApps,
                         activeTransferScope = effectiveScope,
-                        gatedPreviewCount = gatedCount
+                        gatedPreviewCount = gatedCount,
+                        errorMessage = null
                     )
 
                     val resp = ManifestResponse(
                         acceptedItemIds = acceptedItems.map { it.id },
                         skippedDuplicateCount = skippedContacts + skippedMediaDups,
-                        contactsMergedCount = mergedContacts,
+                        contactsMergedCount = totalMergedContacts,
                         contactsSkippedDuplicates = skippedContacts,
-                        calendarsImportedCount = importedCalendars,
-                        calendarsAlreadyPresentCount = calendarsAlreadyPresent,
-                        remindersImportedCount = importedReminders,
-                        remindersAlreadyPresentCount = remindersAlreadyPresent,
-                        smsImportedCount = importedSms,
+                        calendarsImportedCount = totalImportedCalendars,
+                        calendarsAlreadyPresentCount = totalCalendarsAlreadyPresent,
+                        remindersImportedCount = totalImportedReminders,
+                        remindersAlreadyPresentCount = totalRemindersAlreadyPresent,
+                        smsImportedCount = totalImportedSms,
+                        callLogsImportedCount = totalImportedCallLogs,
                         gatedByCrossOsPreviewCount = gatedCount
                     )
                     writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(resp))
@@ -875,6 +1062,10 @@ class DirectSwitchTransferServer(
                         return
                     }
                     val itemId = pathOnly.removePrefix("/v1/item/")
+                    if (itemId in completedIds) {
+                        writeJsonResponse(output, 200, """{"ok":true,"alreadyCompleted":true}""")
+                        return
+                    }
                     val item = manifestMap[itemId]
                     if (item == null) {
                         writeJsonResponse(output, 404, """{"error":"Item non trovato nel manifesto"}""")
@@ -939,20 +1130,26 @@ class DirectSwitchTransferServer(
                             WhatsAppVaultReader.ingestReceivedArchive(context, sanitizedFileName, tempDecrypted)
                         }
 
-                        val importedOk = if (safeItem.category == TransferCategory.PHOTOS || safeItem.category == TransferCategory.VIDEOS) {
-                            tempDecrypted.inputStream().use { plainIn ->
-                                MediaExifScannerAndImporter.importMediaStream(context, safeItem, plainIn)
+                        val importedOk = when (safeItem.category) {
+                            TransferCategory.PHOTOS, TransferCategory.VIDEOS -> {
+                                tempDecrypted.inputStream().use { plainIn ->
+                                    MediaExifScannerAndImporter.importMediaStream(context, safeItem, plainIn)
+                                }
                             }
-                        } else {
-                            tempDecrypted.inputStream().use { plainIn ->
-                                PublicDownloadsSaver.saveStream(
-                                    context = context,
-                                    subFolder = subFolder,
-                                    fileName = sanitizedFileName,
-                                    mimeType = safeItem.mimeType,
-                                    inputStream = plainIn,
-                                    expectedSizeBytes = safeItem.sizeBytes
-                                )
+                            TransferCategory.AUDIO -> {
+                                AudioAndMemoMigrator.saveIncomingAudioFile(context, safeItem, tempDecrypted)
+                            }
+                            else -> {
+                                tempDecrypted.inputStream().use { plainIn ->
+                                    PublicDownloadsSaver.saveStream(
+                                        context = context,
+                                        subFolder = subFolder,
+                                        fileName = sanitizedFileName,
+                                        mimeType = safeItem.mimeType,
+                                        inputStream = plainIn,
+                                        expectedSizeBytes = safeItem.sizeBytes
+                                    )
+                                }
                             }
                         }
 
@@ -961,36 +1158,49 @@ class DirectSwitchTransferServer(
                             return
                         }
 
-                        if (safeItem.category != TransferCategory.PHOTOS && safeItem.category != TransferCategory.VIDEOS) {
-                            docFolderCounts[subFolder] = (docFolderCounts[subFolder] ?: 0) + 1
-                        }
+                        if (completedIds.add(itemId)) {
+                            if (safeItem.category != TransferCategory.PHOTOS && safeItem.category != TransferCategory.VIDEOS) {
+                                docFolderCounts[subFolder] = (docFolderCounts[subFolder] ?: 0) + 1
+                            }
 
-                        completedIds.add(itemId)
-                        val doneFiles = completedFilesCounter.incrementAndGet()
-                        val doneBytes = transferredBytesCounter.addAndGet(plainBytes)
-                        val (reconciledTotalBytes, speedMbs, etaStr) = synchronized(rxProgressLock) {
-                            rxProgressAccounting?.recordUploaded(item.sizeBytes, plainBytes)
-                            val tot = rxProgressAccounting?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: doneBytes
-                            val spd = rxSpeedMeter.record(plainBytes)
-                            val acc = rxProgressAccounting
-                            val eta = rxEtaTracker.update(
-                                progressFraction = acc?.progressFraction ?: 0f,
-                                isCompleted = false,
-                                hasTransferableItems = (acc?.initialTotalItems ?: 0) > 0
+                            val doneFiles = completedFilesCounter.incrementAndGet()
+                            val doneBytes = transferredBytesCounter.addAndGet(plainBytes)
+                            val (reconciledTotalBytes, speedMbs, etaStr, pctNow) = synchronized(rxProgressLock) {
+                                rxProgressAccounting?.recordUploaded(item.sizeBytes, plainBytes)
+                                val tot = rxProgressAccounting?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: doneBytes
+                                val spd = rxSpeedMeter.record(plainBytes)
+                                val acc = rxProgressAccounting
+                                val frac = acc?.progressFraction ?: 0f
+                                val eta = rxEtaTracker.update(
+                                    progressFraction = frac,
+                                    isCompleted = false,
+                                    hasTransferableItems = (acc?.initialTotalItems ?: 0) > 0
+                                )
+                                val pct = TransferDisplayFormatting.percentageInt(frac.toDouble(), false)
+                                listOf(tot, spd, eta, pct)
+                            }
+                            val totBytesLong = reconciledTotalBytes as Long
+                            val speedDouble = speedMbs as Double
+                            val etaLabelStr = etaStr as String?
+                            val pctInt = pctNow as Int
+
+                            _progress.value = _progress.value.copy(
+                                currentFileName = sanitizedFileName,
+                                completedItems = doneFiles,
+                                transferredBytes = doneBytes,
+                                totalBytes = totBytesLong,
+                                speedMegabytesPerSec = speedDouble,
+                                etaLabel = etaLabelStr,
+                                sessionStage = TransferSessionStage.TRANSFERRING,
+                                receivedDocumentFolders = docFolderCounts.toMap()
                             )
-                            Triple(tot, spd, eta)
+                            DirectSwitchKeepAliveService.updateProgress(
+                                context = context,
+                                percent = pctInt,
+                                statusText = "Ricezione: ${TransferDisplayFormatting.formatBytes(doneBytes)} / ${TransferDisplayFormatting.formatBytes(totBytesLong)}",
+                                etaSubText = etaLabelStr
+                            )
                         }
-
-                        _progress.value = _progress.value.copy(
-                            currentFileName = sanitizedFileName,
-                            completedItems = doneFiles,
-                            transferredBytes = doneBytes,
-                            totalBytes = reconciledTotalBytes,
-                            speedMegabytesPerSec = speedMbs,
-                            etaLabel = etaStr,
-                            sessionStage = TransferSessionStage.TRANSFERRING,
-                            receivedDocumentFolders = docFolderCounts.toMap()
-                        )
                         writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes,"sha256":"$actualSha256"}""")
                     } finally {
                         tempDecrypted.delete()
@@ -1062,6 +1272,13 @@ class DirectSwitchTransferServer(
                         isCompleted = true,
                         pendingNativeWhatsAppMigration = requestedWhatsAppMigration.get()
                     )
+                    DirectSwitchKeepAliveService.updateProgress(
+                        context = context,
+                        percent = 100,
+                        statusText = "Tutti i dati ricevuti e salvati sul dispositivo!",
+                        etaSubText = null,
+                        force = true
+                    )
                     val report = TransferCompletionReport(
                         sessionId = activeSessionId,
                         licenseTier = activeTier,
@@ -1073,6 +1290,7 @@ class DirectSwitchTransferServer(
                         remindersImportedCount = _progress.value.importedReminders,
                         remindersAlreadyPresentCount = _progress.value.remindersAlreadyPresent,
                         importedSmsCount = _progress.value.importedSms,
+                        callLogsImportedCount = _progress.value.importedCallLogs,
                         skippedDuplicatesCount = _progress.value.skippedDuplicates,
                         elapsedMillis = (System.currentTimeMillis() - transferStartMillis).coerceAtLeast(1L)
                     )
@@ -1278,6 +1496,7 @@ class DirectSwitchTransferClient(private val context: Context) {
     private data class BoundHttpChannel(
         val reachableIp: String,
         val client: OkHttpClient,
+        val medium: TransferConnectionMedium = TransferConnectionMedium.LOCAL_WIFI,
         val cleanup: () -> Unit = {}
     )
 
@@ -1362,6 +1581,8 @@ class DirectSwitchTransferClient(private val context: Context) {
         if (scope.videos) add(TransferPreparationItem("videos", "Video originali", "video", "video"))
         if (scope.calendars) add(TransferPreparationItem("calendars", "Calendari", "evento", "eventi"))
         if (includeSms) add(TransferPreparationItem("sms", "Messaggi SMS", "messaggio", "messaggi"))
+        if (scope.callLogs) add(TransferPreparationItem("callLogs", "Cronologia Chiamate", "chiamata", "chiamate"))
+        if (scope.audio) add(TransferPreparationItem("audio", "Audio e Memo Vocali", "traccia", "tracce"))
         if (scope.documents) add(TransferPreparationItem("documents", "Documenti e File", "file", "file"))
         if (scope.apps) add(TransferPreparationItem("apps", "App scaricate", "app", "app"))
     }
@@ -1431,24 +1652,72 @@ class DirectSwitchTransferClient(private val context: Context) {
         includeDocuments: Boolean = true,
         includeWhatsAppVault: Boolean = true,
         includeInstalledApps: Boolean = true,
-        installedAppsOverride: List<InstalledAppRecord>? = null
+        installedAppsOverride: List<InstalledAppRecord>? = null,
+        includeAudio: Boolean = false,
+        includeCallLogs: Boolean = false,
+        mediaFilters: MediaTransferFilterOptions = MediaTransferFilterOptions(),
+        onlyRetryItemIds: Set<String>? = null,
+        resumeCheckpoint: TransferCheckpointRecord? = null,
+        stagedPasswordCsvFiles: List<File> = emptyList()
     ): Result<TransferCompletionReport> = withContext(Dispatchers.IO) {
-        var boundChannel: BoundHttpChannel? = null
+        val channelCleanups = Collections.synchronizedList(mutableListOf<() -> Unit>())
         DirectSwitchKeepAliveService.start(context, "Invio dati verso ${qrPayload.receiverName}...")
+        val isTargetedRetry = !onlyRetryItemIds.isNullOrEmpty()
+        val effectiveIncludeContacts = if (isTargetedRetry) false else includeContacts
+        val effectiveIncludeCalendars = if (isTargetedRetry) false else includeCalendars
+        val effectiveIncludeSms = if (isTargetedRetry) false else includeSms
+        val effectiveIncludeCallLogs = if (isTargetedRetry) false else includeCallLogs
+        val effectiveIncludeApps = if (isTargetedRetry) false else includeInstalledApps
         val senderScope = ActiveTransferScope(
-            contacts = includeContacts,
+            contacts = effectiveIncludeContacts,
             photos = includePhotos,
             videos = includeVideos,
-            calendars = includeCalendars,
-            documents = includeDocuments,
-            apps = includeInstalledApps,
-            whatsApp = includeWhatsAppVault
+            calendars = effectiveIncludeCalendars,
+            documents = includeDocuments || stagedPasswordCsvFiles.isNotEmpty(),
+            apps = effectiveIncludeApps,
+            whatsApp = if (isTargetedRetry) false else includeWhatsAppVault,
+            audio = includeAudio,
+            callLogs = effectiveIncludeCallLogs
         )
         val initialPrepItems = if (senderScope.isWhatsAppOnly) {
             emptyList()
         } else {
-            buildInitialPreparationItems(senderScope, includeSms)
+            buildInitialPreparationItems(senderScope, effectiveIncludeSms)
         }
+        val completedItemIdsSet = Collections.synchronizedSet(
+            linkedSetOf<String>().apply {
+                resumeCheckpoint?.completedItemIds?.let { addAll(it) }
+            }
+        )
+        val skippedItemsList = Collections.synchronizedList(mutableListOf<SkippedTransferItemRecord>())
+        var checkpointTotalItems = resumeCheckpoint?.totalItems ?: 0
+        var checkpointTotalBytes = resumeCheckpoint?.totalBytes ?: 0L
+        var checkpointUploadedBytes = resumeCheckpoint?.uploadedBytes ?: 0L
+
+        fun saveDiskCheckpoint() {
+            if (isTargetedRetry) return
+            val completedCopy = synchronized(completedItemIdsSet) { completedItemIdsSet.toList() }
+            if (completedCopy.isEmpty()) return
+            val skippedCopy = synchronized(skippedItemsList) { skippedItemsList.toList() }
+            TransferCheckpointStore.save(
+                context = context,
+                record = TransferCheckpointRecord(
+                    sessionId = qrPayload.sessionId,
+                    qrPayloadJson = DirectSwitchJson.instance.encodeToString(qrPayload),
+                    receiverName = qrPayload.receiverName,
+                    receiverPlatform = qrPayload.receiverPlatform,
+                    scope = senderScope,
+                    completedItemIds = completedCopy,
+                    uploadedBytes = checkpointUploadedBytes,
+                    totalItems = checkpointTotalItems,
+                    totalBytes = checkpointTotalBytes,
+                    skippedItems = skippedCopy,
+                    filterOptions = mediaFilters,
+                    savedAtEpochMillis = System.currentTimeMillis()
+                )
+            )
+        }
+
         val prepDeferred = CompletableDeferred<Unit>()
         prepAnimDeferred = prepDeferred
         try {
@@ -1487,11 +1756,12 @@ class DirectSwitchTransferClient(private val context: Context) {
                 )
                 return@withContext Result.failure(IllegalStateException(msg))
             }
-            boundChannel = channel
-            val activeClient = channel.client
-
-            val baseUrl = "http://${channel.reachableIp}:${qrPayload.port}"
+            var activeChannel = channel
+            channelCleanups.add(channel.cleanup)
+            var activeClient = channel.client
+            var baseUrl = "http://${channel.reachableIp}:${qrPayload.port}"
             val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
+            _progress.value = _progress.value.copy(connectionMedium = channel.medium)
 
             if (!senderScope.isWhatsAppOnly) {
                 val prepReq = TransferPrepareRequest(
@@ -1512,42 +1782,80 @@ class DirectSwitchTransferClient(private val context: Context) {
 
             // 1. Raccolta dati locali selezionati con conteggio progressivo per la schermata di preparazione
             val endOfTodayCutoff = CalendarMigrator.endOfDayMillis()
-            val contacts = if (includeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
-            if (includeContacts) updatePreparationItem("contacts", contacts.size, isReady = true)
+            val contacts = if (effectiveIncludeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
+            if (effectiveIncludeContacts) updatePreparationItem("contacts", contacts.size, isReady = true)
 
             val photoEntries = if (includePhotos) {
                 MediaExifScannerAndImporter.scanMediaEntries(context, includePhotos = true, includeVideos = false)
+                    .filter { AndroidMediaFilterHelper.matchesFilter(it.manifestItem, mediaFilters) }
             } else emptyList()
             if (includePhotos) updatePreparationItem("photos", photoEntries.size, isReady = true)
 
             val videoEntries = if (includeVideos) {
                 MediaExifScannerAndImporter.scanMediaEntries(context, includePhotos = false, includeVideos = true)
+                    .filter { AndroidMediaFilterHelper.matchesFilter(it.manifestItem, mediaFilters) }
             } else emptyList()
             if (includeVideos) updatePreparationItem("videos", videoEntries.size, isReady = true)
 
-            val calendars = if (includeCalendars) {
+            val calendars = if (effectiveIncludeCalendars) {
                 CalendarMigrator.readEvents(context, upToEpochMillis = if (calendarsUpToTodayOnly) endOfTodayCutoff else null)
             } else emptyList()
-            if (includeCalendars) updatePreparationItem("calendars", calendars.size, isReady = true)
+            if (effectiveIncludeCalendars) updatePreparationItem("calendars", calendars.size, isReady = true)
 
-            val smsList = if (includeSms) {
+            val smsList = if (effectiveIncludeSms) {
                 SmsSystemScanner.readAllSms(context, upToEpochMillis = if (smsUpToTodayOnly) endOfTodayCutoff else null)
             } else emptyList()
-            if (includeSms) updatePreparationItem("sms", smsList.size, isReady = true)
+            if (effectiveIncludeSms) updatePreparationItem("sms", smsList.size, isReady = true)
+
+            val callLogs = if (effectiveIncludeCallLogs) {
+                CallLogMigrator.readCallLogs(context)
+            } else emptyList()
+            if (effectiveIncludeCallLogs) updatePreparationItem("callLogs", callLogs.size, isReady = true)
+
+            val audioEntries = if (includeAudio) {
+                AudioAndMemoMigrator.scanAudioAndVoiceMemos(context)
+            } else emptyList()
+            if (includeAudio) updatePreparationItem("audio", audioEntries.size, isReady = true)
+
+            val passwordEntries = stagedPasswordCsvFiles.mapIndexedNotNull { idx, file ->
+                if (!file.exists() || !file.isFile || file.length() <= 0L) return@mapIndexedNotNull null
+                val item = ManifestItem(
+                    id = "pwd_csv_${idx}_${file.name.hashCode().toUInt()}",
+                    category = TransferCategory.DOCUMENTS,
+                    fileName = file.name,
+                    relativeAlbumOrFolder = "Password_e_Accessi",
+                    sizeBytes = file.length(),
+                    capturedEpochMillis = file.lastModified(),
+                    dedupKey = "pwd_${file.name.lowercase()}_${file.length()}",
+                    mimeType = "text/csv"
+                )
+                LocalMediaEntry(manifestItem = item, contentUri = Uri.fromFile(file))
+            }
 
             val docEntries = DocumentsAndWhatsAppScanner.scanDocumentAndWhatsAppEntries(
                 context = context,
                 includeDocuments = includeDocuments,
                 includeWhatsAppVault = false
-            )
-            if (includeDocuments) updatePreparationItem("documents", docEntries.size, isReady = true)
+            ) + passwordEntries
+            if (senderScope.documents) updatePreparationItem("documents", docEntries.size, isReady = true)
 
-            val installedApps = if (includeInstalledApps) {
+            val installedApps = if (effectiveIncludeApps) {
                 installedAppsOverride ?: InstalledAppsScanner.scanUserInstalledApps(context)
             } else emptyList()
-            if (includeInstalledApps) updatePreparationItem("apps", installedApps.size, isReady = true)
+            if (effectiveIncludeApps) updatePreparationItem("apps", installedApps.size, isReady = true)
 
-            val mediaEntries = photoEntries + videoEntries + docEntries
+            val rawMediaEntries = photoEntries + videoEntries + audioEntries + docEntries
+            val mediaEntries = when {
+                isTargetedRetry -> {
+                    val retryIds = onlyRetryItemIds.orEmpty()
+                    rawMediaEntries.filter { it.manifestItem.id in retryIds }
+                }
+                resumeCheckpoint != null -> {
+                    val doneBefore = resumeCheckpoint.completedItemIds.toHashSet()
+                    rawMediaEntries.filterNot { it.manifestItem.id in doneBefore }
+                }
+                else -> rawMediaEntries
+            }
             val estimatedBytes = mediaEntries.sumOf { it.manifestItem.sizeBytes }
 
             // 2. Handshake Cifrato + Spazio Disco
@@ -1558,7 +1866,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                 senderHasPro = CloudSaveEntitlementDetector.isLocalProUnlocked(context),
                 senderHasCloudSavePro = CloudSaveEntitlementDetector.hasVerifiedCloudSaveProEntitlement(context),
                 totalEstimatedBytes = estimatedBytes,
-                transferScope = senderScope
+                transferScope = senderScope,
+                isResume = resumeCheckpoint != null
             )
             val handshakeJson = postEncryptedJson(
                 client = activeClient,
@@ -1571,8 +1880,14 @@ class DirectSwitchTransferClient(private val context: Context) {
             if (!handshakeResp.hasEnoughSpace) {
                 val neededMb = (estimatedBytes / (1024 * 1024)).coerceAtLeast(1L)
                 val msg = "Spazio insufficiente su ${handshakeResp.receiverName}: servono circa $neededMb MB liberi."
+                val relief = SpaceReliefPlanner.evaluate(
+                    receiverName = handshakeResp.receiverName,
+                    availableFreeBytes = handshakeResp.freeStorageBytes,
+                    items = mediaEntries.map { it.manifestItem }
+                )
                 _progress.value = _progress.value.copy(
                     sessionStage = TransferSessionStage.TRANSFERRING,
+                    spaceReliefOffer = relief,
                     errorMessage = msg
                 )
                 return@withContext Result.failure(IllegalStateException(msg))
@@ -1585,9 +1900,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                 activeTransferScope = senderScope
             )
 
-            // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS / Catalogo App
+            // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS / Chiamate / Catalogo App
             val allowFull = LicensePolicyEvaluator.allowsFullCategories(handshakeResp.licenseTier)
-            val wantNativeWa = includeWhatsAppVault
+            val wantNativeWa = !isTargetedRetry && includeWhatsAppVault
             val manifest = TransferManifest(
                 sessionId = qrPayload.sessionId,
                 senderPlatform = DevicePlatform.ANDROID,
@@ -1595,25 +1910,49 @@ class DirectSwitchTransferClient(private val context: Context) {
                 contactsPayload = contacts,
                 calendarsPayload = calendars,
                 smsPayload = smsList,
+                callLogsPayload = callLogs,
                 requestNativeWhatsAppMigration = wantNativeWa,
                 installedAppsPayload = if (allowFull) installedApps else emptyList(),
                 transferScope = senderScope
             )
-            val manifestRespJson = postEncryptedJson(
-                client = activeClient,
-                url = "$baseUrl/v1/manifest",
-                plainJson = DirectSwitchJson.instance.encodeToString(manifest),
-                aesKey = sessionAesKey
-            )
+            val manifestRespJson = try {
+                postEncryptedJson(
+                    client = activeClient,
+                    url = "$baseUrl/v1/manifest",
+                    plainJson = DirectSwitchJson.instance.encodeToString(manifest),
+                    aesKey = sessionAesKey
+                )
+            } catch (manifestErr: Throwable) {
+                if (manifestErr.message?.contains("Spazio di archiviazione esaurito") == true) {
+                    val relief = SpaceReliefPlanner.evaluate(
+                        receiverName = handshakeResp.receiverName,
+                        availableFreeBytes = handshakeResp.freeStorageBytes,
+                        items = mediaEntries.map { it.manifestItem }
+                    )
+                    _progress.value = _progress.value.copy(
+                        sessionStage = TransferSessionStage.TRANSFERRING,
+                        spaceReliefOffer = relief,
+                        errorMessage = manifestErr.localizedMessage
+                    )
+                }
+                throw manifestErr
+            }
             val manifestResp = DirectSwitchJson.instance.decodeFromString<ManifestResponse>(manifestRespJson)
 
             val acceptedSet = manifestResp.acceptedItemIds.toHashSet()
             val entriesToUpload = mediaEntries.filter { it.manifestItem.id in acceptedSet }
             val totalBytes = entriesToUpload.sumOf { it.manifestItem.sizeBytes }
+            val prevCompleted = if (isTargetedRetry) 0 else (resumeCheckpoint?.completedItemIds?.size ?: 0)
+            val prevBytes = if (isTargetedRetry) 0L else (resumeCheckpoint?.uploadedBytes ?: 0L)
             val accounting = TransferProgressAccounting(
                 queuedItemsCount = entriesToUpload.size,
-                remainingEstimatedBytes = totalBytes
+                remainingEstimatedBytes = totalBytes,
+                previouslyCompletedItems = prevCompleted,
+                previouslySentBytes = prevBytes
             )
+            checkpointTotalItems = accounting.initialTotalItems
+            checkpointTotalBytes = accounting.totalBytesForProgress
+            checkpointUploadedBytes = accounting.transferredBytes
             val speedMeter = SlidingTransferSpeedMeter()
             val etaTracker = TenPercentSteppedEtaTracker()
             val progressLock = Mutex()
@@ -1637,8 +1976,10 @@ class DirectSwitchTransferClient(private val context: Context) {
             _progress.value = _progress.value.copy(
                 phaseLabel = if (entriesToUpload.isNotEmpty()) "Trasferimento diretto cifrato in corso..." else "Sincronizzazione completata!",
                 sessionStage = TransferSessionStage.TRANSFERRING,
-                totalItems = entriesToUpload.size,
-                totalBytes = totalBytes,
+                completedItems = accounting.succeededItemsCount,
+                totalItems = accounting.initialTotalItems,
+                transferredBytes = accounting.transferredBytes,
+                totalBytes = accounting.totalBytesForProgress,
                 etaLabel = etaTracker.currentLabel(
                     isCompleted = false,
                     hasTransferableItems = accounting.initialTotalItems > 0
@@ -1650,197 +1991,403 @@ class DirectSwitchTransferClient(private val context: Context) {
                 importedReminders = manifestResp.remindersImportedCount ?: 0,
                 remindersAlreadyPresent = manifestResp.remindersAlreadyPresentCount ?: 0,
                 importedSms = manifestResp.smsImportedCount,
+                importedCallLogs = manifestResp.callLogsImportedCount ?: 0,
                 skippedDuplicates = manifestResp.skippedDuplicateCount,
-                gatedPreviewCount = manifestResp.gatedByCrossOsPreviewCount
+                gatedPreviewCount = manifestResp.gatedByCrossOsPreviewCount,
+                spaceReliefOffer = null
             )
 
-            // 4. Upload streaming parallelo CSGCM1 (3 canali per foto/doc, 1 canale dedicato per video >= 50 MB)
+            // 4. Upload streaming parallelo CSGCM1 con pool fisso di 3 worker (evita migliaia di coroutine simultanee)
+            //    + riconnessione Wi-Fi automatica fino a 45s in caso di caduta temporanea di rete.
+            val reconnectHandshakeReq = handshakeReq.copy(isResume = true)
+            val reconnectMutex = Mutex()
+            val reconnectGeneration = AtomicLong(0L)
+            val abortedError = AtomicReference<Throwable?>(null)
+
+            fun buildNetworkPausedException(): IllegalStateException {
+                val snap = _progress.value
+                val pctNow = if (snap.totalItems > 0) {
+                    ((snap.completedItems * 100.0) / snap.totalItems).toInt().coerceIn(0, 99)
+                } else {
+                    0
+                }
+                return IllegalStateException(
+                    "Connessione con ${handshakeResp.receiverName} in pausa al $pctNow% (${snap.completedItems}/${snap.totalItems} file già salvati). Mantieni aperto DirectSwitch sull'altro telefono e riprova per riprendere da dove eri rimasto."
+                )
+            }
+
+            suspend fun ensureReconnected(failedGeneration: Long): Pair<String, OkHttpClient> {
+                return reconnectMutex.withLock {
+                    abortedError.get()?.let { throw it }
+                    if (reconnectGeneration.get() != failedGeneration) {
+                        return@withLock baseUrl to activeClient
+                    }
+                    val recovered = waitForReceiverReconnection(
+                        qrPayload = qrPayload,
+                        currentChannel = activeChannel,
+                        timeoutMillis = 45_000L
+                    )
+                    if (recovered == null) {
+                        val err = buildNetworkPausedException()
+                        abortedError.set(err)
+                        throw err
+                    }
+                    if (recovered !== activeChannel && recovered.client !== activeChannel.client) {
+                        channelCleanups.add(recovered.cleanup)
+                    }
+                    activeChannel = recovered
+                    activeClient = recovered.client
+                    baseUrl = "http://${recovered.reachableIp}:${qrPayload.port}"
+
+                    val hsRes = runCatching {
+                        postEncryptedJson(
+                            client = activeClient,
+                            url = "$baseUrl/v1/handshake",
+                            plainJson = DirectSwitchJson.instance.encodeToString(reconnectHandshakeReq),
+                            aesKey = sessionAesKey
+                        )
+                    }
+                    val hsErr = hsRes.exceptionOrNull()
+                    if (hsErr != null && hsErr.message?.contains("PIN o chiave QR non validi") == true) {
+                        val err = IllegalStateException(
+                            "La sessione su ${handshakeResp.receiverName} è stata chiusa o riavviata. Ricollega i due telefoni per riprendere i file rimanenti."
+                        )
+                        abortedError.set(err)
+                        throw err
+                    }
+                    val manRes = runCatching {
+                        postEncryptedJson(
+                            client = activeClient,
+                            url = "$baseUrl/v1/manifest",
+                            plainJson = DirectSwitchJson.instance.encodeToString(manifest),
+                            aesKey = sessionAesKey
+                        )
+                    }
+                    val manErr = manRes.exceptionOrNull()
+                    if (manErr != null && manErr.message?.contains("Spazio di archiviazione esaurito") == true) {
+                        abortedError.set(manErr)
+                        throw manErr
+                    }
+                    runCatching {
+                        postEncryptedJson(
+                            client = activeClient,
+                            url = "$baseUrl/v1/begin-transfer",
+                            plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                            aesKey = sessionAesKey
+                        )
+                    }
+                    reconnectGeneration.incrementAndGet()
+                    _progress.value = _progress.value.copy(
+                        phaseLabel = "Connessione ripristinata! Ripresa trasferimento..."
+                    )
+                    baseUrl to activeClient
+                }
+            }
+
             val permitSemaphore = Semaphore(3)
             val heavyAcquireLock = Mutex()
-            coroutineScope {
-                entriesToUpload.mapIndexed { _, entry ->
-                    async(Dispatchers.IO) {
-                        val permitsNeeded = if (entry.manifestItem.sizeBytes >= 50L * 1024L * 1024L) 3 else 1
-                        var acquiredPermits = 0
-                        val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-                        val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
-                        try {
-                            if (permitsNeeded == 3) {
-                                heavyAcquireLock.withLock {
-                                    repeat(3) {
-                                        permitSemaphore.acquire()
-                                        acquiredPermits++
-                                    }
-                                }
-                            } else {
-                                permitSemaphore.acquire()
-                                acquiredPermits = 1
-                            }
-                            val encPair = runCatching {
-                                context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
-                                    tempEncrypted.outputStream().use { encOut ->
-                                        DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
-                                    }
-                                }
-                            }.getOrNull()
+            val nextIndex = AtomicInteger(0)
+            val workerCount = minOf(3, entriesToUpload.size)
+            if (workerCount > 0) {
+                coroutineScope {
+                    repeat(workerCount) {
+                        launch(Dispatchers.IO) {
+                            while (true) {
+                                abortedError.get()?.let { throw it }
+                                val idx = nextIndex.getAndIncrement()
+                                if (idx >= entriesToUpload.size) break
+                                val entry = entriesToUpload[idx]
 
-                            if (encPair == null) {
-                                runCatching {
-                                    postEncryptedJson(
-                                        client = activeClient,
-                                        url = "$baseUrl/v1/item-skip/${entry.manifestItem.id}",
-                                        plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
-                                        aesKey = sessionAesKey
-                                    )
-                                }
-                                progressLock.withLock {
-                                    accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
-                                    val eta = etaTracker.update(
-                                        progressFraction = accounting.progressFraction,
-                                        isCompleted = false,
-                                        hasTransferableItems = accounting.initialTotalItems > 0
-                                    )
-                                    _progress.value = _progress.value.copy(
-                                        completedItems = accounting.succeededItemsCount,
-                                        transferredBytes = accounting.transferredBytes,
-                                        totalBytes = accounting.totalBytesForProgress,
-                                        speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
-                                        etaLabel = eta,
-                                        failedItemsCount = accounting.failedItemsCount,
-                                        phaseLabel = "Saltato file non leggibile (${entry.manifestItem.fileName}), proseguo..."
-                                    )
-                                }
-                                return@async
-                            }
-
-                            val (plainLen, sha256Hex) = encPair
-                            var uploadedSingleOk = false
-                            var permissionDeniedMsg: String? = null
-
-                            for (attempt in 1..2) {
-                                val body = object : RequestBody() {
-                                    override fun contentType() = "application/octet-stream".toMediaType()
-                                    override fun contentLength(): Long = tempEncrypted.length()
-                                    override fun writeTo(sink: BufferedSink) {
-                                        tempEncrypted.inputStream().use { fileIn ->
-                                            val buf = ByteArray(256 * 1024)
-                                            while (true) {
-                                                val r = fileIn.read(buf)
-                                                if (r <= 0) break
-                                                sink.write(buf, 0, r)
+                                val permitsNeeded = if (entry.manifestItem.sizeBytes >= 50L * 1024L * 1024L) 3 else 1
+                                var acquiredPermits = 0
+                                val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+                                val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
+                                try {
+                                    if (permitsNeeded == 3) {
+                                        heavyAcquireLock.withLock {
+                                            repeat(3) {
+                                                permitSemaphore.acquire()
+                                                acquiredPermits++
                                             }
                                         }
+                                    } else {
+                                        permitSemaphore.acquire()
+                                        acquiredPermits = 1
                                     }
-                                }
+                                    val encPair = runCatching {
+                                        context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
+                                            tempEncrypted.outputStream().use { encOut ->
+                                                DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
+                                            }
+                                        }
+                                    }.getOrNull()
 
-                                val putReq = Request.Builder()
-                                    .url("$baseUrl/v1/item/${entry.manifestItem.id}")
-                                    .header("X-DS-Plain-Length", plainLen.toString())
-                                    .header("X-DS-Sha256", sha256Hex)
-                                    .header("Connection", "close")
-                                    .put(body)
-                                    .build()
+                                    if (encPair == null) {
+                                        val skipUrl = "$baseUrl/v1/item-skip/${entry.manifestItem.id}"
+                                        val skipClient = activeClient
+                                        runCatching {
+                                            postEncryptedJson(
+                                                client = skipClient,
+                                                url = skipUrl,
+                                                plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                                                aesKey = sessionAesKey
+                                            )
+                                        }
+                                        val skipRec = SkippedTransferItemRecord(
+                                            id = entry.manifestItem.id,
+                                            fileName = entry.manifestItem.fileName,
+                                            category = entry.manifestItem.category,
+                                            sizeBytes = entry.manifestItem.sizeBytes,
+                                            reason = "File non leggibile o rimosso sul dispositivo sorgente"
+                                        )
+                                        skippedItemsList.add(skipRec)
+                                        progressLock.withLock {
+                                            accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
+                                            checkpointTotalBytes = accounting.totalBytesForProgress
+                                            val eta = etaTracker.update(
+                                                progressFraction = accounting.progressFraction,
+                                                isCompleted = false,
+                                                hasTransferableItems = accounting.initialTotalItems > 0
+                                            )
+                                            val skippedSnapshot = synchronized(skippedItemsList) { skippedItemsList.toList() }
+                                            _progress.value = _progress.value.copy(
+                                                completedItems = accounting.succeededItemsCount,
+                                                transferredBytes = accounting.transferredBytes,
+                                                totalBytes = accounting.totalBytesForProgress,
+                                                speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
+                                                etaLabel = eta,
+                                                failedItemsCount = accounting.failedItemsCount,
+                                                skippedItems = skippedSnapshot,
+                                                phaseLabel = "Saltato file non leggibile (${entry.manifestItem.fileName}), proseguo..."
+                                            )
+                                        }
+                                        continue
+                                    }
 
-                                val code = runCatching {
-                                    activeClient.newCall(putReq).execute().use { resp -> resp.code }
-                                }.getOrDefault(-1)
+                                    val (plainLen, sha256Hex) = encPair
+                                    var uploadedSingleOk = false
+                                    var quickAttempt = 0
+                                    var itemRetryCount = 0
+                                    var didTryFullReconnect = false
 
-                                if (code in 200..299) {
-                                    uploadedSingleOk = true
-                                    break
-                                } else if (code == 403) {
-                                    permissionDeniedMsg = "Permesso Foto/Libreria negato sul telefono ricevente (${handshakeResp.receiverName}). Abilitalo nelle Impostazioni del ricevente."
-                                    break
-                                } else if (attempt == 1) {
-                                    delay(250L)
+                                    while (true) {
+                                        abortedError.get()?.let { throw it }
+                                        val genBeforeAttempt = reconnectGeneration.get()
+                                        val reqBaseUrl = baseUrl
+                                        val reqClient = activeClient
+
+                                        val body = object : RequestBody() {
+                                            override fun contentType() = "application/octet-stream".toMediaType()
+                                            override fun contentLength(): Long = tempEncrypted.length()
+                                            override fun writeTo(sink: BufferedSink) {
+                                                tempEncrypted.inputStream().use { fileIn ->
+                                                    val buf = ByteArray(256 * 1024)
+                                                    while (true) {
+                                                        val r = fileIn.read(buf)
+                                                        if (r <= 0) break
+                                                        sink.write(buf, 0, r)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        val putReq = Request.Builder()
+                                            .url("$reqBaseUrl/v1/item/${entry.manifestItem.id}")
+                                            .header("X-DS-Plain-Length", plainLen.toString())
+                                            .header("X-DS-Sha256", sha256Hex)
+                                            .header("Connection", "close")
+                                            .put(body)
+                                            .build()
+
+                                        val code = runCatching {
+                                            reqClient.newCall(putReq).execute().use { resp -> resp.code }
+                                        }.getOrDefault(-1)
+
+                                        if (code in 200..299) {
+                                            uploadedSingleOk = true
+                                            break
+                                        }
+                                        if (code == 403) {
+                                            val err = IllegalStateException(
+                                                "Permesso Foto/Libreria negato sul telefono ricevente (${handshakeResp.receiverName}). Abilitalo nelle Impostazioni del ricevente."
+                                            )
+                                            abortedError.set(err)
+                                            throw err
+                                        }
+                                        if (code == 507) {
+                                            val err = IllegalStateException(
+                                                "Spazio di archiviazione esaurito su ${handshakeResp.receiverName}. Libera spazio e riprova per riprendere dai file rimanenti."
+                                            )
+                                            abortedError.set(err)
+                                            throw err
+                                        }
+
+                                        val isTransportOrSessionFailure = code == -1 || code == 401 || code == 408 || code == 502 || code == 503 || code == 504
+                                        if (isTransportOrSessionFailure) {
+                                            if (quickAttempt < 2 && code != 401) {
+                                                val backoffMs = if (quickAttempt == 0) 400L else 1_000L
+                                                quickAttempt++
+                                                delay(backoffMs)
+                                                continue
+                                            }
+                                            if (!didTryFullReconnect) {
+                                                didTryFullReconnect = true
+                                                ensureReconnected(genBeforeAttempt)
+                                                quickAttempt = 0
+                                                continue
+                                            }
+                                            val err = buildNetworkPausedException()
+                                            abortedError.set(err)
+                                            throw err
+                                        }
+
+                                        // Errore applicativo sul singolo file (404 / 422 / 500): 1 retry rapido poi salta solo questo file
+                                        if (itemRetryCount < 1) {
+                                            itemRetryCount++
+                                            delay(300L)
+                                            continue
+                                        }
+                                        break
+                                    }
+
+                                    if (!uploadedSingleOk) {
+                                        DirectSwitchLog.warn("Impossibile inviare ${entry.manifestItem.fileName}, passo al successivo")
+                                        val skipUrl = "$baseUrl/v1/item-skip/${entry.manifestItem.id}"
+                                        val skipClient = activeClient
+                                        runCatching {
+                                            postEncryptedJson(
+                                                client = skipClient,
+                                                url = skipUrl,
+                                                plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                                                aesKey = sessionAesKey
+                                            )
+                                        }
+                                        val skipRec = SkippedTransferItemRecord(
+                                            id = entry.manifestItem.id,
+                                            fileName = entry.manifestItem.fileName,
+                                            category = entry.manifestItem.category,
+                                            sizeBytes = entry.manifestItem.sizeBytes,
+                                            reason = "Errore salvataggio sul telefono ricevente"
+                                        )
+                                        skippedItemsList.add(skipRec)
+                                        progressLock.withLock {
+                                            accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
+                                            checkpointTotalBytes = accounting.totalBytesForProgress
+                                            val eta = etaTracker.update(
+                                                progressFraction = accounting.progressFraction,
+                                                isCompleted = false,
+                                                hasTransferableItems = accounting.initialTotalItems > 0
+                                            )
+                                            val skippedSnapshot = synchronized(skippedItemsList) { skippedItemsList.toList() }
+                                            _progress.value = _progress.value.copy(
+                                                completedItems = accounting.succeededItemsCount,
+                                                transferredBytes = accounting.transferredBytes,
+                                                totalBytes = accounting.totalBytesForProgress,
+                                                speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
+                                                etaLabel = eta,
+                                                failedItemsCount = accounting.failedItemsCount,
+                                                skippedItems = skippedSnapshot,
+                                                phaseLabel = "Saltato ${entry.manifestItem.fileName}, proseguo col resto..."
+                                            )
+                                        }
+                                        continue
+                                    }
+
+                                    completedItemIdsSet.add(entry.manifestItem.id)
+                                    var shouldSaveCheckpoint = false
+                                    progressLock.withLock {
+                                        accounting.recordUploaded(entry.manifestItem.sizeBytes, plainLen)
+                                        checkpointUploadedBytes = accounting.transferredBytes
+                                        checkpointTotalBytes = accounting.totalBytesForProgress
+                                        val speedMbs = speedMeter.record(plainLen)
+                                        val frac = accounting.progressFraction
+                                        val eta = etaTracker.update(
+                                            progressFraction = frac,
+                                            isCompleted = false,
+                                            hasTransferableItems = accounting.initialTotalItems > 0
+                                        )
+                                        val pctNow = TransferDisplayFormatting.percentageInt(frac.toDouble(), false)
+                                        _progress.value = _progress.value.copy(
+                                            currentFileName = entry.manifestItem.fileName,
+                                            completedItems = accounting.succeededItemsCount,
+                                            transferredBytes = accounting.transferredBytes,
+                                            totalBytes = accounting.totalBytesForProgress,
+                                            speedMegabytesPerSec = speedMbs,
+                                            etaLabel = eta,
+                                            failedItemsCount = accounting.failedItemsCount
+                                        )
+                                        DirectSwitchKeepAliveService.updateProgress(
+                                            context = context,
+                                            percent = pctNow,
+                                            statusText = "Invio: ${TransferDisplayFormatting.formatBytes(accounting.transferredBytes)} / ${TransferDisplayFormatting.formatBytes(accounting.totalBytesForProgress)}",
+                                            etaSubText = eta
+                                        )
+                                        shouldSaveCheckpoint = accounting.succeededItemsCount % 15 == 0
+                                    }
+                                    if (shouldSaveCheckpoint) {
+                                        saveDiskCheckpoint()
+                                    }
+                                } finally {
+                                    tempEncrypted.delete()
+                                    repeat(acquiredPermits) { permitSemaphore.release() }
                                 }
                             }
-
-                            if (permissionDeniedMsg != null) {
-                                throw IllegalStateException(permissionDeniedMsg)
-                            }
-
-                            if (!uploadedSingleOk) {
-                                DirectSwitchLog.warn("Impossibile inviare ${entry.manifestItem.fileName}, passo al successivo")
-                                runCatching {
-                                    postEncryptedJson(
-                                        client = activeClient,
-                                        url = "$baseUrl/v1/item-skip/${entry.manifestItem.id}",
-                                        plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
-                                        aesKey = sessionAesKey
-                                    )
-                                }
-                                progressLock.withLock {
-                                    accounting.recordFailedOrSkipped(entry.manifestItem.sizeBytes)
-                                    val eta = etaTracker.update(
-                                        progressFraction = accounting.progressFraction,
-                                        isCompleted = false,
-                                        hasTransferableItems = accounting.initialTotalItems > 0
-                                    )
-                                    _progress.value = _progress.value.copy(
-                                        completedItems = accounting.succeededItemsCount,
-                                        transferredBytes = accounting.transferredBytes,
-                                        totalBytes = accounting.totalBytesForProgress,
-                                        speedMegabytesPerSec = speedMeter.currentMegabytesPerSec(),
-                                        etaLabel = eta,
-                                        failedItemsCount = accounting.failedItemsCount,
-                                        phaseLabel = "Saltato ${entry.manifestItem.fileName}, proseguo col resto..."
-                                    )
-                                }
-                                return@async
-                            }
-
-                            progressLock.withLock {
-                                accounting.recordUploaded(entry.manifestItem.sizeBytes, plainLen)
-                                val speedMbs = speedMeter.record(plainLen)
-                                val eta = etaTracker.update(
-                                    progressFraction = accounting.progressFraction,
-                                    isCompleted = false,
-                                    hasTransferableItems = accounting.initialTotalItems > 0
-                                )
-                                _progress.value = _progress.value.copy(
-                                    currentFileName = entry.manifestItem.fileName,
-                                    completedItems = accounting.succeededItemsCount,
-                                    transferredBytes = accounting.transferredBytes,
-                                    totalBytes = accounting.totalBytesForProgress,
-                                    speedMegabytesPerSec = speedMbs,
-                                    etaLabel = eta,
-                                    failedItemsCount = accounting.failedItemsCount
-                                )
-                            }
-                        } finally {
-                            tempEncrypted.delete()
-                            repeat(acquiredPermits) { permitSemaphore.release() }
                         }
                     }
-                }.awaitAll()
+                }
             }
             val failedCount = accounting.failedItemsCount
 
-            // 5. Chiusura sessione cifrata e Report certificato
-            val completeJson = postEncryptedJson(
-                client = activeClient,
-                url = "$baseUrl/v1/complete",
-                plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
-                aesKey = sessionAesKey
-            )
+            // 5. Chiusura sessione cifrata e Report certificato (con 1 fallback di riconnessione se la rete cade all'ultimo)
+            val completeJson = try {
+                postEncryptedJson(
+                    client = activeClient,
+                    url = "$baseUrl/v1/complete",
+                    plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                    aesKey = sessionAesKey
+                )
+            } catch (_: Throwable) {
+                val (recoveredUrl, recoveredClient) = ensureReconnected(reconnectGeneration.get())
+                postEncryptedJson(
+                    client = recoveredClient,
+                    url = "$recoveredUrl/v1/complete",
+                    plainJson = """{"sessionId":"${qrPayload.sessionId}"}""",
+                    aesKey = sessionAesKey
+                )
+            }
             val report = DirectSwitchJson.instance.decodeFromString<TransferCompletionReport>(completeJson)
+
+            if (failedCount == 0 && !isTargetedRetry) {
+                TransferCheckpointStore.clear(context)
+            } else if (failedCount > 0) {
+                saveDiskCheckpoint()
+            }
 
             val doneLabel = if (failedCount > 0) {
                 "Trasferimento completato ($failedCount file non disponibili saltati)"
             } else {
                 "Trasferimento completato!"
             }
+            val finalSkipped = synchronized(skippedItemsList) { skippedItemsList.toList() }
             _progress.value = _progress.value.copy(
                 phaseLabel = doneLabel,
                 etaLabel = null,
                 sessionStage = TransferSessionStage.COMPLETED,
                 isCompleted = true,
                 failedItemsCount = failedCount,
+                skippedItems = finalSkipped,
                 pendingNativeWhatsAppMigration = wantNativeWa
+            )
+            DirectSwitchKeepAliveService.updateProgress(
+                context = context,
+                percent = 100,
+                statusText = doneLabel,
+                etaSubText = null,
+                force = true
             )
             Result.success(report)
         } catch (t: Throwable) {
+            saveDiskCheckpoint()
             prepAnimDeferred?.complete(Unit)
             _progress.value = _progress.value.copy(
                 sessionStage = TransferSessionStage.TRANSFERRING,
@@ -1848,9 +2395,78 @@ class DirectSwitchTransferClient(private val context: Context) {
             )
             Result.failure(t)
         } finally {
-            boundChannel?.cleanup?.invoke()
+            for (pwdFile in stagedPasswordCsvFiles) {
+                SecureTempFileShredder.shredAndDelete(pwdFile)
+            }
+            synchronized(channelCleanups) {
+                for (cleanup in channelCleanups) {
+                    runCatching { cleanup() }
+                }
+                channelCleanups.clear()
+            }
             DirectSwitchKeepAliveService.stop(context)
         }
+    }
+
+    private suspend fun waitForReceiverReconnection(
+        qrPayload: QrPairingPayload,
+        currentChannel: BoundHttpChannel,
+        timeoutMillis: Long = 45_000L
+    ): BoundHttpChannel? {
+        val prioritizedIps = (listOf(currentChannel.reachableIp) + qrPayload.ips).distinct()
+        val startMs = System.currentTimeMillis()
+        val deadlineMs = startMs + timeoutMillis
+        var lastHotspotRetryMs = 0L
+
+        while (System.currentTimeMillis() < deadlineMs) {
+            val remainingSec = (((deadlineMs - System.currentTimeMillis()) + 999L) / 1000L).coerceAtLeast(1L)
+            _progress.value = _progress.value.copy(
+                phaseLabel = "Connessione interrotta — riconnessione automatica con ${qrPayload.receiverName} (${remainingSec}s)..."
+            )
+
+            // 1. Prova prima sullo stesso socket/interfaccia già agganciata
+            findReachableIp(currentChannel.client, prioritizedIps, qrPayload.port)?.let { hit ->
+                return currentChannel.copy(reachableIp = hit)
+            }
+
+            // 2. Prova su tutte le interfacce Wi-Fi attive
+            for (wifiNet in findActiveWifiNetworks()) {
+                val wifiClient = clientBoundTo(wifiNet)
+                val hit = findReachableIp(wifiClient, prioritizedIps, qrPayload.port)
+                if (hit != null) {
+                    return BoundHttpChannel(reachableIp = hit, client = wifiClient)
+                }
+            }
+
+            // 3. Fallback sul routing predefinito
+            findReachableIp(baseHttpClient, prioritizedIps, qrPayload.port)?.let { hit ->
+                return BoundHttpChannel(reachableIp = hit, client = baseHttpClient)
+            }
+
+            // 4. Se stiamo usando l'Hotspot 5GHz Offline, riprova l'aggancio ogni ~15s
+            val nowMs = System.currentTimeMillis()
+            if (!qrPayload.wifiSsid.isNullOrBlank() &&
+                !qrPayload.wifiPass.isNullOrBlank() &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                nowMs - startMs >= 6_000L &&
+                nowMs - lastHotspotRetryMs >= 15_000L
+            ) {
+                lastHotspotRetryMs = nowMs
+                val hotspotPair = requestPeerHotspotNetworkApi29(qrPayload.wifiSsid, qrPayload.wifiPass)
+                if (hotspotPair != null) {
+                    val (hotspotNet, releaseFn) = hotspotPair
+                    val hotspotClient = clientBoundTo(hotspotNet)
+                    val hit = findReachableIp(hotspotClient, prioritizedIps, qrPayload.port)
+                    if (hit != null) {
+                        return BoundHttpChannel(reachableIp = hit, client = hotspotClient, cleanup = releaseFn)
+                    }
+                    releaseFn()
+                }
+            }
+
+            delay(1_200L)
+        }
+        return null
     }
 
     private fun clientBoundTo(network: Network?): OkHttpClient =
@@ -1859,6 +2475,18 @@ class DirectSwitchTransferClient(private val context: Context) {
         } else {
             baseHttpClient
         }
+
+    private fun findActiveWiredNetworks(): List<Network> {
+        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return emptyList()
+        return runCatching {
+            cm.allNetworks.filter { net ->
+                val caps = cm.getNetworkCapabilities(net) ?: return@filter false
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && caps.hasTransport(NetworkCapabilities.TRANSPORT_USB))
+            }
+        }.getOrDefault(emptyList())
+    }
 
     private fun findActiveWifiNetworks(): List<Network> {
         val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -1876,18 +2504,39 @@ class DirectSwitchTransferClient(private val context: Context) {
         wifiSsid: String?,
         wifiPass: String?
     ): BoundHttpChannel? {
-        // 1. Prova prima su tutte le reti TRANSPORT_WIFI attive (anche prive di internet)
+        // 0. Priorità massima al Cavo USB-C / Ethernet / Tethering cablato (fino a 5 Gbps)
+        for (wiredNet in findActiveWiredNetworks()) {
+            val wiredClient = clientBoundTo(wiredNet)
+            val hit = findReachableIp(wiredClient, candidateIps, port)
+            if (hit != null) {
+                return BoundHttpChannel(
+                    reachableIp = hit,
+                    client = wiredClient,
+                    medium = TransferConnectionMedium.USB_CABLE
+                )
+            }
+        }
+
+        // 1. Prova su tutte le reti TRANSPORT_WIFI attive (anche prive di internet)
         for (wifiNet in findActiveWifiNetworks()) {
             val wifiClient = clientBoundTo(wifiNet)
             val hit = findReachableIp(wifiClient, candidateIps, port)
             if (hit != null) {
-                return BoundHttpChannel(reachableIp = hit, client = wifiClient)
+                return BoundHttpChannel(
+                    reachableIp = hit,
+                    client = wifiClient,
+                    medium = LocalNetworkAddresses.detectConnectionMedium(hit, isHotspotOrP2p = false)
+                )
             }
         }
 
         // 2. Fallback sul routing predefinito di sistema (es. tethering inverso / Ethernet USB)
         findReachableIp(baseHttpClient, candidateIps, port)?.let { hit ->
-            return BoundHttpChannel(reachableIp = hit, client = baseHttpClient)
+            return BoundHttpChannel(
+                reachableIp = hit,
+                client = baseHttpClient,
+                medium = LocalNetworkAddresses.detectConnectionMedium(hit, isHotspotOrP2p = false)
+            )
         }
 
         // 3. Se il QR contiene le credenziali dell'Hotspot 5GHz Offline, aggancialo in automatico (Android 10+)
@@ -1901,7 +2550,12 @@ class DirectSwitchTransferClient(private val context: Context) {
                 val hotspotClient = clientBoundTo(hotspotNet)
                 val hit = findReachableIp(hotspotClient, candidateIps, port)
                 if (hit != null) {
-                    return BoundHttpChannel(reachableIp = hit, client = hotspotClient, cleanup = releaseFn)
+                    return BoundHttpChannel(
+                        reachableIp = hit,
+                        client = hotspotClient,
+                        medium = TransferConnectionMedium.PEER_TO_PEER_WIFI,
+                        cleanup = releaseFn
+                    )
                 }
                 releaseFn()
             }
@@ -1995,9 +2649,12 @@ class DirectSwitchTransferClient(private val context: Context) {
         val req = Request.Builder().url(url).post(body).build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
-                val hint = if (resp.code == 401) "PIN o chiave QR non validi"
-                else if (resp.code == 429) "Troppi tentativi PIN errati: inquadra il QR Code"
-                else "HTTP ${resp.code}"
+                val hint = when (resp.code) {
+                    401 -> "PIN o chiave QR non validi"
+                    429 -> "Troppi tentativi PIN errati: inquadra il QR Code"
+                    507 -> "Spazio di archiviazione esaurito sul telefono ricevente"
+                    else -> "HTTP ${resp.code}"
+                }
                 throw IllegalStateException("Richiesta rifiutata ($hint)")
             }
             val respBytes = resp.body?.bytes() ?: ByteArray(0)

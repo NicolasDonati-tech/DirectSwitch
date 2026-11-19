@@ -78,45 +78,46 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 
 /**
- * Tema grafico Apple HIG condiviso con CloudSave (base perla #F8FAFD + colori neutri senza viola).
+ * Tema grafico Apple HIG adattivo (Light Perla #F8FAFD + Dark Mode Grafite #0E131C, zero viola).
  */
 object DirectSwitchTheme {
-    val canvasTop = Color(0xFFE0E7F1)
-    val canvasMid = Color(0xFFE9EEF6)
-    val canvasBottom = Color(0xFFDAE2EE)
+    var isDarkMode by mutableStateOf(false)
 
-    val headerBg = Color(0xF2E5EBF4)
-    val cardSurface = Color(0xFFF8FAFD)
-    val cardSelected = Color(0xFFEAF2FE)
-    val inputSurface = Color(0xFFEAEFF6)
-    val cardBorder = Color(0xFFCFD8E5)
-    val hairline = Color(0xFFC7D0DE)
+    val canvasTop: Color get() = if (isDarkMode) Color(0xFF0E131C) else Color(0xFFE0E7F1)
+    val canvasMid: Color get() = if (isDarkMode) Color(0xFF131A26) else Color(0xFFE9EEF6)
+    val canvasBottom: Color get() = if (isDarkMode) Color(0xFF0B0F17) else Color(0xFFDAE2EE)
 
-    val blue = Color(0xFF007AFF)
-    val teal = Color(0xFF008AA8)
-    val green = Color(0xFF34C759)
-    val orange = Color(0xFFFF9500)
-    val red = Color(0xFFFF3B30)
-    val slate = Color(0xFF374151)
-    val charcoal = Color(0xFF1C1E23)
+    val headerBg: Color get() = if (isDarkMode) Color(0xF2111722) else Color(0xF2E5EBF4)
+    val cardSurface: Color get() = if (isDarkMode) Color(0xFF1C2534) else Color(0xFFF8FAFD)
+    val cardSelected: Color get() = if (isDarkMode) Color(0xFF1E324E) else Color(0xFFEAF2FE)
+    val inputSurface: Color get() = if (isDarkMode) Color(0xFF263143) else Color(0xFFEAEFF6)
+    val cardBorder: Color get() = if (isDarkMode) Color(0xFF36445A) else Color(0xFFCFD8E5)
+    val hairline: Color get() = if (isDarkMode) Color(0xFF344156) else Color(0xFFC7D0DE)
 
-    // Palette dedicata per il badge "Premium Direct" (Oro/Ambra stile funzionalità Premium)
+    val blue: Color get() = if (isDarkMode) Color(0xFF3D9CFF) else Color(0xFF007AFF)
+    val teal: Color get() = if (isDarkMode) Color(0xFF2EC2DB) else Color(0xFF008AA8)
+    val green: Color get() = if (isDarkMode) Color(0xFF40D56B) else Color(0xFF34C759)
+    val orange: Color get() = if (isDarkMode) Color(0xFFFFAA28) else Color(0xFFFF9500)
+    val red: Color get() = if (isDarkMode) Color(0xFFFF5E56) else Color(0xFFFF3B30)
+    val slate: Color get() = if (isDarkMode) Color(0xFF94A3B8) else Color(0xFF374151)
+    val charcoal: Color get() = if (isDarkMode) Color(0xFFF0F4FA) else Color(0xFF1C1E23)
+
     val premiumGold = Color(0xFFC77305)
     val premiumAmber = Color(0xFFF1960A)
-    val premiumSurface = Color(0xFFFFF6DC)
+    val premiumSurface: Color get() = if (isDarkMode) Color(0xFF3C2E13) else Color(0xFFFFF6DC)
     val premiumBorder = Color(0xFFEBA825)
 
-    // Alias neutro senza viola
-    val indigo = slate
-    val tealPrimary = blue
-    val blueAccent = blue
-    val greenSuccess = green
-    val amberPro = orange
-    val dangerRed = red
+    // Alias neutri senza viola
+    val indigo: Color get() = slate
+    val tealPrimary: Color get() = blue
+    val blueAccent: Color get() = blue
+    val greenSuccess: Color get() = green
+    val amberPro: Color get() = orange
+    val dangerRed: Color get() = red
 
-    val textPrimary = Color(0xFF1C1C1E)
-    val textSecondary = Color(0xFF636366)
-    val textMuted = Color(0xFF8E8E93)
+    val textPrimary: Color get() = if (isDarkMode) Color(0xFFF4F7FB) else Color(0xFF1C1C1E)
+    val textSecondary: Color get() = if (isDarkMode) Color(0xFFB0BBCB) else Color(0xFF636366)
+    val textMuted: Color get() = if (isDarkMode) Color(0xFF838FA1) else Color(0xFF8E8E93)
 
     val backgroundBrush: Brush
         get() = Brush.linearGradient(

@@ -1354,11 +1354,13 @@ final class DirectSwitchTests: XCTestCase {
     }
 
     func testExtendedCuratedCategoriesUniquenessAndDocumentPresets() async throws {
-        // 1. Verifica che tutte le 9 categorie estese non abbiano duplicati di Bundle ID né App Store ID
+        // 1. Verifica che tutte le 14 categorie estese (>= 250 app) non abbiano duplicati di Bundle ID né App Store ID
         let allCategories = iOSInstalledAppsScanner.curatedCategories
-        XCTAssertGreaterThanOrEqual(allCategories.count, 9)
+        XCTAssertGreaterThanOrEqual(allCategories.count, 14)
         XCTAssertTrue(allCategories.contains { $0.id == "social_messaging" })
         XCTAssertTrue(allCategories.contains { $0.id == "music_streaming" })
+        XCTAssertTrue(allCategories.contains { $0.id == "games_entertainment" })
+        XCTAssertTrue(allCategories.contains { $0.id == "health_fitness" })
 
         var seenBundles: Set<String> = []
         var seenStoreIds: Set<Int> = []
@@ -1376,6 +1378,7 @@ final class DirectSwitchTests: XCTestCase {
                 }
             }
         }
+        XCTAssertGreaterThanOrEqual(seenBundles.count, 250)
 
         // 2. Classificazione posizioni predefinite iPhone (iCloud Drive, Su iPhone, Chrome) + altre posizioni utente
         let icloudSummary = iOSDocumentLocationSummary(locationId: "pos:/var/mobile/Library/Mobile Documents/com~apple~CloudDocs", locationName: "iCloud Drive", folderCount: 30, fileCount: 412, totalBytes: 120_000_000)
@@ -1571,5 +1574,271 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(legacyDecoded.calendarsImportedCount, 3)
         XCTAssertNil(legacyDecoded.calendarsAlreadyPresentCount)
         XCTAssertNil(legacyDecoded.remindersAlreadyPresentCount)
+    }
+
+    func testProtocolDtosTolerateOmittedLegacyFields() throws {
+        let decoder = JSONDecoder()
+
+        let scope = try decoder.decode(ActiveTransferScope.self, from: Data(#"{"contacts":true,"photos":true}"#.utf8))
+        XCTAssertTrue(scope.contacts)
+        XCTAssertTrue(scope.photos)
+        XCTAssertFalse(scope.reminders)
+        XCTAssertFalse(scope.whatsApp)
+
+        let hs = try decoder.decode(
+            HandshakeRequest.self,
+            from: Data(#"{"sessionId":"s_old","senderName":"Pixel","senderPlatform":"ANDROID"}"#.utf8)
+        )
+        XCTAssertEqual(hs.sessionId, "s_old")
+        XCTAssertFalse(hs.senderHasPro)
+        XCTAssertFalse(hs.senderHasCloudSavePro)
+        XCTAssertEqual(hs.totalEstimatedBytes, 0)
+        XCTAssertNil(hs.isResume)
+
+        let cal = try decoder.decode(
+            CalendarEventRecord.self,
+            from: Data(#"{"id":"e1","title":"Visita","startEpochMillis":1760000000000,"endEpochMillis":1760003600000}"#.utf8)
+        )
+        XCTAssertFalse(cal.allDay)
+        XCTAssertNil(cal.rrule)
+
+        let rem = try decoder.decode(
+            ReminderTransferRecord.self,
+            from: Data(#"{"id":"r1","title":"Spesa"}"#.utf8)
+        )
+        XCTAssertFalse(rem.isCompleted)
+        XCTAssertEqual(rem.priority, 0)
+        XCTAssertNil(rem.dueEpochMillis)
+
+        let sms = try decoder.decode(
+            SmsTransferRecord.self,
+            from: Data(#"{"id":"m1","address":"+39333","body":"Ciao","dateEpochMillis":1760000000000}"#.utf8)
+        )
+        XCTAssertEqual(sms.messageType, 1)
+
+        let call = try decoder.decode(
+            CallLogTransferRecord.self,
+            from: Data(#"{"id":"cl1","number":"+39333","dateEpochMillis":1760000000000}"#.utf8)
+        )
+        XCTAssertEqual(call.callType, 1)
+        XCTAssertEqual(call.durationSeconds, 0)
+
+        let item = try decoder.decode(
+            ManifestItem.self,
+            from: Data(#"{"id":"i1","category":"PHOTOS","fileName":"a.jpg","sizeBytes":1024,"dedupKey":"k1"}"#.utf8)
+        )
+        XCTAssertEqual(item.relativeAlbumOrFolder, "")
+        XCTAssertEqual(item.capturedEpochMillis, 0)
+        XCTAssertEqual(item.mimeType, "application/octet-stream")
+
+        let contact = try decoder.decode(
+            ContactTransferRecord.self,
+            from: Data(#"{"id":"c1","displayName":"Anna"}"#.utf8)
+        )
+        XCTAssertEqual(contact.phones, [])
+        XCTAssertEqual(contact.emails, [])
+
+        let addr = try decoder.decode(PostalAddressTransferRecord.self, from: Data(#"{}"#.utf8))
+        XCTAssertEqual(addr.city, "")
+        XCTAssertNil(addr.label)
+
+        let qr = try decoder.decode(
+            QrPairingPayload.self,
+            from: Data(#"{"sessionId":"s1","receiverName":"Galaxy","receiverPlatform":"ANDROID","ips":["192.168.1.5"],"port":49443,"sessionKeyHex":"00"}"#.utf8)
+        )
+        XCTAssertEqual(qr.proto, "DSWITCH_V1")
+        XCTAssertFalse(qr.receiverHasPro)
+
+        let beacon = try decoder.decode(
+            DiscoveryBeaconPayload.self,
+            from: Data(#"{"sessionId":"s1","receiverName":"Galaxy","receiverPlatform":"ANDROID","ips":["192.168.1.5"],"port":49443}"#.utf8)
+        )
+        XCTAssertEqual(beacon.proto, "DSWITCH_BEACON_V1")
+        XCTAssertFalse(beacon.receiverHasPro)
+    }
+
+    func testNextLevelCoreCheckpointSpaceReliefShredderFiltersAndLocalization() throws {
+        // 1. Checkpoint su disco con salvataggio, lettura, percentuale e auto-scadenza 24h
+        let cpURL = FileManager.default.temporaryDirectory.appendingPathComponent("ds_cp_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cpURL) }
+        let nowMs: Int64 = 1_760_000_000_000
+        let cp = TransferCheckpointRecord(
+            sessionId: "ds_ios_cp_1",
+            qrPayloadJson: #"{"sessionId":"ds_ios_cp_1","receiverName":"iPhone 17","receiverPlatform":"IOS","ips":["192.168.1.15"],"port":49443,"sessionKeyHex":"00"}"#,
+            receiverName: "iPhone 17",
+            receiverPlatform: .IOS,
+            scope: ActiveTransferScope(photos: true, videos: true, audio: true),
+            completedItemIds: ["a", "b", "c"],
+            uploadedBytes: 750_000_000,
+            totalItems: 10,
+            totalBytes: 1_000_000_000,
+            skippedItems: [SkippedTransferItemRecord(id: "d", fileName: "cloud.heic", category: .PHOTOS, sizeBytes: 4096, reason: "iCloud")],
+            filterOptions: MediaTransferFilterOptions(photosLastYearOnly: true, compactVideo1080pHevc: true),
+            savedAtEpochMillis: nowMs
+        )
+        XCTAssertEqual(cp.completionPercent, 75)
+        TransferCheckpointStore.save(cp, to: cpURL)
+
+        let loaded = TransferCheckpointStore.load(from: cpURL, nowEpochMillis: nowMs + 120_000)
+        XCTAssertEqual(loaded?.sessionId, "ds_ios_cp_1")
+        XCTAssertEqual(loaded?.completedItemIds.count, 3)
+        XCTAssertEqual(loaded?.skippedItems.count, 1)
+        XCTAssertEqual(loaded?.filterOptions.compactVideo1080pHevc, true)
+
+        let expired = TransferCheckpointStore.load(from: cpURL, nowEpochMillis: nowMs + 25 * 3_600_000)
+        XCTAssertNil(expired)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cpURL.path))
+
+        // 2. Assistente Salva-Spazio (HEVC 1080p, escludi > 300 MB, solo ultimo anno)
+        let twoYearsAgo = nowMs - Int64(730) * 86_400_000
+        let sampleItems: [ManifestItem] = [
+            ManifestItem(id: "v1", category: .VIDEOS, fileName: "4k.mov", relativeAlbumOrFolder: "Recenti", sizeBytes: 900_000_000, capturedEpochMillis: nowMs, dedupKey: "k1"),
+            ManifestItem(id: "p1", category: .PHOTOS, fileName: "old.heic", relativeAlbumOrFolder: "Vacanze", sizeBytes: 500_000_000, capturedEpochMillis: twoYearsAgo, dedupKey: "k2"),
+            ManifestItem(id: "p2", category: .PHOTOS, fileName: "new.heic", relativeAlbumOrFolder: "Vacanze", sizeBytes: 100_000_000, capturedEpochMillis: nowMs, dedupKey: "k3")
+        ]
+        XCTAssertNil(SpaceReliefPlanner.evaluate(receiverName: "iPhone", availableFreeBytes: 5_000_000_000, items: sampleItems, nowEpochMillis: nowMs))
+        let offer = SpaceReliefPlanner.evaluate(receiverName: "iPhone", availableFreeBytes: 1_000_000_000, items: sampleItems, nowEpochMillis: nowMs)
+        XCTAssertNotNil(offer)
+        XCTAssertTrue(offer!.options.contains { $0.kind == .compactVideosHevc1080p })
+        XCTAssertTrue(offer!.options.contains { $0.kind == .excludeHeavyVideos300Mb && $0.fitsAvailableSpace })
+        XCTAssertTrue(offer!.options.contains { $0.kind == .lastYearMediaOnly })
+
+        // 3. Cancellazione sicura CSV password temporaneo (zero-overwrite + delete)
+        let secretURL = FileManager.default.temporaryDirectory.appendingPathComponent("ds_pwd_\(UUID().uuidString).csv")
+        try Data("Title,Username,Password\nBank,mario,Secret99!".utf8).write(to: secretURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secretURL.path))
+        XCTAssertTrue(SecureTempFileShredder.shredAndDelete(url: secretURL))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secretURL.path))
+
+        // 4. Filtri rapidi Foto/Video + riconoscimento Audio
+        let filters = MediaTransferFilterOptions(
+            photosLastYearOnly: true,
+            selectedPhotoAlbums: ["Vacanze"],
+            videosLastYearOnly: true,
+            maxVideoBytes: 500_000_000
+        )
+        XCTAssertTrue(iOSPhotoFilterHelper.matchesFilter(item: sampleItems[2], options: filters, nowEpochMillis: nowMs))
+        XCTAssertFalse(iOSPhotoFilterHelper.matchesFilter(item: sampleItems[1], options: filters, nowEpochMillis: nowMs))
+        XCTAssertFalse(iOSPhotoFilterHelper.matchesFilter(item: sampleItems[0], options: filters, nowEpochMillis: nowMs))
+        XCTAssertTrue(iOSAudioAndCallLogMigrator.isAudioFileName("Memo_Vocale.m4a"))
+        XCTAssertFalse(iOSAudioAndCallLogMigrator.isAudioFileName("Contratto.pdf"))
+
+        // 5. Multilingua + Checklist & Ricevuta migrazione
+        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "en", fallbackItalian: "Ricevi"), "Receive data")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "es", fallbackItalian: "Ricevi"), "Recibir datos")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "fr", fallbackItalian: "Ricevi"), "Recevoir")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "de", fallbackItalian: "Ricevi"), "Empfangen")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "it", fallbackItalian: "Ricevi"), "Ricevi")
+
+        let checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp: true, hasApps: true, hasSkipped: true)
+        XCTAssertEqual(checklist.count, 6)
+        let receipt = MigrationReceiptBuilder.buildReceiptText(
+            peerName: "Galaxy S25",
+            isReceiver: false,
+            connectionMedium: .peerToPeerWifi,
+            completedFiles: 88,
+            totalBytes: 2_400_000_000,
+            mergedContacts: 210,
+            importedCalendars: 30,
+            importedReminders: 12,
+            importedSms: 50,
+            importedCallLogs: 40,
+            appsCount: 35,
+            skippedCount: 0
+        )
+        XCTAssertTrue(receipt.contains("Wi-Fi Diretto P2P (AWDL)"))
+        XCTAssertTrue(receipt.contains("Chiamate salvate: 40"))
+        XCTAssertTrue(receipt.contains("AES-256-GCM"))
+    }
+
+    func testLoopbackEndToEndEncryptedCryptoAudioAndCallLogsProtocolRoundTrip() throws {
+        // Test E2E crittografico completo (Handshake -> Manifest con AUDIO + CallLogs -> Stream CSGCM1 -> CompletionReport)
+        let keyHex = DirectSwitchCrypto.generateSessionKeyHex()
+        let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: keyHex)
+        let sessionId = "ds_ios_e2e_loopback"
+
+        // 1. Handshake cifrato
+        let hsReq = HandshakeRequest(
+            sessionId: sessionId,
+            senderName: "iPhone Test",
+            senderPlatform: .IOS,
+            senderHasPro: true,
+            senderHasCloudSavePro: false,
+            totalEstimatedBytes: 320_000,
+            transferScope: ActiveTransferScope(contacts: true, audio: true, callLogs: true)
+        )
+        let hsSealed = try DirectSwitchCrypto.sealJsonEnvelope(String(data: try JSONEncoder().encode(hsReq), encoding: .utf8)!, key: key)
+        let hsPlain = try DirectSwitchCrypto.openJsonEnvelope(hsSealed, key: key)
+        let hsDecoded = try JSONDecoder().decode(HandshakeRequest.self, from: Data(hsPlain.utf8))
+        XCTAssertEqual(hsDecoded.sessionId, sessionId)
+        XCTAssertEqual(hsDecoded.transferScope?.audio, true)
+        XCTAssertEqual(hsDecoded.transferScope?.callLogs, true)
+
+        // 2. Manifesto cifrato con AUDIO + CallLogTransferRecord
+        let audioItem = ManifestItem(
+            id: "aud_loopback_1",
+            category: .AUDIO,
+            fileName: "Registrazione.m4a",
+            relativeAlbumOrFolder: "Audio_e_Memo",
+            sizeBytes: 300_000,
+            capturedEpochMillis: 1_760_000_000_000,
+            dedupKey: "audio_reg_300000",
+            mimeType: "audio/mp4"
+        )
+        let manifest = TransferManifest(
+            sessionId: sessionId,
+            senderPlatform: .ANDROID,
+            items: [audioItem],
+            contactsPayload: [ContactTransferRecord(id: "c1", displayName: "Giulia", phones: ["+393401112233"])],
+            callLogsPayload: [CallLogTransferRecord(id: "cl1", number: "+393401112233", cachedName: "Giulia", callType: 2, dateEpochMillis: 1_760_000_000_000, durationSeconds: 95)],
+            transferScope: ActiveTransferScope(contacts: true, audio: true, callLogs: true)
+        )
+        let manSealed = try DirectSwitchCrypto.sealJsonEnvelope(String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!, key: key)
+        let manPlain = try DirectSwitchCrypto.openJsonEnvelope(manSealed, key: key)
+        let manDecoded = try JSONDecoder().decode(TransferManifest.self, from: Data(manPlain.utf8))
+        XCTAssertEqual(manDecoded.items.first?.category, .AUDIO)
+        XCTAssertEqual(manDecoded.callLogsPayload?.count, 1)
+        XCTAssertEqual(manDecoded.callLogsPayload?.first?.durationSeconds, 95)
+
+        // 3. Stream file CSGCM1 multi-chunk su disco con verifica SHA-256 bit-a-bit
+        let tmpDir = FileManager.default.temporaryDirectory
+        let plainInURL = tmpDir.appendingPathComponent("ds_e2e_in_\(UUID().uuidString).m4a")
+        let encURL = tmpDir.appendingPathComponent("ds_e2e_enc_\(UUID().uuidString).csgcm1")
+        let plainOutURL = tmpDir.appendingPathComponent("ds_e2e_out_\(UUID().uuidString).m4a")
+        defer {
+            try? FileManager.default.removeItem(at: plainInURL)
+            try? FileManager.default.removeItem(at: encURL)
+            try? FileManager.default.removeItem(at: plainOutURL)
+        }
+        var sampleBytes = Data(count: 310_000)
+        for i in 0..<sampleBytes.count {
+            sampleBytes[i] = UInt8((i * 31 + 17) & 0xFF)
+        }
+        try sampleBytes.write(to: plainInURL)
+
+        let encMeta = try DirectSwitchCrypto.encryptFileCSGCM1(inputURL: plainInURL, outputURL: encURL, key: key)
+        let decMeta = try DirectSwitchCrypto.decryptFileCSGCM1(inputURL: encURL, outputURL: plainOutURL, key: key)
+        XCTAssertEqual(encMeta.plainBytes, Int64(sampleBytes.count))
+        XCTAssertEqual(decMeta.plainBytes, encMeta.plainBytes)
+        XCTAssertEqual(decMeta.sha256Hex, encMeta.sha256Hex)
+        XCTAssertEqual(try Data(contentsOf: plainOutURL), sampleBytes)
+
+        // 4. Report di completamento cifrato con callLogsImportedCount
+        let report = TransferCompletionReport(
+            sessionId: sessionId,
+            licenseTier: .INTRA_OS_FREE,
+            transferredFilesCount: 1,
+            transferredBytes: decMeta.plainBytes,
+            mergedContactsCount: 1,
+            importedCalendarsCount: 0,
+            importedSmsCount: 0,
+            callLogsImportedCount: 1,
+            skippedDuplicatesCount: 0,
+            elapsedMillis: 42
+        )
+        let repSealed = try DirectSwitchCrypto.sealJsonEnvelope(String(data: try JSONEncoder().encode(report), encoding: .utf8)!, key: key)
+        let repDecoded = try JSONDecoder().decode(TransferCompletionReport.self, from: Data(try DirectSwitchCrypto.openJsonEnvelope(repSealed, key: key).utf8))
+        XCTAssertEqual(repDecoded.callLogsImportedCount, 1)
+        XCTAssertEqual(repDecoded.transferredBytes, Int64(sampleBytes.count))
     }
 }

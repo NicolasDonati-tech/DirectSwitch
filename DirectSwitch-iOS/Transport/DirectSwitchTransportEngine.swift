@@ -160,12 +160,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     @Published var importedCalendars: Int = 0
     @Published var importedReminders: Int = 0
     @Published var importedSms: Int = 0
+    @Published var importedCallLogs: Int = 0
     @Published var savedLivePhotos: Int = 0
     @Published var iCloudOptimizedSkippedHint: Int = 0
     @Published var receivedPasswordsCsvCount: Int = 0
     @Published var receivedDocumentFolders: [String: Int] = [:]
     @Published var skippedDuplicates: Int = 0
     @Published var gatedPreviewCount: Int = 0
+    @Published var connectionMedium: TransferConnectionMedium = .localWifi
+    @Published var skippedItems: [SkippedTransferItemRecord] = []
+    @Published var spaceReliefOffer: SpaceReliefOffer? = nil
+    @Published var resumableCheckpoint: TransferCheckpointRecord? = TransferCheckpointStore.load()
     @Published var isSessionConnected: Bool = false
     @Published var isTransferring: Bool = false
     @Published var isBackgroundKeepAliveActive: Bool = false
@@ -267,6 +272,41 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private func refreshReceiverDestinationSession() {
         receiverDestSession?.close()
         receiverDestSession = iOSDocumentsSandboxBridge.ReceiverDestinationSession.openFromPersistedBookmarks()
+    }
+
+    func dismissResumableCheckpoint() {
+        TransferCheckpointStore.clear()
+        resumableCheckpoint = nil
+    }
+
+    func restoreCheckpointIntoMemory(_ cp: TransferCheckpointRecord) {
+        senderUploadedIdsBySession[cp.sessionId] = Set(cp.completedItemIds)
+        senderUploadedBytesBySession[cp.sessionId] = cp.uploadedBytes
+    }
+
+    private func saveSenderCheckpoint(
+        qrPayload: QrPairingPayload,
+        scope: ActiveTransferScope,
+        mediaFilters: MediaTransferFilterOptions
+    ) {
+        let ids = Array(senderActiveUploadedIds)
+        guard !ids.isEmpty || !skippedItems.isEmpty else { return }
+        let record = TransferCheckpointRecord(
+            sessionId: qrPayload.sessionId,
+            qrPayloadJson: qrPayload.toCompactJson(),
+            receiverName: qrPayload.receiverName,
+            receiverPlatform: qrPayload.receiverPlatform,
+            scope: scope,
+            completedItemIds: ids,
+            uploadedBytes: transferredBytesCount,
+            totalItems: totalItems,
+            totalBytes: totalBytesCount,
+            skippedItems: skippedItems,
+            filterOptions: mediaFilters,
+            savedAtEpochMillis: Int64(Date().timeIntervalSince1970 * 1000.0)
+        )
+        TransferCheckpointStore.save(record)
+        resumableCheckpoint = record
     }
 
     private func closeReceiverDestinationSession() {
@@ -476,6 +516,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         tcpOptions.keepaliveIdle = 15
         let tcpParams = NWParameters(tls: nil, tcp: tcpOptions)
         tcpParams.allowLocalEndpointReuse = true
+        tcpParams.includePeerToPeer = true
 
         guard let nwPort = Network.NWEndpoint.Port(rawValue: port),
               let nwListener = try? NWListener(using: tcpParams, on: nwPort) else {
@@ -1167,6 +1208,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 importedCalendars = 0
                 importedReminders = 0
                 importedSms = 0
+            importedCallLogs = 0
+            skippedItems = []
+            spaceReliefOffer = nil
                 savedLivePhotos = 0
                 skippedDuplicates = 0
                 gatedPreviewCount = 0
@@ -1240,6 +1284,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             importedCalendars = 0
             importedReminders = 0
             importedSms = 0
+            importedCallLogs = 0
+            skippedItems = []
+            spaceReliefOffer = nil
             savedLivePhotos = 0
             receivedPasswordsCsvCount = 0
             receivedDocumentFolders = [:]
@@ -1365,6 +1412,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 importedCalendars = 0
                 importedReminders = 0
                 importedSms = 0
+            importedCallLogs = 0
+            skippedItems = []
+            spaceReliefOffer = nil
                 savedLivePhotos = 0
                 iCloudOptimizedSkippedHint = 0
                 receivedPasswordsCsvCount = 0
@@ -1444,7 +1494,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let (insContacts, skipContacts) = iOSContactsSmartMerger.mergeIncomingContacts(manifest.contactsPayload)
             let currentTier = licenseTier ?? .INTRA_OS_FREE
             let fullAllowed = LicensePolicyEvaluator.allowsFullCategories(currentTier)
-            requestedWhatsAppMigration = (manifest.requestNativeWhatsAppMigration == true)
+            requestedWhatsAppMigration = (manifest.requestNativeWhatsAppMigration == true) && (manifest.senderPlatform != .ANDROID)
 
             if fullAllowed && !manifest.calendarsPayload.isEmpty {
                 _ = await iOSCalendarMigrator.requestAccessIfNeeded()
@@ -1461,10 +1511,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 ? await iOSRemindersMigrator.importRemindersWithStats(incomingReminders)
                 : (imported: 0, alreadyPresent: 0)
             let insSms = fullAllowed ? iOSSmsArchiveStore.saveIncomingSmsArchive(manifest.smsPayload) : 0
+            let insCalls = fullAllowed ? iOSAudioAndCallLogMigrator.saveIncomingCallLogsArchive(manifest.callLogsPayload ?? []) : 0
 
             let (tierFiltered, gated) = LicensePolicyEvaluator.filterItemsForTier(manifest.items, tier: currentTier)
             let hasMedia = tierFiltered.contains { $0.category == .PHOTOS || $0.category == .VIDEOS }
-            let hasDocs = tierFiltered.contains { $0.category == .DOCUMENTS || $0.category == .WHATSAPP_VAULT }
+            let hasDocs = tierFiltered.contains { $0.category == .DOCUMENTS || $0.category == .AUDIO || $0.category == .WHATSAPP_VAULT }
             let existingMediaKeys = hasMedia ? await iOSPhotoKitMigrator.existingDedupKeys() : Set<String>()
             if hasDocs {
                 refreshReceiverDestinationSession()
@@ -1515,6 +1566,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             importedReminders += remResult.imported
             remindersAlreadyPresentCount += remResult.alreadyPresent
             importedSms += insSms
+            importedCallLogs += insCalls
             skippedDuplicates = totalSkipped
             gatedPreviewCount = gated
             activeTransferScope = manifest.transferScope ?? ActiveTransferScope.inferred(from: manifest)
@@ -1544,6 +1596,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 remindersImportedCount: importedReminders,
                 remindersAlreadyPresentCount: remindersAlreadyPresentCount,
                 smsImportedCount: importedSms,
+                callLogsImportedCount: importedCallLogs,
                 gatedByCrossOsPreviewCount: gated
             )
             if let encoded = try? JSONEncoder().encode(resp),
@@ -1711,6 +1764,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 if res.savedAsLivePhoto {
                     savedLivePhotos += 1
                 }
+            } else if effectiveItem.category == .AUDIO {
+                savedOk = iOSAudioAndCallLogMigrator.saveIncomingAudioFile(
+                    item: effectiveItem,
+                    sourceFileURL: tempPlainURL
+                )
             } else {
                 let isPasswordsCsv = iOSDocumentsSandboxBridge.isPasswordsCsvFile(effectiveItem.fileName)
                 if receiverDestSession == nil {
@@ -1829,6 +1887,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 remindersAlreadyPresentCount: remindersAlreadyPresentCount,
                 livePhotosSavedCount: savedLivePhotos,
                 importedSmsCount: importedSms,
+                callLogsImportedCount: importedCallLogs,
                 skippedDuplicatesCount: skippedDuplicates,
                 elapsedMillis: elapsedMs
             )
@@ -1851,8 +1910,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         beaconLastSeen.removeAll()
         needsLocalNetworkRedirect = false
 
-        // Browser Bonjour: attiva la voce «Rete locale» di DirectSwitch in Impostazioni iOS e ne rileva l'eventuale blocco
-        let browser = NWBrowser(for: .bonjour(type: "_directswitch._tcp", domain: nil), using: .tcp)
+        // Browser Bonjour + AWDL Peer-to-Peer Wi-Fi: funziona anche tra due iPhone senza router Wi-Fi né Hotspot
+        let browseParams = NWParameters()
+        browseParams.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjour(type: "_directswitch._tcp", domain: nil), using: browseParams)
         browser.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
@@ -2075,6 +2136,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         if scope.documents {
             rows.append(TransferPreparationItem(id: "documents", icon: "doc.fill", title: "Documenti e File", unitSingular: "file", unitPlural: "file"))
         }
+        if scope.audio {
+            rows.append(TransferPreparationItem(id: "audio", icon: "waveform", title: "Audio e Memo Vocali", unitSingular: "file audio", unitPlural: "file audio"))
+        }
         if scope.apps {
             rows.append(TransferPreparationItem(id: "apps", icon: "square.grid.2x2.fill", title: "App scaricate", unitSingular: "app", unitPlural: "app"))
         }
@@ -2183,23 +2247,29 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         includeReminders: Bool = true,
         remindersUpToTodayOnly: Bool = false,
         includeDocuments: Bool = true,
+        includeAudio: Bool = false,
         includeApps: Bool = false,
         includeWhatsAppVault: Bool = true,
         installedApps: [InstalledAppRecord] = [],
         pickedDocuments: [(ManifestItem, URL)] = [],
+        pickedAudioFiles: [(ManifestItem, URL)] = [],
+        mediaFilters: MediaTransferFilterOptions = MediaTransferFilterOptions(),
+        onlyRetryItemIds: Set<String>? = nil,
         isResume: Bool = false
     ) async {
         Self.raiseOpenFileDescriptorLimitIfNeeded()
         var didAuthenticateSession = false
+        let isTargetedRetry = !(onlyRetryItemIds?.isEmpty ?? true)
         let transferScope = ActiveTransferScope(
-            contacts: includeContacts,
+            contacts: isTargetedRetry ? false : includeContacts,
             photos: includePhotos,
             videos: includeVideos,
-            calendars: includeCalendars,
-            reminders: includeReminders,
+            calendars: isTargetedRetry ? false : includeCalendars,
+            reminders: isTargetedRetry ? false : includeReminders,
             documents: includeDocuments,
-            apps: includeApps,
-            whatsApp: includeWhatsAppVault
+            audio: includeAudio,
+            apps: isTargetedRetry ? false : includeApps,
+            whatsApp: isTargetedRetry ? false : includeWhatsAppVault
         )
         if !isResume {
             prepareForFreshTransfer(
@@ -2208,8 +2278,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 receiverName: qrPayload.receiverName,
                 receiverPlatform: qrPayload.receiverPlatform
             )
+            skippedItems = []
+            spaceReliefOffer = nil
         } else {
             activeTransferScope = transferScope
+            spaceReliefOffer = nil
         }
         let previouslySentIds = isResume ? (senderUploadedIdsBySession[qrPayload.sessionId] ?? []) : []
         let previouslySentBytes = isResume ? (senderUploadedBytesBySession[qrPayload.sessionId] ?? 0) : 0
@@ -2262,6 +2335,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 importedCalendars = 0
                 importedReminders = 0
                 importedSms = 0
+            importedCallLogs = 0
+            skippedItems = []
+            spaceReliefOffer = nil
                 savedLivePhotos = 0
                 skippedDuplicates = 0
                 gatedPreviewCount = 0
@@ -2311,6 +2387,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
             isLocalNetworkDenied = false
             needsLocalNetworkRedirect = false
+            connectionMedium = Self.detectConnectionMedium(for: activeIp)
             var baseUrl = "http://\(activeIp):\(qrPayload.port)"
             let key = try DirectSwitchCrypto.deriveSessionSymmetricKey(sessionKeyHex: qrPayload.sessionKeyHex)
 
@@ -2349,7 +2426,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 includePhotos: includePhotos,
                 includeVideos: includeVideos
             )
-            let scannedAssets = scanResult.items
+            let scannedAssets = scanResult.items.filter { entry in
+                if let retrySet = onlyRetryItemIds, !retrySet.isEmpty {
+                    return retrySet.contains(entry.item.id)
+                }
+                return iOSPhotoFilterHelper.matchesFilter(item: entry.item, options: mediaFilters)
+            }
             iCloudOptimizedSkippedHint = scanResult.iCloudOptimizedCount
             if includePhotos && !isResume {
                 let pCount = scannedAssets.filter { $0.item.category == .PHOTOS }.count
@@ -2363,12 +2445,22 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let collectedDocs = iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
                 explicitPicked: pickedDocuments,
                 includeDocuments: includeDocuments,
-                includeWhatsAppVault: includeWhatsAppVault
+                includeWhatsAppVault: isTargetedRetry ? false : includeWhatsAppVault
             )
-            let filteredPickedDocs = collectedDocs.items
+            let activeAudioEntries = includeAudio ? pickedAudioFiles : []
+            let filteredPickedDocs = (collectedDocs.items + activeAudioEntries).filter { pair in
+                if let retrySet = onlyRetryItemIds, !retrySet.isEmpty {
+                    return retrySet.contains(pair.0.id)
+                }
+                return true
+            }
             if includeDocuments && !isResume {
                 let dCount = filteredPickedDocs.filter { $0.0.category == .DOCUMENTS }.count
                 updatePreparationItem(id: "documents", targetCount: dCount, isReady: true)
+            }
+            if includeAudio && !isResume {
+                let aCount = filteredPickedDocs.filter { $0.0.category == .AUDIO }.count
+                updatePreparationItem(id: "audio", targetCount: aCount, isReady: true)
             }
             let activeDocSecurityScopes = collectedDocs.activeSecurityScopes
             defer {
@@ -2407,10 +2499,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             guard hsResp.accepted && hsResp.hasEnoughSpace else {
                 sessionStage = .transferring
                 markPreparationAnimationCompleted()
+                spaceReliefOffer = SpaceReliefPlanner.evaluate(
+                    receiverName: hsResp.receiverName,
+                    availableFreeBytes: hsResp.freeStorageBytes,
+                    items: allItems.filter { !currentSentIds.contains($0.id) }
+                )
                 errorMessage = hsResp.statusMessage.isEmpty
                     ? "Spazio di archiviazione insufficiente su \(hsResp.receiverName)."
                     : hsResp.statusMessage
-                statusLabel = "Trasferimento annullato: spazio insufficiente sul ricevente."
+                statusLabel = "Spazio insufficiente su \(hsResp.receiverName): scegli un'opzione Salva-Spazio."
                 return
             }
             didAuthenticateSession = true
@@ -2433,7 +2530,20 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 requestNativeWhatsAppMigration: wantNativeWa,
                 transferScope: transferScope
             )
-            let mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
+            let mfRespData: Data
+            do {
+                mfRespData = try await postEncryptedJson(url: "\(baseUrl)/v1/manifest", payload: manifest, key: key)
+            } catch {
+                let nsErr = error as NSError
+                if nsErr.code == 507 || error.localizedDescription.localizedCaseInsensitiveContains("spazio") {
+                    spaceReliefOffer = SpaceReliefPlanner.evaluate(
+                        receiverName: hsResp.receiverName,
+                        availableFreeBytes: hsResp.freeStorageBytes,
+                        items: allItems.filter { !currentSentIds.contains($0.id) }
+                    )
+                }
+                throw error
+            }
             let mfResp = try JSONDecoder().decode(ManifestResponse.self, from: mfRespData)
             if mfResp.contactsMergedCount > 0 || mergedContacts == 0 {
                 mergedContacts = mfResp.contactsMergedCount
@@ -2647,6 +2757,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 estimatedLiveBytes: initialLiveEst
                             )
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
+                            self.skippedItems.append(
+                                SkippedTransferItemRecord(
+                                    id: entry.item.id,
+                                    fileName: entry.item.fileName,
+                                    category: entry.item.category,
+                                    sizeBytes: entry.item.sizeBytes,
+                                    reason: "Solo su iCloud o non leggibile"
+                                )
+                            )
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
                                 self.etaLabel = self.etaTracker.update(
@@ -2655,14 +2774,25 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                     hasTransferableItems: acc.initialTotalItems > 0
                                 )
                                 let pct = TransferDisplayFormatting.percentageInt(fraction: acc.progressFraction, isCompleted: false)
-                                iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: self.statusLabel)
+                                iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: self.statusLabel, etaLabel: self.etaLabel)
                             }
                             self.speedMegabytesPerSec = self.speedMeter.currentMegabytesPerSec()
                         }
                         await permitPool.release(permitsNeeded)
                         return
                     }
-                    defer { try? FileManager.default.removeItem(at: plainTempURL) }
+                    var uploadSourceURL = plainTempURL
+                    var compactTempURL: URL? = nil
+                    if entry.item.category == .VIDEOS && mediaFilters.compactVideo1080pHevc {
+                        if let compacted = await iOSPhotoFilterHelper.transcodeVideoToCompactHevc1080pIfBeneficial(sourceURL: plainTempURL) {
+                            compactTempURL = compacted
+                            uploadSourceURL = compacted
+                        }
+                    }
+                    defer {
+                        try? FileManager.default.removeItem(at: plainTempURL)
+                        if let compactTempURL { try? FileManager.default.removeItem(at: compactTempURL) }
+                    }
 
                     // Rilevamento extra-50 a costo zero dai tag EXIF/TIFF/QuickTime del file già esportato
                     let isVideoMedia = (entry.item.category == .VIDEOS)
@@ -2730,7 +2860,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     if let sentBytes = try await sendFileResiliently(
                         item: entry.item,
                         endpointPath: "/v1/item/\(entry.item.id)",
-                        plainFileURL: plainTempURL
+                        plainFileURL: uploadSourceURL
                     ) {
                         let remainingLiveForThis = heldLiveEstimate
                         heldLiveEstimate = 0
@@ -2754,7 +2884,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 let pct = TransferDisplayFormatting.percentageInt(fraction: acc.progressFraction, isCompleted: false)
                                 let status = "Invio \(entry.item.fileName) (\(self.completedItems)/\(self.totalItems))..."
                                 self.statusLabel = status
-                                iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: status)
+                                iOSBackgroundTransferKeepAlive.shared.updateProgress(percent: pct, detail: status, etaLabel: self.etaLabel)
+                                if self.completedItems % 15 == 0 {
+                                    self.saveSenderCheckpoint(qrPayload: qrPayload, scope: transferScope, mediaFilters: mediaFilters)
+                                }
                             }
                             self.speedMegabytesPerSec = self.speedMeter.record(bytes: sentBytes)
                         }
@@ -2767,6 +2900,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                                 estimatedLiveBytes: remainingLiveForThis
                             )
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
+                            self.skippedItems.append(
+                                SkippedTransferItemRecord(
+                                    id: entry.item.id,
+                                    fileName: entry.item.fileName,
+                                    category: entry.item.category,
+                                    sizeBytes: entry.item.sizeBytes,
+                                    reason: "Errore trasferimento o salvataggio"
+                                )
+                            )
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
                                 self.etaLabel = self.etaTracker.update(
@@ -2814,6 +2956,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(estimatedPrimaryBytes: item.sizeBytes)
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
+                            self.skippedItems.append(
+                                SkippedTransferItemRecord(
+                                    id: item.id,
+                                    fileName: item.fileName,
+                                    category: item.category,
+                                    sizeBytes: item.sizeBytes,
+                                    reason: "File illeggibile o solo su iCloud Drive"
+                                )
+                            )
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
                                 self.etaLabel = self.etaTracker.update(
@@ -2858,6 +3009,15 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                         await MainActor.run {
                             self.senderProgressAccounting?.recordItemFailedOrSkipped(estimatedPrimaryBytes: item.sizeBytes)
                             self.failedItemsCount = self.senderProgressAccounting?.failedItemsCount ?? (self.failedItemsCount + 1)
+                            self.skippedItems.append(
+                                SkippedTransferItemRecord(
+                                    id: item.id,
+                                    fileName: item.fileName,
+                                    category: item.category,
+                                    sizeBytes: item.sizeBytes,
+                                    reason: "File illeggibile o solo su iCloud Drive"
+                                )
+                            )
                             if let acc = self.senderProgressAccounting {
                                 self.totalBytesCount = acc.totalBytesForProgress
                                 self.etaLabel = self.etaTracker.update(
@@ -2929,12 +3089,22 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 skippedDuplicates = report.skippedDuplicatesCount
             }
             for docURL in succeededDocURLs where iOSDocumentsSandboxBridge.isTemporaryStagedFile(docURL) {
-                try? FileManager.default.removeItem(at: docURL)
+                if iOSDocumentsSandboxBridge.isPasswordsCsvFile(docURL.lastPathComponent) {
+                    SecureTempFileShredder.shredAndDelete(url: docURL)
+                } else {
+                    try? FileManager.default.removeItem(at: docURL)
+                }
             }
             currentItemName = ""
             etaLabel = nil
             senderUploadedIdsBySession.removeValue(forKey: qrPayload.sessionId)
             senderUploadedBytesBySession.removeValue(forKey: qrPayload.sessionId)
+            if skippedItems.isEmpty {
+                TransferCheckpointStore.clear()
+                resumableCheckpoint = nil
+            } else {
+                saveSenderCheckpoint(qrPayload: qrPayload, scope: transferScope, mediaFilters: mediaFilters)
+            }
             visualStepProgress = 1.0
             statusLabel = "Trasferimento da iPhone a \(hsResp.receiverName) completato!"
             pendingNativeWhatsAppMigration = wantNativeWa
@@ -2947,6 +3117,7 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             markPreparationAnimationCompleted()
             if didAuthenticateSession || !(senderUploadedIdsBySession[qrPayload.sessionId] ?? []).isEmpty {
                 canResumeInterruptedTransfer = true
+                saveSenderCheckpoint(qrPayload: qrPayload, scope: transferScope, mediaFilters: mediaFilters)
             }
             errorMessage = error.localizedDescription
         }
@@ -3189,8 +3360,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         })
     }
 
+    /// Ordina gli indirizzi locali dando priorità al cavo USB-C / Ethernet / Tethering diretto rispetto al Wi-Fi.
     static func localIPv4Addresses() -> [String] {
-        var addresses: [String] = []
+        var wiredUsb: [String] = []
+        var wifiOrOther: [String] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         if getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr {
             for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
@@ -3198,17 +3371,58 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 let addr = ptr.pointee.ifa_addr.pointee
                 if (flags & (IFF_UP | IFF_RUNNING | IFF_LOOPBACK)) == (IFF_UP | IFF_RUNNING),
                    addr.sa_family == UInt8(AF_INET) {
+                    let ifaceName = String(cString: ptr.pointee.ifa_name).lowercased()
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     if getnameinfo(ptr.pointee.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
                         let ip = String(cString: hostname)
                         if DirectSwitchLocalNetwork.isLocalIPv4(ip) && !ip.hasPrefix("169.254.") {
-                            addresses.append(ip)
+                            let isWiredOrUsb = ifaceName.hasPrefix("bridge") ||
+                                (ifaceName.hasPrefix("en") && ifaceName != "en0") ||
+                                ip.hasPrefix("172.20.10.")
+                            if isWiredOrUsb {
+                                wiredUsb.append(ip)
+                            } else {
+                                wifiOrOther.append(ip)
+                            }
                         }
                     }
                 }
             }
             freeifaddrs(ifaddr)
         }
-        return Array(Set(addresses))
+        var ordered: [String] = []
+        for ip in wiredUsb + wifiOrOther where !ordered.contains(ip) {
+            ordered.append(ip)
+        }
+        return ordered
+    }
+
+    static func detectConnectionMedium(for ip: String) -> TransferConnectionMedium {
+        if ip.hasPrefix("172.20.10.") || ip.hasPrefix("192.168.42.") {
+            return .usbCable
+        }
+        if ip.hasPrefix("169.254.") || ip.hasPrefix("192.168.49.") {
+            return .peerToPeerWifi
+        }
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        if getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr {
+            defer { freeifaddrs(ifaddr) }
+            for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+                let addr = ptr.pointee.ifa_addr.pointee
+                guard addr.sa_family == UInt8(AF_INET) else { continue }
+                let iface = String(cString: ptr.pointee.ifa_name).lowercased()
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(ptr.pointee.ifa_addr, socklen_t(addr.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0,
+                   String(cString: host) == ip {
+                    if iface.hasPrefix("bridge") || (iface.hasPrefix("en") && iface != "en0") {
+                        return .usbCable
+                    }
+                    if iface.hasPrefix("awdl") || iface.hasPrefix("llw") {
+                        return .peerToPeerWifi
+                    }
+                }
+            }
+        }
+        return .localWifi
     }
 }

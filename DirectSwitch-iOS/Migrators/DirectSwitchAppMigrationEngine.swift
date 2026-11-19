@@ -189,8 +189,8 @@ enum iOSInstalledAppsScanner {
         iOSKnownAppProbe(bundleId: "com.tinyspeck.chatlyio", appName: "Slack", urlScheme: "slack", appStoreId: 618783545)
     ]
 
-    /// Categorie curate italiane ed europee con Bundle ID e App Store ID verificati su App Store Italia,
-    /// selezionabili nella tendina stile iPhone (icona + nome) con zero attese e zero fotocamera.
+    /// Categorie curate italiane ed europee (14 categorie estese, 240+ app con Bundle ID e App Store ID verificati),
+    /// selezionabili nella tendina stile iPhone (icona + nome) con zero attese e ricerca live App Store integrata.
     static let curatedCategories: [AppQuickCategory] = [
         AppQuickCategory(
             id: "social_messaging",
@@ -212,7 +212,15 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.reddit.Reddit", appName: "Reddit", appStoreId: 1064216828, urlScheme: "reddit", detectionSource: "Categoria Social"),
                 InstalledAppRecord(packageName: "com.hammerandchisel.discord", appName: "Discord", appStoreId: 985746746, urlScheme: "discord", detectionSource: "Categoria Social"),
                 InstalledAppRecord(packageName: "org.whispersystems.signal", appName: "Signal", appStoreId: 874139669, detectionSource: "Categoria Social"),
-                InstalledAppRecord(packageName: "com.viber", appName: "Viber", appStoreId: 382617920, detectionSource: "Categoria Social")
+                InstalledAppRecord(packageName: "com.viber", appName: "Viber", appStoreId: 382617920, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "AlexisBarreyat.BeReal", appName: "BeReal", appStoreId: 1459645446, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "xyz.blueskyweb.app", appName: "Bluesky", appStoreId: 6444370199, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.tencent.xin", appName: "WeChat", appStoreId: 414478124, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "jp.naver.line", appName: "LINE", appStoreId: 443904275, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.cardify.tinder", appName: "Tinder", appStoreId: 547702041, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.moxco.bumble", appName: "Bumble", appStoreId: 930441707, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "co.hinge.mobile.ios", appName: "Hinge", appStoreId: 595287172, detectionSource: "Categoria Social"),
+                InstalledAppRecord(packageName: "com.tumblr.tumblr", appName: "Tumblr", appStoreId: 305343404, detectionSource: "Categoria Social")
             ]
         ),
         AppQuickCategory(
@@ -223,6 +231,8 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.intesasanpaolo.ibiphone", appName: "Intesa Sanpaolo Mobile", appStoreId: 597360475, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.internet.unicredit.iphoneapp", appName: "UniCredit Mobile Banking", appStoreId: 396670008, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.poste.spim", appName: "Poste Italiane", appStoreId: 781421802, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.poste.bancoposta", appName: "BancoPosta", appStoreId: 924943123, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.poste.postepay", appName: "Postepay", appStoreId: 499402581, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.intesasanpaolo.isybank.mobile", appName: "Isybank", appStoreId: 1666218772, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.fineco.fineco", appName: "Fineco", appStoreId: 405225581, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.bbva.italy", appName: "BBVA Italia", appStoreId: 1536949050, detectionSource: "Categoria Banche"),
@@ -230,12 +240,24 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "it.bper.mobilebanking", appName: "BPER Banca", appStoreId: 554965344, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.bancamediolanum.imedfullclient", appName: "Banca Mediolanum", appStoreId: 412610547, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.caitalia.apphub", appName: "Crédit Agricole Italia", appStoreId: 1502700297, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.bnl.mobilebanking", appName: "BNL", appStoreId: 1473494613, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.mps.mobile", appName: "Banca MPS", appStoreId: 1456338637, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.bancobpm.youapp", appName: "YouApp Banco BPM", appStoreId: 1126093414, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.credem.mb", appName: "Credem Mobile", appStoreId: 1173096387, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.sella.sella", appName: "Banca Sella", appStoreId: 1438090969, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "it.widiba.app", appName: "Banca Widiba", appStoreId: 907346146, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.illimity.bank", appName: "illimity Bank", appStoreId: 1475618569, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.hype.it", appName: "HYPE", appStoreId: 943405905, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.cartasi.mobile.iPhone", appName: "Nexi Pay", appStoreId: 518695175, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "it.bancomat.pay.user", appName: "BANCOMAT", appStoreId: 1467760256, detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.revolut.revolut", appName: "Revolut", appStoreId: 932493382, urlScheme: "revolut", detectionSource: "Categoria Banche"),
                 InstalledAppRecord(packageName: "com.satispay.customer.p2p", appName: "Satispay", appStoreId: 790287076, urlScheme: "satispay", detectionSource: "Categoria Banche"),
-                InstalledAppRecord(packageName: "com.yourcompany.PPClient", appName: "PayPal", appStoreId: 283646709, urlScheme: "paypal", detectionSource: "Categoria Banche")
+                InstalledAppRecord(packageName: "com.yourcompany.PPClient", appName: "PayPal", appStoreId: 283646709, urlScheme: "paypal", detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "de.number26.iphone", appName: "N26", appStoreId: 956857223, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.transferwise.Transferwise", appName: "Wise", appStoreId: 612261027, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.klarna.iphone", appName: "Klarna", appStoreId: 1115120118, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.scalapay.app", appName: "Scalapay", appStoreId: 1554857393, detectionSource: "Categoria Banche"),
+                InstalledAppRecord(packageName: "com.americanexpress.amex", appName: "American Express", appStoreId: 362348516, detectionSource: "Categoria Banche")
             ]
         ),
         AppQuickCategory(
@@ -247,17 +269,26 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "it.ipzs.cieID", appName: "CieID", appStoreId: 1504644677, urlScheme: "cieid", detectionSource: "Categoria SPID/PA"),
                 InstalledAppRecord(packageName: "it.poste.postebuy2", appName: "PosteID", appStoreId: 649492675, urlScheme: "posteid", detectionSource: "Categoria SPID/PA"),
                 InstalledAppRecord(packageName: "it.aruba.mobilepec", appName: "Aruba PEC", appStoreId: 973510245, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.aruba.otp", appName: "Aruba OTP", appStoreId: 997499941, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.lepida.lepidaid", appName: "LepidaID", appStoreId: 1473294563, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.sielte.mysielteid", appName: "MySielteID", appStoreId: 1219953143, detectionSource: "Categoria SPID/PA"),
+                InstalledAppRecord(packageName: "it.infocert.myinfocert", appName: "InfoCert ID", appStoreId: 1094575952, detectionSource: "Categoria SPID/PA"),
                 InstalledAppRecord(packageName: "com.microsoft.Office.Outlook", appName: "Microsoft Outlook", appStoreId: 951937596, urlScheme: "ms-outlook", detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.skype.teams", appName: "Microsoft Teams", appStoreId: 1113153706, urlScheme: "msteams", detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "us.zoom.videomeetings", appName: "Zoom Workplace", appStoreId: 546505307, urlScheme: "zoomus", detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.Office.Word", appName: "Microsoft Word", appStoreId: 586447913, detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.Office.Excel", appName: "Microsoft Excel", appStoreId: 586683407, detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.Office.Powerpoint", appName: "Microsoft PowerPoint", appStoreId: 586449534, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.microsoft.onenote", appName: "Microsoft OneNote", appStoreId: 410395246, detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.microsoft.skydrive", appName: "Microsoft OneDrive", appStoreId: 477537958, detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.getdropbox.Dropbox", appName: "Dropbox", appStoreId: 327630330, urlScheme: "dbapi-2", detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.tinyspeck.chatlyio", appName: "Slack", appStoreId: 618783545, urlScheme: "slack", detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.adobe.Adobe-Reader", appName: "Adobe Acrobat Reader", appStoreId: 469337564, detectionSource: "Categoria Ufficio"),
                 InstalledAppRecord(packageName: "com.adobe.scan.ios", appName: "Adobe Scan", appStoreId: 1199564834, detectionSource: "Categoria Ufficio"),
-                InstalledAppRecord(packageName: "com.intsig.CamScanner", appName: "CamScanner", appStoreId: 388624839, detectionSource: "Categoria Ufficio")
+                InstalledAppRecord(packageName: "com.intsig.CamScanner", appName: "CamScanner", appStoreId: 388624839, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "notion.id", appName: "Notion", appStoreId: 1232780281, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.fogcreek.trello", appName: "Trello", appStoreId: 461504587, detectionSource: "Categoria Ufficio"),
+                InstalledAppRecord(packageName: "com.docusign.DocuSignIt", appName: "Docusign", appStoreId: 474990205, detectionSource: "Categoria Ufficio")
             ]
         ),
         AppQuickCategory(
@@ -267,16 +298,28 @@ enum iOSInstalledAppsScanner {
             apps: [
                 InstalledAppRecord(packageName: "com.promptu.ProntoTreno", appName: "Trenitalia", appStoreId: 331050847, urlScheme: "trenitalia", detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "com.accenture.ntvapp", appName: "Italo Treno", appStoreId: 804056898, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "it.trenord.app", appName: "Trenord", appStoreId: 547104833, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "it.telepass", appName: "Telepass", appStoreId: 454224356, urlScheme: "telepass", detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "it.unipolsai.move", appName: "UnipolMove", appStoreId: 1609074315, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "net.pluservice.myCicero", appName: "MooneyGo", appStoreId: 595700208, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "net.easypark.app", appName: "EasyPark", appStoreId: 449594317, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.tranzmate.moovit", appName: "Moovit", appStoreId: 498477945, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "de.flixbus.app", appName: "FlixBus", appStoreId: 778437357, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.comuto.blablacar", appName: "BlaBlaCar", appStoreId: 341329033, detectionSource: "Categoria Trasporti"),
                 InstalledAppRecord(packageName: "com.ryanair.cheapflights", appName: "Ryanair", appStoreId: 504270602, detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "ur7OWf.mobile", appName: "ITA Airways", appStoreId: 1589844779, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.easyjet.mobile", appName: "easyJet", appStoreId: 483568239, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.wizzair.WizzAirApp", appName: "Wizz Air", appStoreId: 669103269, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.vueling.vuelingapp", appName: "Vueling", appStoreId: 423102607, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.lufthansa.iphone", appName: "Lufthansa", appStoreId: 299219152, detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "com.booking.BookingApp", appName: "Booking.com", appStoreId: 367003839, urlScheme: "booking", detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "com.airbnb.app", appName: "Airbnb", appStoreId: 401626263, urlScheme: "airbnb", detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "com.tripadvisor.LocalPicks", appName: "Tripadvisor", appStoreId: 284876795, detectionSource: "Categoria Viaggi"),
+                InstalledAppRecord(packageName: "net.skyscanner.iphone", appName: "Skyscanner", appStoreId: 415458524, detectionSource: "Categoria Viaggi"),
                 InstalledAppRecord(packageName: "com.ubercab.UberClient", appName: "Uber", appStoreId: 368677368, urlScheme: "uber", detectionSource: "Categoria Trasporti"),
-                InstalledAppRecord(packageName: "com.waze.iphone", appName: "Waze", appStoreId: 323229106, urlScheme: "waze", detectionSource: "Categoria Trasporti")
+                InstalledAppRecord(packageName: "com.mytaxi.mytaxi", appName: "FREENOW", appStoreId: 357852748, detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.waze.iphone", appName: "Waze", appStoreId: 323229106, urlScheme: "waze", detectionSource: "Categoria Trasporti"),
+                InstalledAppRecord(packageName: "com.limebike.lime", appName: "Lime", appStoreId: 1199780189, detectionSource: "Categoria Trasporti")
             ]
         ),
         AppQuickCategory(
@@ -287,14 +330,28 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.amazon.AmazonIT", appName: "Amazon Shopping", appStoreId: 297606951, urlScheme: "com.amazon.mobile.shopping", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "com.einnovation.temu", appName: "Temu", appStoreId: 1641486558, urlScheme: "temu", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "zzkko.com.ZZKKO", appName: "SHEIN", appStoreId: 878577184, urlScheme: "shein", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.alibaba.iAliexpress", appName: "AliExpress", appStoreId: 436672029, detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "com.subito.subito", appName: "Subito", appStoreId: 450775137, urlScheme: "subito", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "lt.manodrabuziai.fr", appName: "Vinted", appStoreId: 632064380, urlScheme: "vinted", detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "com.ebay.iphone", appName: "eBay", appStoreId: 282614216, urlScheme: "ebay", detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "de.zalando.iphone", appName: "Zalando", appStoreId: 585629514, detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.inditex.zara", appName: "ZARA", appStoreId: 547951480, detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.hm.iphone", appName: "H&M", appStoreId: 834465911, detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.ingka.ikea.app", appName: "IKEA", appStoreId: 1452164827, detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "com.decathlon.app", appName: "Decathlon", appStoreId: 1387810949, detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "it.leroymerlin.app", appName: "Leroy Merlin", appStoreId: 608790122, detectionSource: "Categoria Shopping"),
+                InstalledAppRecord(packageName: "it.mediaworld.app", appName: "MediaWorld", appStoreId: 1435782461, detectionSource: "Categoria Shopping"),
                 InstalledAppRecord(packageName: "it.esselunga.mobile.esselunga", appName: "Esselunga", appStoreId: 472618543, detectionSource: "Categoria Spesa"),
                 InstalledAppRecord(packageName: "com.lidl.eci.lidl.plus", appName: "Lidl Plus", appStoreId: 1238611143, detectionSource: "Categoria Spesa"),
+                InstalledAppRecord(packageName: "it.conad.heyconad", appName: "HeyConad", appStoreId: 1529500559, detectionSource: "Categoria Spesa"),
+                InstalledAppRecord(packageName: "it.carrefour.app", appName: "Carrefour Italia", appStoreId: 660224737, detectionSource: "Categoria Spesa"),
+                InstalledAppRecord(packageName: "it.coop.app", appName: "Coop", appStoreId: 1207143065, detectionSource: "Categoria Spesa"),
                 InstalledAppRecord(packageName: "com.glovo.glovo", appName: "Glovo", appStoreId: 951812684, detectionSource: "Categoria Cibo"),
                 InstalledAppRecord(packageName: "com.deliveroo.orderapp", appName: "Deliveroo", appStoreId: 1001501844, detectionSource: "Categoria Cibo"),
-                InstalledAppRecord(packageName: "com.justeat.JUSTEAT", appName: "Just Eat", appStoreId: 566347057, detectionSource: "Categoria Cibo")
+                InstalledAppRecord(packageName: "com.justeat.JUSTEAT", appName: "Just Eat", appStoreId: 566347057, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.toogoodtogo.app", appName: "Too Good To Go", appStoreId: 1060683933, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.lafourchette.lafourchette", appName: "TheFork", appStoreId: 396045233, detectionSource: "Categoria Cibo"),
+                InstalledAppRecord(packageName: "com.mcdonalds.mobileapp", appName: "McDonald's", appStoreId: 1217507712, detectionSource: "Categoria Cibo")
             ]
         ),
         AppQuickCategory(
@@ -305,6 +362,11 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.spotify.client", appName: "Spotify", appStoreId: 324684580, urlScheme: "spotify", detectionSource: "Categoria Musica"),
                 InstalledAppRecord(packageName: "com.shazam.Shazam", appName: "Shazam", appStoreId: 284993459, urlScheme: "shazam", detectionSource: "Categoria Musica"),
                 InstalledAppRecord(packageName: "com.apple.Music", appName: "Apple Music", appStoreId: 1108187390, detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.google.ios.youtubemusic", appName: "YouTube Music", appStoreId: 1017492454, detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.amazon.mp3.AmazonCloudPlayer", appName: "Amazon Music", appStoreId: 510855668, detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.soundcloud.TouchApp", appName: "SoundCloud", appStoreId: 336353151, detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.deezer.Deezer", appName: "Deezer", appStoreId: 292738169, detectionSource: "Categoria Musica"),
+                InstalledAppRecord(packageName: "com.audible.iphone", appName: "Audible", appStoreId: 379693831, detectionSource: "Categoria Musica"),
                 InstalledAppRecord(packageName: "com.netflix.Netflix", appName: "Netflix", appStoreId: 363590051, urlScheme: "nflx", detectionSource: "Categoria Streaming"),
                 InstalledAppRecord(packageName: "com.amazon.aiv.AIVApp", appName: "Amazon Prime Video", appStoreId: 545519333, urlScheme: "aiv", detectionSource: "Categoria Streaming"),
                 InstalledAppRecord(packageName: "com.disney.disneyplus", appName: "Disney+", appStoreId: 1446075923, urlScheme: "disneyplus", detectionSource: "Categoria Streaming"),
@@ -313,7 +375,11 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "it.mediaset.video.iphone", appName: "Mediaset Infinity", appStoreId: 412625083, detectionSource: "Categoria Streaming"),
                 InstalledAppRecord(packageName: "it.sky.skygoitalia", appName: "Sky Go", appStoreId: 454435005, detectionSource: "Categoria Streaming"),
                 InstalledAppRecord(packageName: "com.nowtv.it", appName: "NOW", appStoreId: 1377753603, detectionSource: "Categoria Streaming"),
-                InstalledAppRecord(packageName: "tv.twitch", appName: "Twitch", appStoreId: 460177396, urlScheme: "twitch", detectionSource: "Categoria Streaming")
+                InstalledAppRecord(packageName: "com.cbsinteractive.paramountplus", appName: "Paramount+", appStoreId: 530168168, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.crunchyroll.iphone", appName: "Crunchyroll", appStoreId: 329913454, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "tv.twitch", appName: "Twitch", appStoreId: 460177396, urlScheme: "twitch", detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "org.videolan.vlc-ios", appName: "VLC Media Player", appStoreId: 650377962, detectionSource: "Categoria Streaming"),
+                InstalledAppRecord(packageName: "com.plexapp.plex", appName: "Plex", appStoreId: 383457673, detectionSource: "Categoria Streaming")
             ]
         ),
         AppQuickCategory(
@@ -332,34 +398,149 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.lightricks.Facetune2", appName: "Facetune", appStoreId: 1149994032, detectionSource: "Categoria Foto & Video"),
                 InstalledAppRecord(packageName: "com.dr1ven.eraser", appName: "Photoroom", appStoreId: 1455009060, detectionSource: "Categoria Foto & Video"),
                 InstalledAppRecord(packageName: "com.frontrow.vlog", appName: "VN Video Editor", appStoreId: 1343581380, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.gopro.GoPro", appName: "GoPro Quik", appStoreId: 561350520, detectionSource: "Categoria Foto & Video"),
+                InstalledAppRecord(packageName: "com.dji.golite", appName: "DJI Fly", appStoreId: 1479649251, detectionSource: "Categoria Foto & Video"),
                 InstalledAppRecord(packageName: "com.strava.stravaride", appName: "Strava", appStoreId: 426826309, urlScheme: "strava", detectionSource: "Categoria Sport"),
                 InstalledAppRecord(packageName: "com.garmin.connect.mobile", appName: "Garmin Connect", appStoreId: 583446403, detectionSource: "Categoria Sport"),
-                InstalledAppRecord(packageName: "com.gopro.GoPro", appName: "GoPro Quik", appStoreId: 561350520, detectionSource: "Categoria Foto & Video"),
-                InstalledAppRecord(packageName: "com.dji.golite", appName: "DJI Fly", appStoreId: 1479649251, detectionSource: "Categoria Foto & Video")
+                InstalledAppRecord(packageName: "de.komoot.berlinbikeapp", appName: "komoot", appStoreId: 447374873, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.nike.nikeplus-gps", appName: "Nike Run Club", appStoreId: 387771637, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.runtastic.runtastic", appName: "adidas Running", appStoreId: 336599882, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.huami.watch", appName: "Zepp", appStoreId: 1127269366, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.myfitnesspal.mfp", appName: "MyFitnessPal", appStoreId: 341232718, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "it.fantagazzetta.leghe", appName: "Leghe Fantacalcio", appStoreId: 1020265987, detectionSource: "Categoria Sport"),
+                InstalledAppRecord(packageName: "com.sofascore.results", appName: "Sofascore", appStoreId: 1176147574, detectionSource: "Categoria Sport")
             ]
         ),
         AppQuickCategory(
             id: "operators_home_ai",
-            title: "Operatori, Casa, AI & Sicurezza",
+            title: "Operatori, Casa Smart & AI",
             iconName: "house.fill",
             apps: [
                 InstalledAppRecord(packageName: "it.telecomitalia.119SelfService", appName: "MyTIM", appStoreId: 378783815, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "com.vodafone.my190", appName: "My Vodafone", appStoreId: 365804068, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "it.wind.mywind", appName: "WINDTRE", appStoreId: 492519547, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "it.iliad.customer", appName: "iliad", appStoreId: 6739246132, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "it.very.mobile", appName: "Very Mobile", appStoreId: 1495392499, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "it.kenamobile.app", appName: "Kena Mobile", appStoreId: 1447329200, detectionSource: "Categoria Operatori"),
+                InstalledAppRecord(packageName: "it.fastweb.myfastweb", appName: "MyFastweb", appStoreId: 583024028, detectionSource: "Categoria Operatori"),
                 InstalledAppRecord(packageName: "com.enel.energia", appName: "Enel Energia", appStoreId: 767368903, detectionSource: "Categoria Utenze"),
                 InstalledAppRecord(packageName: "com.eni.EniAutoletturaGas", appName: "Eni Plenitude", appStoreId: 454695340, detectionSource: "Categoria Utenze"),
+                InstalledAppRecord(packageName: "it.a2a.mya2a", appName: "MyA2A", appStoreId: 1480702243, detectionSource: "Categoria Utenze"),
                 InstalledAppRecord(packageName: "com.tplink.tapo", appName: "TP-Link Tapo", appStoreId: 1472718009, detectionSource: "Categoria Casa"),
                 InstalledAppRecord(packageName: "com.hikvision.ezviz", appName: "EZVIZ", appStoreId: 886947564, detectionSource: "Categoria Casa"),
                 InstalledAppRecord(packageName: "cloud.shelly.app", appName: "Shelly Smart Control", appStoreId: 1660045967, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.tuya.smartlife", appName: "Smart Life", appStoreId: 1115101477, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.xiaomi.mihome", appName: "Xiaomi Home", appStoreId: 957323480, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.amazon.echo", appName: "Amazon Alexa", appStoreId: 944011620, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.philips.lighting.hue2", appName: "Philips Hue", appStoreId: 1055281310, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.dreame.smartlife", appName: "Dreamehome", appStoreId: 1600720030, detectionSource: "Categoria Casa"),
                 InstalledAppRecord(packageName: "com.openai.chat", appName: "ChatGPT", appStoreId: 6448311069, urlScheme: "chatgpt", detectionSource: "Categoria AI"),
                 InstalledAppRecord(packageName: "com.google.gemini", appName: "Google Gemini", appStoreId: 6477489729, detectionSource: "Categoria AI"),
                 InstalledAppRecord(packageName: "com.anthropic.claude", appName: "Claude", appStoreId: 6473753684, detectionSource: "Categoria AI"),
                 InstalledAppRecord(packageName: "ai.perplexity.app", appName: "Perplexity", appStoreId: 1668000334, detectionSource: "Categoria AI"),
+                InstalledAppRecord(packageName: "com.microsoft.copilot", appName: "Microsoft Copilot", appStoreId: 6472538445, detectionSource: "Categoria AI"),
+                InstalledAppRecord(packageName: "com.deepseek.chat", appName: "DeepSeek", appStoreId: 6737597349, detectionSource: "Categoria AI")
+            ]
+        ),
+        AppQuickCategory(
+            id: "security_vpn",
+            title: "Sicurezza, VPN & Password",
+            iconName: "lock.shield.fill",
+            apps: [
                 InstalledAppRecord(packageName: "com.google.Authenticator", appName: "Google Authenticator", appStoreId: 388497605, urlScheme: "googleauthenticator", detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.microsoft.azureauthenticator", appName: "Microsoft Authenticator", appStoreId: 983156458, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.1password.1password", appName: "1Password", appStoreId: 1511601750, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.8bit.bitwarden", appName: "Bitwarden", appStoreId: 1137397744, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "ch.protonmail.pass", appName: "Proton Pass", appStoreId: 6443490629, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.authy", appName: "Twilio Authy", appStoreId: 494168017, detectionSource: "Categoria Sicurezza"),
                 InstalledAppRecord(packageName: "com.nordvpn.NordVPN", appName: "NordVPN", appStoreId: 905953485, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.surfshark.vpnclient.ios", appName: "Surfshark VPN", appStoreId: 1391782046, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "ch.protonmail.vpn", appName: "Proton VPN", appStoreId: 1437005085, detectionSource: "Categoria Sicurezza"),
                 InstalledAppRecord(packageName: "ch.protonmail.protonmail", appName: "Proton Mail", appStoreId: 979659905, detectionSource: "Categoria Sicurezza"),
-                InstalledAppRecord(packageName: "com.duolingo.DuolingoMobile", appName: "Duolingo", appStoreId: 570060128, detectionSource: "Categoria Studio")
+                InstalledAppRecord(packageName: "com.cloudflare.1dot1dot1dot1", appName: "1.1.1.1: Faster Internet", appStoreId: 1423538627, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.ookla.speedtest", appName: "Speedtest by Ookla", appStoreId: 300704847, detectionSource: "Categoria Sicurezza"),
+                InstalledAppRecord(packageName: "com.teamviewer.rc", appName: "TeamViewer Remote", appStoreId: 692035811, detectionSource: "Categoria Sicurezza")
+            ]
+        ),
+        AppQuickCategory(
+            id: "health_school",
+            title: "Salute, Studio & Scuola",
+            iconName: "heart.text.square.fill",
+            apps: [
+                InstalledAppRecord(packageName: "pl.znanylekarz.app", appName: "MioDottore", appStoreId: 1091314203, detectionSource: "Categoria Salute"),
+                InstalledAppRecord(packageName: "fr.doctolib.www", appName: "Doctolib", appStoreId: 925339063, detectionSource: "Categoria Salute"),
+                InstalledAppRecord(packageName: "io.yuka.ios", appName: "Yuka", appStoreId: 1092799236, detectionSource: "Categoria Salute"),
+                InstalledAppRecord(packageName: "org.iggymedia.periodtracker", appName: "Flo", appStoreId: 1038369065, detectionSource: "Categoria Salute"),
+                InstalledAppRecord(packageName: "com.duolingo.DuolingoMobile", appName: "Duolingo", appStoreId: 570060128, detectionSource: "Categoria Studio"),
+                InstalledAppRecord(packageName: "com.babbel.mobile.ios", appName: "Babbel", appStoreId: 829587759, detectionSource: "Categoria Studio"),
+                InstalledAppRecord(packageName: "com.quizlet.quizlet", appName: "Quizlet", appStoreId: 546473125, detectionSource: "Categoria Studio"),
+                InstalledAppRecord(packageName: "com.microblink.PhotoMath", appName: "Photomath", appStoreId: 919087726, detectionSource: "Categoria Studio"),
+                InstalledAppRecord(packageName: "no.mobitroll.kahoot.ios", appName: "Kahoot!", appStoreId: 1131203560, detectionSource: "Categoria Studio"),
+                InstalledAppRecord(packageName: "it.spaggiari.classeviva", appName: "ClasseViva Famiglia", appStoreId: 1219490273, detectionSource: "Categoria Scuola"),
+                InstalledAppRecord(packageName: "it.argosoftware.didupfamiglia", appName: "DidUP Famiglia", appStoreId: 1473712617, detectionSource: "Categoria Scuola"),
+                InstalledAppRecord(packageName: "com.goodnotesapp.x", appName: "Goodnotes 6", appStoreId: 1444383602, detectionSource: "Categoria Studio")
+            ]
+        ),
+        AppQuickCategory(
+            id: "games_popular",
+            title: "Giochi Popolari",
+            iconName: "gamecontroller.fill",
+            apps: [
+                InstalledAppRecord(packageName: "com.supercell.laser", appName: "Brawl Stars", appStoreId: 1229016807, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.supercell.scroll", appName: "Clash Royale", appStoreId: 1053012308, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.supercell.magic", appName: "Clash of Clans", appStoreId: 529479190, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.roblox.robloxmobile", appName: "Roblox", appStoreId: 431946152, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.mojang.minecraftpe", appName: "Minecraft", appStoreId: 479516143, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.midasplayer.apps.candycrushsaga", appName: "Candy Crush Saga", appStoreId: 553834731, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.kiloo.subwaysurfers", appName: "Subway Surfers", appStoreId: 512939461, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.dreamgames.royalmatch", appName: "Royal Match", appStoreId: 1482155847, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.scopely.monopolygo", appName: "MONOPOLY GO!", appStoreId: 1621328561, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.ea.ios.fifamobile", appName: "EA SPORTS FC Mobile", appStoreId: 1094930513, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "jp.konami.pesam", appName: "eFootball", appStoreId: 1117270703, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.nianticlabs.pokemongo", appName: "Pokémon GO", appStoreId: 1094591345, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.activision.callofduty.shooter", appName: "Call of Duty: Mobile", appStoreId: 1287282214, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.tencent.ig", appName: "PUBG MOBILE", appStoreId: 1330123889, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.miHoYo.GenshinImpact", appName: "Genshin Impact", appStoreId: 1517783697, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.innersloth.amongus", appName: "Among Us!", appStoreId: 1351168404, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.chess.iphone", appName: "Chess - Play & Learn", appStoreId: 329218549, detectionSource: "Categoria Giochi"),
+                InstalledAppRecord(packageName: "com.miniclip.8ballpoolmult", appName: "8 Ball Pool", appStoreId: 543186831, detectionSource: "Categoria Giochi")
+            ]
+        ),
+        AppQuickCategory(
+            id: "news_books_weather",
+            title: "Notizie, Libri, Casa & Meteo",
+            iconName: "newspaper.fill",
+            apps: [
+                InstalledAppRecord(packageName: "com.amazon.Lassen", appName: "Amazon Kindle", appStoreId: 302584613, detectionSource: "Categoria Libri"),
+                InstalledAppRecord(packageName: "com.kobobooks.kobo", appName: "Kobo Books", appStoreId: 301259483, detectionSource: "Categoria Libri"),
+                InstalledAppRecord(packageName: "com.storytel.iphone", appName: "Storytel", appStoreId: 363010602, detectionSource: "Categoria Libri"),
+                InstalledAppRecord(packageName: "it.rcs.corriere", appName: "Corriere della Sera", appStoreId: 356651079, detectionSource: "Categoria Notizie"),
+                InstalledAppRecord(packageName: "it.repubblica.mobile", appName: "la Repubblica", appStoreId: 344734194, detectionSource: "Categoria Notizie"),
+                InstalledAppRecord(packageName: "it.ilsole24ore.ios", appName: "Il Sole 24 ORE", appStoreId: 357882328, detectionSource: "Categoria Notizie"),
+                InstalledAppRecord(packageName: "it.sky.tg24", appName: "Sky TG24", appStoreId: 373282908, detectionSource: "Categoria Notizie"),
+                InstalledAppRecord(packageName: "it.ansa.mobile", appName: "ANSA.it", appStoreId: 380259514, detectionSource: "Categoria Notizie"),
+                InstalledAppRecord(packageName: "com.3bmeteo.app", appName: "3B Meteo", appStoreId: 407358565, detectionSource: "Categoria Meteo"),
+                InstalledAppRecord(packageName: "com.ilmeteo.ilmeteo", appName: "iLMeteo", appStoreId: 382627393, detectionSource: "Categoria Meteo"),
+                InstalledAppRecord(packageName: "com.mondadori.giallozafferano", appName: "GialloZafferano", appStoreId: 382221779, detectionSource: "Categoria Cucina"),
+                InstalledAppRecord(packageName: "it.immobiliare.iphone", appName: "Immobiliare.it", appStoreId: 335948517, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.idealista.idealista", appName: "idealista", appStoreId: 393823945, detectionSource: "Categoria Casa"),
+                InstalledAppRecord(packageName: "com.autoscout24.iphone", appName: "AutoScout24", appStoreId: 311785642, detectionSource: "Categoria Auto")
+            ]
+        ),
+        AppQuickCategory(
+            id: "crypto_finance",
+            title: "Investimenti & Finanza",
+            iconName: "chart.line.uptrend.xyaxis",
+            apps: [
+                InstalledAppRecord(packageName: "com.traderepublic.app", appName: "Trade Republic", appStoreId: 1409866466, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "com.scalable.capital", appName: "Scalable Capital", appStoreId: 1506435289, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "com.vilcap.coinbase", appName: "Coinbase", appStoreId: 886427730, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "com.czzhao.binance", appName: "Binance", appStoreId: 1436799971, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "co.mona.Monaco", appName: "Crypto.com", appStoreId: 1262148500, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "com.kraken.trade", appName: "Kraken", appStoreId: 1481947260, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "io.metamask.MetaMask", appName: "MetaMask", appStoreId: 1438144202, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "com.etoro.openbook", appName: "eToro", appStoreId: 674984916, detectionSource: "Categoria Finanza"),
+                InstalledAppRecord(packageName: "com.fusionmedia.investing", appName: "Investing.com", appStoreId: 909998122, detectionSource: "Categoria Finanza")
             ]
         ),
         AppQuickCategory(
@@ -375,7 +556,11 @@ enum iOSInstalledAppsScanner {
                 InstalledAppRecord(packageName: "com.google.Drive", appName: "Google Drive", appStoreId: 507874739, detectionSource: "Categoria Google"),
                 InstalledAppRecord(packageName: "com.google.photos", appName: "Google Foto", appStoreId: 962194608, detectionSource: "Categoria Google"),
                 InstalledAppRecord(packageName: "com.google.GoogleMobile", appName: "Google", appStoreId: 284815942, detectionSource: "Categoria Google"),
-                InstalledAppRecord(packageName: "com.google.calendar", appName: "Google Calendar", appStoreId: 909319292, detectionSource: "Categoria Google")
+                InstalledAppRecord(packageName: "com.google.calendar", appName: "Google Calendar", appStoreId: 909319292, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.Keep", appName: "Google Keep", appStoreId: 1029207872, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.meetings", appName: "Google Meet", appStoreId: 1096918571, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.Translate", appName: "Google Traduttore", appStoreId: 414706506, detectionSource: "Categoria Google"),
+                InstalledAppRecord(packageName: "com.google.b612", appName: "Google Earth", appStoreId: 293622097, detectionSource: "Categoria Google")
             ]
         )
     ]

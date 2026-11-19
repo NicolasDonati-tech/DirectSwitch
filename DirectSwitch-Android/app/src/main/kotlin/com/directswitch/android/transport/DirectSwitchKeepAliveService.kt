@@ -37,17 +37,67 @@ class DirectSwitchKeepAliveService : Service() {
         private const val CHANNEL_ID = "directswitch_transfer_keepalive"
         private const val NOTIFICATION_ID = 49443
         private const val EXTRA_STATUS = "extra_status"
+        private const val EXTRA_PERCENT = "extra_percent"
+        private const val EXTRA_SUBTEXT = "extra_subtext"
         private const val MAX_LOCK_MS = 3L * 60L * 60L * 1000L
+
+        @Volatile
+        private var lastProgressNotifMs: Long = 0L
 
         fun start(context: Context, statusText: String) {
             runCatching {
                 val appCtx = context.applicationContext
                 val intent = Intent(appCtx, DirectSwitchKeepAliveService::class.java).apply {
                     putExtra(EXTRA_STATUS, statusText)
+                    putExtra(EXTRA_PERCENT, -1)
                 }
                 ContextCompat.startForegroundService(appCtx, intent)
             }.onFailure { t ->
                 DirectSwitchLog.warn("Avvio KeepAliveService non disponibile", t)
+            }
+        }
+
+        /** Aggiorna la barra di avanzamento live nella notifica di sistema / schermata di blocco (rate-limited ~700ms). */
+        fun updateProgress(
+            context: Context,
+            percent: Int,
+            statusText: String,
+            etaSubText: String? = null,
+            force: Boolean = false
+        ) {
+            val now = System.currentTimeMillis()
+            if (!force && percent < 100 && now - lastProgressNotifMs < 700L) return
+            lastProgressNotifMs = now
+            runCatching {
+                val appCtx = context.applicationContext
+                val nm = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+                val openAppIntent = PendingIntent.getActivity(
+                    appCtx,
+                    0,
+                    Intent(appCtx, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    },
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val safePct = percent.coerceIn(0, 100)
+                val title = if (safePct >= 100) {
+                    "DirectSwitch • Completato (100%)"
+                } else {
+                    "DirectSwitch • $safePct% trasferito"
+                }
+                val builder = NotificationCompat.Builder(appCtx, CHANNEL_ID)
+                    .setSmallIcon(R.mipmap.ic_launcher)
+                    .setContentTitle(title)
+                    .setContentText(statusText)
+                    .setOngoing(safePct < 100)
+                    .setOnlyAlertOnce(true)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .setProgress(100, safePct, false)
+                    .setContentIntent(openAppIntent)
+                if (!etaSubText.isNullOrBlank()) {
+                    builder.setSubText(etaSubText)
+                }
+                nm.notify(NOTIFICATION_ID, builder.build())
             }
         }
 

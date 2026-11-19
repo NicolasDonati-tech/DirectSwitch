@@ -14,6 +14,9 @@
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="32" />
 
     <!-- Rubrica Contatti (Smart Merge Bidirezionale Zero Duplicati) -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -29,9 +32,13 @@
     <uses-permission android:name="android.permission.RECEIVE_MMS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
 
-    <!-- Foto, Video HD/4K e Media -->
+    <!-- Foto, Video HD/4K, Audio e Memo Vocali -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Cronologia Chiamate (opzionale, richiesta solo se selezionata) -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />

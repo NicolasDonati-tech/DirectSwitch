@@ -18,5 +18,3 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
-# Play Billing
--keep class com.android.vending.billing.** { *; }

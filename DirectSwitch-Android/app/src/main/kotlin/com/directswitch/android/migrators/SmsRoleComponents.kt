@@ -62,6 +62,7 @@ class DirectSwitchSmsDeliverReceiver : BroadcastReceiver() {
 class DirectSwitchMmsWapPushReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
         // Ricevitore WAP Push richiesto dal contratto ROLE_SMS di Android
+        if (context == null || intent?.action != Telephony.Sms.Intents.WAP_PUSH_DELIVER_ACTION) return
     }
 }
 

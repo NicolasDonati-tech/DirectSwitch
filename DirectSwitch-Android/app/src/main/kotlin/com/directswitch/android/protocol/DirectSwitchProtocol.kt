@@ -48,6 +48,7 @@ enum class TransferCategory {
     VIDEOS,
     CALENDARS,
     DOCUMENTS,
+    AUDIO,
     SMS_HISTORY,
     WHATSAPP_VAULT
 }
@@ -151,11 +152,13 @@ data class ActiveTransferScope(
     val calendars: Boolean = false,
     val reminders: Boolean = false,
     val documents: Boolean = false,
+    val audio: Boolean = false,
+    val callLogs: Boolean = false,
     val apps: Boolean = false,
     val whatsApp: Boolean = false
 ) {
     val hasAnyStandardDataCategory: Boolean
-        get() = contacts || photos || videos || calendars || reminders || documents || apps
+        get() = contacts || photos || videos || calendars || reminders || documents || audio || callLogs || apps
 
     val isWhatsAppOnly: Boolean
         get() = whatsApp && !hasAnyStandardDataCategory
@@ -165,6 +168,7 @@ data class ActiveTransferScope(
             val hasPhotos = manifest.items.any { it.category == TransferCategory.PHOTOS }
             val hasVideos = manifest.items.any { it.category == TransferCategory.VIDEOS }
             val hasDocs = manifest.items.any { it.category == TransferCategory.DOCUMENTS }
+            val hasAudio = manifest.items.any { it.category == TransferCategory.AUDIO }
             val hasWaVault = manifest.items.any { it.category == TransferCategory.WHATSAPP_VAULT }
             return ActiveTransferScope(
                 contacts = manifest.contactsPayload.isNotEmpty(),
@@ -173,6 +177,8 @@ data class ActiveTransferScope(
                 calendars = manifest.calendarsPayload.isNotEmpty(),
                 reminders = !manifest.remindersPayload.isNullOrEmpty(),
                 documents = hasDocs,
+                audio = hasAudio,
+                callLogs = !manifest.callLogsPayload.isNullOrEmpty(),
                 apps = manifest.installedAppsPayload.isNotEmpty(),
                 whatsApp = manifest.requestNativeWhatsAppMigration || hasWaVault
             )
@@ -279,6 +285,17 @@ data class SmsTransferRecord(
 )
 
 @Serializable
+data class CallLogTransferRecord(
+    val id: String,
+    val number: String,
+    val cachedName: String? = null,
+    /** 1 = Ricevuta, 2 = Effettuata, 3 = Persa, 5 = Rifiutata */
+    val callType: Int = 1,
+    val dateEpochMillis: Long,
+    val durationSeconds: Long = 0L
+)
+
+@Serializable
 data class InstalledAppRecord(
     val packageName: String,
     val appName: String,
@@ -309,6 +326,7 @@ data class TransferManifest(
     val calendarsPayload: List<CalendarEventRecord> = emptyList(),
     val remindersPayload: List<ReminderTransferRecord>? = null,
     val smsPayload: List<SmsTransferRecord> = emptyList(),
+    val callLogsPayload: List<CallLogTransferRecord>? = null,
     val installedAppsPayload: List<InstalledAppRecord> = emptyList(),
     val requestNativeWhatsAppMigration: Boolean = false,
     val transferScope: ActiveTransferScope? = null
@@ -325,6 +343,7 @@ data class ManifestResponse(
     val remindersImportedCount: Int? = null,
     val remindersAlreadyPresentCount: Int? = null,
     val smsImportedCount: Int = 0,
+    val callLogsImportedCount: Int? = null,
     val gatedByCrossOsPreviewCount: Int = 0
 )
 
@@ -340,6 +359,7 @@ data class TransferCompletionReport(
     val remindersImportedCount: Int? = null,
     val remindersAlreadyPresentCount: Int? = null,
     val importedSmsCount: Int = 0,
+    val callLogsImportedCount: Int? = null,
     val skippedDuplicatesCount: Int,
     val elapsedMillis: Long
 )
@@ -707,17 +727,23 @@ object DirectSwitchCrypto {
     }
 }
 
-/** Riconcilia byte stimati, file effettivi e file saltati per mantenere progressi e totali coerenti. */
+/** Riconcilia byte stimati, file effettivi, riprese (`isResume`) e file saltati per mantenere progressi e totali coerenti. */
 class TransferProgressAccounting(
     queuedItemsCount: Int,
-    remainingEstimatedBytes: Long
+    remainingEstimatedBytes: Long,
+    previouslyCompletedItems: Int = 0,
+    previouslySentBytes: Long = 0L,
+    previouslyFailedItems: Int = 0
 ) {
-    val initialTotalItems: Int = queuedItemsCount.coerceAtLeast(0)
-    var succeededItemsCount: Int = 0
+    private val safePrevCompleted = previouslyCompletedItems.coerceAtLeast(0)
+    private val safePrevFailed = previouslyFailedItems.coerceAtLeast(0)
+
+    val initialTotalItems: Int = safePrevCompleted + safePrevFailed + queuedItemsCount.coerceAtLeast(0)
+    var succeededItemsCount: Int = safePrevCompleted
         private set
-    var failedItemsCount: Int = 0
+    var failedItemsCount: Int = safePrevFailed
         private set
-    var transferredBytes: Long = 0L
+    var transferredBytes: Long = previouslySentBytes.coerceAtLeast(0L)
         private set
     var remainingEstimatedBytes: Long = remainingEstimatedBytes.coerceAtLeast(0L)
         private set

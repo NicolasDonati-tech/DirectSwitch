@@ -284,7 +284,6 @@ struct LiveCameraAppScannerSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.light)
         .onAppear {
             scanner.onLiveAppsChanged = { updated in
                 onLiveAppsUpdated?(updated)
@@ -419,7 +418,6 @@ struct AutoAppScrollCaptureGuideSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.light)
     }
 
     private func guideStepRow(number: String, title: String, detail: String) -> some View {
@@ -913,7 +911,6 @@ struct SenderAppsSelectionSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.light)
         .task {
             let icons = await iOSAppStoreCatalogResolver.fetchIconsForCategories(visibleQuickCategories)
             if !icons.isEmpty {
@@ -2104,7 +2101,6 @@ private struct ApplePermissionStepGuideSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.light)
     }
 
     private func stepRow(_ index: Int, _ markdownText: String) -> some View {

@@ -27,6 +27,7 @@ final class iOSBackgroundTransferKeepAlive: NSObject {
     private var activeRoleLabel = ""
     private var currentPercent: Int = 0
     private var currentDetail: String = ""
+    private var lastBackgroundMilestonePercent: Int = 0
     private var didSendExpiryWarningInCurrentBackgroundSpan = false
 
     private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
@@ -89,6 +90,7 @@ final class iOSBackgroundTransferKeepAlive: NSObject {
         activeRoleLabel = roleLabel
         currentPercent = 0
         currentDetail = roleLabel
+        lastBackgroundMilestonePercent = 0
         didSendExpiryWarningInCurrentBackgroundSpan = false
 
         UIApplication.shared.isIdleTimerDisabled = true
@@ -96,10 +98,26 @@ final class iOSBackgroundTransferKeepAlive: NSObject {
         requestNotificationPermissionIfNeeded()
     }
 
-    func updateProgress(percent: Int, detail: String) {
-        currentPercent = max(0, min(100, percent))
+    func updateProgress(percent: Int, detail: String, etaLabel: String? = nil) {
+        let clamped = max(0, min(100, percent))
+        currentPercent = clamped
         if !detail.isEmpty {
             currentDetail = detail
+        }
+        // Quando l'app è in background, aggiorna la schermata di blocco ad ogni step del 25% con % e tempo rimanente
+        let milestone = (clamped / 25) * 25
+        if isSessionActive &&
+            milestone >= 25 &&
+            milestone < 100 &&
+            milestone > lastBackgroundMilestonePercent &&
+            UIApplication.shared.applicationState != .active {
+            lastBackgroundMilestonePercent = milestone
+            let etaPart = etaLabel.map { " • \($0)" } ?? ""
+            postLocalNotification(
+                id: "ds_bg_progress_live",
+                title: "DirectSwitch al \(clamped)%",
+                body: "\(currentDetail)\(etaPart)"
+            )
         }
     }
 

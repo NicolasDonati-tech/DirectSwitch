@@ -265,10 +265,7 @@ object PublicDownloadsSaver {
                 }
                 if (!targetDir.exists() && !targetDir.mkdirs()) {
                     // Fallback a MediaStore su Android 10+ se la scrittura diretta non fosse ammessa su quel volume
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        return saveViaMediaStore(context, normalizedSegments, safeName, mimeType, inputStream, expectedSizeBytes)
-                    }
-                    return false
+                    return saveViaMediaStore(context, normalizedSegments, safeName, mimeType, inputStream, expectedSizeBytes)
                 }
                 val exactExisting = File(targetDir, safeName)
                 if (exactExisting.exists() && expectedSizeBytes > 0L && exactExisting.length() == expectedSizeBytes) {
@@ -1353,26 +1350,84 @@ object CalendarMigrator {
         return out
     }
 
+    /**
+     * Converte un timestamp nella mezzanotte UTC (00:00:00.000 UTC) dello stesso giorno di calendario,
+     * come richiesto da Android `CalendarContract.Events` quando `ALL_DAY = 1`.
+     * Se il timestamp è già allineato alla mezzanotte UTC (es. proveniente da un altro Android),
+     * lo preserva invariato evitando slittamenti di giorno nei fusi orari negativi.
+     */
+    fun utcMidnightMillis(
+        epochMillis: Long,
+        sourceTimeZone: TimeZone = TimeZone.getDefault()
+    ): Long {
+        if (Math.floorMod(epochMillis, 86_400_000L) == 0L) {
+            return epochMillis
+        }
+        val localCal = java.util.Calendar.getInstance(sourceTimeZone).apply {
+            timeInMillis = epochMillis
+        }
+        val utcCal = java.util.Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(
+                localCal.get(java.util.Calendar.YEAR),
+                localCal.get(java.util.Calendar.MONTH),
+                localCal.get(java.util.Calendar.DAY_OF_MONTH),
+                0,
+                0,
+                0
+            )
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        return utcCal.timeInMillis
+    }
+
+    fun dedupKeyForEvent(
+        title: String,
+        startEpochMillis: Long,
+        allDay: Boolean,
+        sourceTimeZone: TimeZone = TimeZone.getDefault()
+    ): String {
+        val normalizedStart = if (allDay) utcMidnightMillis(startEpochMillis, sourceTimeZone) else startEpochMillis
+        return "${title.trim().lowercase()}_${normalizedStart / 60_000L}"
+    }
+
     fun importEventsDeduplicatedWithStats(context: Context, incoming: List<CalendarEventRecord>): Pair<Int, Int> {
         if (!hasWritePermission(context) || incoming.isEmpty()) return 0 to 0
         val primaryCalId = findOrCreateWritableCalendarId(context) ?: return 0 to 0
         val existingKeys = readEvents(context)
-            .map { "${it.title.trim().lowercase()}_${it.startEpochMillis / 60_000L}" }
+            .map { dedupKeyForEvent(it.title, it.startEpochMillis, it.allDay) }
             .toHashSet()
 
         var imported = 0
         var alreadyPresent = 0
         for (ev in incoming) {
             val cleanTitle = ev.title.trim().ifEmpty { "Evento" }
-            val key = "${cleanTitle.lowercase()}_${ev.startEpochMillis / 60_000L}"
+            val key = dedupKeyForEvent(cleanTitle, ev.startEpochMillis, ev.allDay)
             if (key in existingKeys) {
                 alreadyPresent++
                 continue
             }
-            val safeEnd = if (ev.endEpochMillis > ev.startEpochMillis) {
-                ev.endEpochMillis
+            val effectiveStart: Long
+            val effectiveEnd: Long
+            val allDaySpanDays: Long
+            if (ev.allDay) {
+                effectiveStart = utcMidnightMillis(ev.startEpochMillis)
+                allDaySpanDays = if (ev.endEpochMillis > ev.startEpochMillis) {
+                    kotlin.math.round((ev.endEpochMillis - ev.startEpochMillis) / 86_400_000.0)
+                        .toLong()
+                        .coerceAtLeast(1L)
+                } else {
+                    1L
+                }
+                effectiveEnd = effectiveStart + allDaySpanDays * 86_400_000L
             } else {
-                ev.startEpochMillis + if (ev.allDay) 86_400_000L else 3_600_000L
+                effectiveStart = ev.startEpochMillis
+                allDaySpanDays = 1L
+                effectiveEnd = if (ev.endEpochMillis > ev.startEpochMillis) {
+                    ev.endEpochMillis
+                } else {
+                    ev.startEpochMillis + 3_600_000L
+                }
             }
             val effectiveRRule = ev.rrule?.takeIf { it.isNotBlank() }
                 ?: CalendarRecurrenceMapper.toRRule(ev.recurrenceFrequency, ev.recurrenceInterval)
@@ -1383,16 +1438,16 @@ object CalendarMigrator {
                     put(CalendarContract.Events.TITLE, cleanTitle)
                     put(CalendarContract.Events.DESCRIPTION, ev.description)
                     put(CalendarContract.Events.EVENT_LOCATION, ev.location)
-                    put(CalendarContract.Events.DTSTART, ev.startEpochMillis)
+                    put(CalendarContract.Events.DTSTART, effectiveStart)
                     put(CalendarContract.Events.ALL_DAY, if (ev.allDay) 1 else 0)
-                    put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                    put(CalendarContract.Events.EVENT_TIMEZONE, if (ev.allDay) "UTC" else TimeZone.getDefault().id)
                     if (effectiveRRule != null) {
                         // Android CalendarProvider vieta di impostare sia DTEND che RRULE: usa DURATION.
-                        val durationSec = ((safeEnd - ev.startEpochMillis) / 1000L).coerceAtLeast(3600L)
-                        put(CalendarContract.Events.DURATION, if (ev.allDay) "P1D" else "P${durationSec}S")
+                        val durationSec = ((effectiveEnd - effectiveStart) / 1000L).coerceAtLeast(3600L)
+                        put(CalendarContract.Events.DURATION, if (ev.allDay) "P${allDaySpanDays}D" else "P${durationSec}S")
                         put(CalendarContract.Events.RRULE, effectiveRRule)
                     } else {
-                        put(CalendarContract.Events.DTEND, safeEnd)
+                        put(CalendarContract.Events.DTEND, effectiveEnd)
                     }
                 }
                 val insertedUri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
@@ -1482,6 +1537,25 @@ object CalendarMigrator {
 
 /** Importa su Android i Promemoria Apple ricevuti da iPhone (salvataggio leggibile + eventi con scadenza in Calendario). */
 object AndroidRemindersMigrator {
+    internal const val REMINDERS_CALENDAR_NAME = "Promemoria Apple"
+
+    fun reminderEventTitle(title: String, isCompleted: Boolean): String =
+        if (isCompleted) "[Completato] ${title.trim()}" else title.trim()
+
+    /**
+     * Chiave deterministica per la deduplica nel calendario "Promemoria Apple":
+     * - Con scadenza: titolo normalizzato + minuto di scadenza.
+     * - Senza scadenza: solo titolo normalizzato (stabile nel tempo anche se si ripete il trasferimento ore/giorni dopo).
+     */
+    fun reminderCalendarDedupKey(prefTitle: String, dueEpochMillis: Long?): String {
+        val normTitle = prefTitle.trim().lowercase()
+        return if (dueEpochMillis != null) {
+            "dated|${normTitle}_${dueEpochMillis / 60_000L}"
+        } else {
+            "undated|$normTitle"
+        }
+    }
+
     fun importRemindersWithStats(
         context: Context,
         incoming: List<ReminderTransferRecord>
@@ -1548,15 +1622,23 @@ object AndroidRemindersMigrator {
         if (CalendarMigrator.hasWritePermission(context)) {
             val targetCalId = CalendarMigrator.findOrCreateNamedCalendarForReminders(context)
             if (targetCalId != null) {
-                val existingCalKeys = CalendarMigrator.readEvents(context)
-                    .map { "${it.title.trim().lowercase()}_${it.startEpochMillis / 60_000L}" }
+                val existingEvents = CalendarMigrator.readEvents(context)
+                val existingDatedKeys = existingEvents
+                    .map { reminderCalendarDedupKey(it.title, it.startEpochMillis) }
                     .toHashSet()
-                val nowBase = System.currentTimeMillis()
-                cleanList.forEachIndexed { idx, rem ->
-                    val startMs = rem.dueEpochMillis ?: (nowBase + idx * 60_000L)
-                    val prefTitle = if (rem.isCompleted) "[Completato] ${rem.title}" else rem.title
-                    val key = "${prefTitle.trim().lowercase()}_${startMs / 60_000L}"
-                    if (key in existingCalKeys) {
+                val existingUndatedKeys = existingEvents
+                    .filter { it.calendarTitle.equals(REMINDERS_CALENDAR_NAME, ignoreCase = true) && it.allDay }
+                    .map { reminderCalendarDedupKey(it.title, dueEpochMillis = null) }
+                    .toHashSet()
+                val utcTodayStart = CalendarMigrator.utcMidnightMillis(System.currentTimeMillis())
+
+                for (rem in cleanList) {
+                    val prefTitle = reminderEventTitle(rem.title, rem.isCompleted)
+                    val dueMs = rem.dueEpochMillis
+                    val isUndated = dueMs == null
+                    val key = reminderCalendarDedupKey(prefTitle, dueMs)
+                    val alreadyExists = if (isUndated) key in existingUndatedKeys else key in existingDatedKeys
+                    if (alreadyExists) {
                         calendarAlreadyPresent++
                     } else {
                         val desc = buildString {
@@ -1568,14 +1650,21 @@ object AndroidRemindersMigrator {
                                 put(CalendarContract.Events.CALENDAR_ID, targetCalId)
                                 put(CalendarContract.Events.TITLE, prefTitle)
                                 put(CalendarContract.Events.DESCRIPTION, desc)
-                                put(CalendarContract.Events.DTSTART, startMs)
-                                put(CalendarContract.Events.DTEND, startMs + 1_800_000L)
-                                put(CalendarContract.Events.ALL_DAY, if (rem.dueEpochMillis == null) 1 else 0)
-                                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                                if (isUndated) {
+                                    put(CalendarContract.Events.DTSTART, utcTodayStart)
+                                    put(CalendarContract.Events.DTEND, utcTodayStart + 86_400_000L)
+                                    put(CalendarContract.Events.ALL_DAY, 1)
+                                    put(CalendarContract.Events.EVENT_TIMEZONE, "UTC")
+                                } else {
+                                    put(CalendarContract.Events.DTSTART, dueMs)
+                                    put(CalendarContract.Events.DTEND, dueMs + 1_800_000L)
+                                    put(CalendarContract.Events.ALL_DAY, 0)
+                                    put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                                }
                             }
                             if (context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values) != null) {
                                 calendarInserted++
-                                existingCalKeys.add(key)
+                                if (isUndated) existingUndatedKeys.add(key) else existingDatedKeys.add(key)
                             }
                         }
                     }
@@ -1588,12 +1677,7 @@ object AndroidRemindersMigrator {
             jsonSaved || htmlSaved -> if (calendarAlreadyPresent == cleanList.size) 0 else cleanList.size
             else -> 0
         }
-        val effectiveAlreadyPresent = if (effectiveImported == 0 && calendarAlreadyPresent > 0) {
-            calendarAlreadyPresent
-        } else {
-            calendarAlreadyPresent
-        }
-        return effectiveImported to effectiveAlreadyPresent
+        return effectiveImported to calendarAlreadyPresent
     }
 }
 
@@ -3140,42 +3224,267 @@ object InstalledAppsScanner {
         CategoryClassifierSpec(
             id = "social_messaging",
             title = "Social & Messaggi",
-            keywords = listOf("whatsapp", "telegram", "instagram", "facebook", "orca", "messenger", "tiktok", "musically", "twitter", "barcelona", "threads", "linkedin", "snapchat", "pinterest", "reddit", "discord", "signal", "viber"),
+            keywords = listOf("whatsapp", "telegram", "instagram", "facebook", "orca", "messenger", "tiktok", "musically", "twitter", "barcelona", "threads", "linkedin", "snapchat", "pinterest", "reddit", "discord", "signal", "viber", "bereal", "bluesky", "wechat", "tinder", "bumble", "hinge"),
             androidCategory = ApplicationInfo.CATEGORY_SOCIAL
         ),
         CategoryClassifierSpec(
             id = "banks_payments",
             title = "Banche & Pagamenti",
-            keywords = listOf("intesa", "latuabanca", "unicredit", "posteitaliane", "isybank", "fineco", "bbva", "bper", "mediolanum", "caitalia", "hype", "nexi", "icbpi", "bancomat", "revolut", "satispay", "paypal", "ing.", "banca", "bank", "wallet", "illimity")
+            keywords = listOf("intesa", "latuabanca", "unicredit", "posteitaliane", "postepay", "bancoposta", "isybank", "fineco", "bbva", "bper", "mediolanum", "caitalia", "hype", "nexi", "icbpi", "bancomat", "revolut", "satispay", "paypal", "ing.", "banca", "bank", "wallet", "illimity", "n26", "wise", "klarna", "scalapay", "amex", "bnl", "mps", "credem", "sella", "widiba")
         ),
         CategoryClassifierSpec(
             id = "spid_office",
             title = "SPID, CIE & Lavoro",
-            keywords = listOf("pagopa", "cieid", "posteid", "postebuy", "aruba", "outlook", "teams", "zoom", "office", "word", "excel", "powerpoint", "onedrive", "dropbox", "slack", "scan", "camscanner", "docs", "drive"),
+            keywords = listOf("pagopa", "cieid", "posteid", "postebuy", "aruba", "lepida", "sielte", "infocert", "outlook", "teams", "zoom", "office", "word", "excel", "powerpoint", "onenote", "onedrive", "dropbox", "slack", "scan", "camscanner", "acrobat", "notion", "trello", "docusign", "docs", "drive"),
             androidCategory = ApplicationInfo.CATEGORY_PRODUCTIVITY
         ),
         CategoryClassifierSpec(
             id = "transport_travel",
             title = "Trasporti, Auto & Viaggi",
-            keywords = listOf("prontotreno", "trenitalia", "italo", "telepass", "unipol", "mycicero", "mooney", "easypark", "ryanair", "itaairways", "booking", "airbnb", "uber", "waze", "maps", "moovit"),
+            keywords = listOf("prontotreno", "trenitalia", "italo", "trenord", "telepass", "unipol", "mycicero", "mooney", "easypark", "ryanair", "itaairways", "easyjet", "wizzair", "vueling", "lufthansa", "booking", "airbnb", "tripadvisor", "skyscanner", "uber", "freenow", "waze", "maps", "moovit", "flixbus", "blablacar", "lime"),
             androidCategory = ApplicationInfo.CATEGORY_MAPS
         ),
         CategoryClassifierSpec(
             id = "shopping_food",
             title = "Shopping, Spesa & Cibo",
-            keywords = listOf("amazon.mshop", "temu", "zzkko", "shein", "subito", "vinted", "ebay", "esselunga", "lidl", "glovo", "deliveroo", "justeat", "zalando", "shein", "coop", "carrefour")
+            keywords = listOf("amazon.mshop", "temu", "zzkko", "shein", "aliexpress", "subito", "vinted", "ebay", "esselunga", "lidl", "glovo", "deliveroo", "justeat", "toogoodtogo", "thefork", "mcdonalds", "zalando", "zara", "ikea", "decathlon", "leroymerlin", "mediaworld", "conad", "coop", "carrefour")
         ),
         CategoryClassifierSpec(
             id = "music_streaming",
             title = "Musica, Video & Streaming",
-            keywords = listOf("spotify", "shazam", "youtube", "netflix", "avod", "primevideo", "disney", "dazn", "rainet", "raiplay", "mediaset", "sky.", "nowtv", "twitch"),
+            keywords = listOf("spotify", "shazam", "youtube", "netflix", "avod", "primevideo", "disney", "dazn", "rainet", "raiplay", "mediaset", "sky.", "nowtv", "twitch", "soundcloud", "deezer", "audible", "paramount", "crunchyroll", "vlc", "plex"),
             androidCategory = ApplicationInfo.CATEGORY_AUDIO
         ),
         CategoryClassifierSpec(
             id = "photo_video_sport",
-            title = "Foto, Video, Giochi & Sport",
-            keywords = listOf("capcut", "lvoverseas", "canva", "instashot", "snapseed", "lrmobile", "picsart", "vsco", "remini", "facetune", "photoroom", "vlog", "strava", "garmin", "gopro", "dji"),
+            title = "Foto, Video & Sport",
+            keywords = listOf("capcut", "lvoverseas", "canva", "instashot", "snapseed", "lrmobile", "picsart", "vsco", "remini", "facetune", "photoroom", "vlog", "strava", "garmin", "gopro", "dji", "komoot", "nike", "runtastic", "zepp", "myfitnesspal", "fantacalcio", "sofascore"),
             androidCategory = ApplicationInfo.CATEGORY_IMAGE
+        ),
+        CategoryClassifierSpec(
+            id = "security_vpn",
+            title = "Sicurezza, VPN & Password",
+            keywords = listOf("authenticator", "1password", "bitwarden", "protonpass", "authy", "nordvpn", "surfshark", "protonvpn", "protonmail", "cloudflare", "speedtest", "teamviewer")
+        ),
+        CategoryClassifierSpec(
+            id = "health_school",
+            title = "Salute, Studio & Scuola",
+            keywords = listOf("miodottore", "znanylekarz", "doctolib", "yuka", "duolingo", "babbel", "quizlet", "photomath", "kahoot", "classeviva", "didup", "goodnotes")
+        ),
+        CategoryClassifierSpec(
+            id = "games_popular",
+            title = "Giochi Popolari",
+            keywords = listOf("supercell", "brawlstars", "clash", "roblox", "minecraft", "candycrush", "subwaysurf", "royalmatch", "monopoly", "fifamobile", "efootball", "pokemongo", "callofduty", "pubg", "genshin", "amongus", "chess", "8ballpool"),
+            androidCategory = ApplicationInfo.CATEGORY_GAME
+        ),
+        CategoryClassifierSpec(
+            id = "news_books_weather",
+            title = "Notizie, Libri, Casa & Meteo",
+            keywords = listOf("kindle", "kobo", "storytel", "corriere", "repubblica", "sole24ore", "tg24", "ansa", "3bmeteo", "ilmeteo", "giallozafferano", "immobiliare", "idealista", "autoscout")
+        ),
+        CategoryClassifierSpec(
+            id = "crypto_finance",
+            title = "Investimenti & Finanza",
+            keywords = listOf("traderepublic", "scalable", "coinbase", "binance", "monaco", "kraken", "metamask", "etoro", "investing")
+        )
+    )
+
+    /** Catalogo extra di app popolari selezionabili anche su Android per pre-installarle sul nuovo telefono. */
+    val curatedExtraAndroidCategories: List<InstalledAppCategoryGroup> = listOf(
+        InstalledAppCategoryGroup(
+            id = "social_messaging",
+            title = "Social & Messaggi",
+            apps = listOf(
+                InstalledAppRecord("com.whatsapp", "WhatsApp Messenger", appStoreId = 310633997, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.whatsapp.w4b", "WhatsApp Business", appStoreId = 1386412985, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.instagram.android", "Instagram", appStoreId = 389801252, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("org.telegram.messenger", "Telegram", appStoreId = 686449807, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.facebook.katana", "Facebook", appStoreId = 284882215, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.facebook.orca", "Messenger", appStoreId = 454638411, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.zhiliaoapp.musically", "TikTok", appStoreId = 835599320, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.instagram.barcelona", "Threads", appStoreId = 6446901002, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.twitter.android", "X", appStoreId = 333903271, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.linkedin.android", "LinkedIn", appStoreId = 288429040, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.snapchat.android", "Snapchat", appStoreId = 447188370, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.pinterest", "Pinterest", appStoreId = 429047995, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.reddit.frontpage", "Reddit", appStoreId = 1064216828, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.discord", "Discord", appStoreId = 985746746, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("org.thoughtcrime.securesms", "Signal", appStoreId = 874139669, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "banks_payments",
+            title = "Banche & Pagamenti",
+            apps = listOf(
+                InstalledAppRecord("com.latuabancaperandroid", "Intesa Sanpaolo Mobile", appStoreId = 597360475, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.unicredit", "UniCredit Mobile Banking", appStoreId = 396670008, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("posteitaliane.posteapp.apppostepay", "Postepay", appStoreId = 499402581, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.isybank.app", "Isybank", appStoreId = 1666218772, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.fineco.it", "Fineco", appStoreId = 405225581, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.bbva.italy", "BBVA Italia", appStoreId = 1536949050, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.revolut.revolut", "Revolut", appStoreId = 932493382, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.satispay.customer", "Satispay", appStoreId = 790287076, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.paypal.android.p2pmobile", "PayPal", appStoreId = 283646709, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.hype.app", "HYPE", appStoreId = 943405905, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.icbpi.mobile", "Nexi Pay", appStoreId = 518695175, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.bancomat.pay", "BANCOMAT", appStoreId = 1467760256, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "spid_office",
+            title = "SPID, CIE & Lavoro",
+            apps = listOf(
+                InstalledAppRecord("it.pagopa.io.app", "IO", appStoreId = 1501681835, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.ipzs.cieid", "CieID", appStoreId = 1504644677, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("posteitaliane.posteapp.appposteid", "PosteID", appStoreId = 649492675, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.aruba.pec.mobile", "Aruba PEC", appStoreId = 973510245, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.microsoft.office.outlook", "Microsoft Outlook", appStoreId = 951937596, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.microsoft.teams", "Microsoft Teams", appStoreId = 1113153706, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("us.zoom.videomeetings", "Zoom Workplace", appStoreId = 546505307, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.dropbox.android", "Dropbox", appStoreId = 327630330, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("notion.id", "Notion", appStoreId = 1232780281, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.adobe.reader", "Adobe Acrobat Reader", appStoreId = 469337564, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "music_streaming",
+            title = "Musica, Video & Streaming",
+            apps = listOf(
+                InstalledAppRecord("com.spotify.music", "Spotify", appStoreId = 324684580, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.netflix.mediaclient", "Netflix", appStoreId = 363590051, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.amazon.avod.thirdpartyclient", "Amazon Prime Video", appStoreId = 545519333, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.disney.disneyplus", "Disney+", appStoreId = 1446075923, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.dazn", "DAZN", appStoreId = 1129523589, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.rainet.androidtv", "RaiPlay", appStoreId = 501323740, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("tv.twitch.android.app", "Twitch", appStoreId = 460177396, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("org.videolan.vlc", "VLC", appStoreId = 650377962, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "shopping_food",
+            title = "Shopping, Spesa & Cibo",
+            apps = listOf(
+                InstalledAppRecord("com.amazon.mShop.android.shopping", "Amazon Shopping", appStoreId = 297606951, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.einnovation.temu", "Temu", appStoreId = 1641486558, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.zzkko", "SHEIN", appStoreId = 878577184, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.subito", "Subito", appStoreId = 450775137, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("fr.vinted", "Vinted", appStoreId = 632064380, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.glovo", "Glovo", appStoreId = 951812684, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.deliveroo.orderapp", "Deliveroo", appStoreId = 1001501844, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.justeat.app.it", "Just Eat", appStoreId = 566347057, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.app.tgtg", "Too Good To Go", appStoreId = 1060683933, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "transport_travel",
+            title = "Trasporti, Auto & Viaggi",
+            apps = listOf(
+                InstalledAppRecord("com.lynxspa.prontotreno", "Trenitalia", appStoreId = 331050847, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.ntvspa.italo", "Italo Treno", appStoreId = 804056898, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.telepass.app", "Telepass", appStoreId = 454224356, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.ryanair.cheapflights", "Ryanair", appStoreId = 504270602, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.booking", "Booking.com", appStoreId = 367003839, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.airbnb.android", "Airbnb", appStoreId = 401626263, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.waze", "Waze", appStoreId = 323229106, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.ubercab", "Uber", appStoreId = 368677368, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "games_popular",
+            title = "Giochi Popolari",
+            apps = listOf(
+                InstalledAppRecord("com.supercell.brawlstars", "Brawl Stars", appStoreId = 1229016807, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.supercell.clashroyale", "Clash Royale", appStoreId = 1053012308, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.supercell.clashofclans", "Clash of Clans", appStoreId = 529479190, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.roblox.client", "Roblox", appStoreId = 431946152, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.mojang.minecraftpe", "Minecraft", appStoreId = 479516143, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.king.candycrushsaga", "Candy Crush Saga", appStoreId = 553834731, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.ea.gp.fifamobile", "EA SPORTS FC Mobile", appStoreId = 1094930513, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.nianticlabs.pokemongo", "Pokémon GO", appStoreId = 1094591345, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.chess", "Chess - Play & Learn", appStoreId = 329218549, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "photo_video_sport",
+            title = "Foto, Video & Editing",
+            apps = listOf(
+                InstalledAppRecord("com.lemon.lvoverseas", "CapCut", appStoreId = 1500855883, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.canva.editor", "Canva", appStoreId = 897446215, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.adobe.lrmobile", "Adobe Lightroom", appStoreId = 878783582, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.niksoftware.snapseed", "Snapseed", appStoreId = 439438619, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.camerasideas.instashot", "InShot", appStoreId = 997362197, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.picsart.studio", "Picsart", appStoreId = 587366035, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.vsco.cam", "VSCO", appStoreId = 588013838, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.gopro.smarty", "GoPro Quik", appStoreId = 561350520, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.dji.industry.go", "DJI Fly", appStoreId = 1479649251, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.photoroom.app", "Photoroom", appStoreId = 1455009060, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "health_fitness",
+            title = "Salute, Sport & Fitness",
+            apps = listOf(
+                InstalledAppRecord("com.strava", "Strava", appStoreId = 426826309, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.garmin.android.apps.connectmobile", "Garmin Connect", appStoreId = 583446403, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.komoot.android", "Komoot", appStoreId = 447374873, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.nike.plusgps", "Nike Run Club", appStoreId = 387771637, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.myfitnesspal.android", "MyFitnessPal", appStoreId = 341232718, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.yazio.android", "YAZIO", appStoreId = 946099227, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.xiaomi.hm.health", "Zepp Life", appStoreId = 938688461, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.fitbit.FitbitMobile", "Fitbit", appStoreId = 462638897, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.scores365", "365Scores", appStoreId = 571800810, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("eu.livesport.FlashScore_com", "Diretta / Flashscore", appStoreId = 766443283, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.fantagazzetta.leghe", "Leghe Fantacalcio", appStoreId = 1143065642, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "news_books",
+            title = "News, Meteo & Studio",
+            apps = listOf(
+                InstalledAppRecord("com.ilmeteo.android.ilmeteo", "iLMeteo", appStoreId = 390159268, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.trebmeteo", "3BMeteo", appStoreId = 415950026, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.duolingo", "Duolingo", appStoreId = 570060128, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.amazon.kindle", "Amazon Kindle", appStoreId = 302584613, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.audible.application", "Audible", appStoreId = 379693831, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("org.wikipedia", "Wikipedia", appStoreId = 324715238, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.ansa.ansa", "ANSA.it", appStoreId = 365529796, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.rcs.corriere", "Corriere della Sera", appStoreId = 372692534, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.sky.tg24", "Sky TG24", appStoreId = 407980338, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.deepl.mobiletranslator", "DeepL Traduttore", appStoreId = 1552407475, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "security_vpn",
+            title = "Sicurezza, VPN & Password",
+            apps = listOf(
+                InstalledAppRecord("com.google.android.apps.authenticator2", "Google Authenticator", appStoreId = 388497605, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.azure.authenticator", "Microsoft Authenticator", appStoreId = 983156458, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.x8bit.bitwarden", "Bitwarden", appStoreId = 1137397744, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.onepassword.android", "1Password", appStoreId = 1511601750, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.nordvpn.android", "NordVPN", appStoreId = 905953485, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.surfshark.vpnclient.android", "Surfshark VPN", appStoreId = 1391782046, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("ch.protonmail.android", "Proton Mail", appStoreId = 979659905, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.cloudflare.onedotonedotonedotone", "1.1.1.1 WARP", appStoreId = 1423538627, detectionSource = "Catalogo Esteso")
+            )
+        ),
+        InstalledAppCategoryGroup(
+            id = "operators_home_ai",
+            title = "Operatori, Casa Smart & AI",
+            apps = listOf(
+                InstalledAppRecord("com.openai.chatgpt", "ChatGPT", appStoreId = 6448311069, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.google.android.apps.bard", "Google Gemini", appStoreId = 6477489729, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.anthropic.claude", "Claude", appStoreId = 6473753684, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("ai.perplexity.app.android", "Perplexity", appStoreId = 1668000334, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.microsoft.copilot", "Microsoft Copilot", appStoreId = 6472538445, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.telecomitalia.centodiciannove", "MyTIM", appStoreId = 378783815, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.vodafone.my190", "My Vodafone", appStoreId = 365804068, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("it.windtre.mywindtre", "WINDTRE", appStoreId = 492519547, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.amazon.dee.app", "Amazon Alexa", appStoreId = 944011620, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.tuya.smartlife", "Smart Life", appStoreId = 1115101477, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.xiaomi.smarthome", "Xiaomi Home", appStoreId = 957323480, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.tplink.iot", "TP-Link Tapo", appStoreId = 1472718009, detectionSource = "Catalogo Esteso"),
+                InstalledAppRecord("com.philips.lighting.hue2", "Philips Hue", appStoreId = 1055281310, detectionSource = "Catalogo Esteso")
+            )
         )
     )
 
@@ -3189,7 +3498,8 @@ object InstalledAppsScanner {
             ApplicationInfo.CATEGORY_PRODUCTIVITY -> "spid_office"
             ApplicationInfo.CATEGORY_MAPS -> "transport_travel"
             ApplicationInfo.CATEGORY_AUDIO, ApplicationInfo.CATEGORY_VIDEO -> "music_streaming"
-            ApplicationInfo.CATEGORY_IMAGE, ApplicationInfo.CATEGORY_GAME -> "photo_video_sport"
+            ApplicationInfo.CATEGORY_IMAGE -> "photo_video_sport"
+            ApplicationInfo.CATEGORY_GAME -> "games_popular"
             else -> "operators_home_ai"
         }
     }
