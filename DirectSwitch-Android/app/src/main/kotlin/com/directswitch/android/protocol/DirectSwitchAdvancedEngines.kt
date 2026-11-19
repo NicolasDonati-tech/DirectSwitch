@@ -417,7 +417,8 @@ object DirectSwitchMotionPhotoCodec {
 
     private fun buildXmpMotionPhotoPacket(mp4Length: Long, presentationTimestampUs: Long): ByteArray {
         val safePts = presentationTimestampUs.coerceAtLeast(0L)
-        return """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        val xmpBom = '\uFEFF'
+        return """<?xpacket begin="$xmpBom" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""

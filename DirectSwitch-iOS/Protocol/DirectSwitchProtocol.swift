@@ -399,6 +399,33 @@ struct DecommissionAuditResponse: Codable, Sendable {
     var installedAppIds: [String] = []
     var installedAppNames: [String] = []
     var freeStorageBytes: Int64 = 0
+
+    enum CodingKeys: String, CodingKey {
+        case receiverName, receiverPlatform, installedAppIds, installedAppNames, freeStorageBytes
+    }
+
+    init(
+        receiverName: String,
+        receiverPlatform: DevicePlatform,
+        installedAppIds: [String] = [],
+        installedAppNames: [String] = [],
+        freeStorageBytes: Int64 = 0
+    ) {
+        self.receiverName = receiverName
+        self.receiverPlatform = receiverPlatform
+        self.installedAppIds = installedAppIds
+        self.installedAppNames = installedAppNames
+        self.freeStorageBytes = freeStorageBytes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        receiverName = try c.decode(String.self, forKey: .receiverName)
+        receiverPlatform = try c.decode(DevicePlatform.self, forKey: .receiverPlatform)
+        installedAppIds = try c.decodeIfPresent([String].self, forKey: .installedAppIds) ?? []
+        installedAppNames = try c.decodeIfPresent([String].self, forKey: .installedAppNames) ?? []
+        freeStorageBytes = try c.decodeIfPresent(Int64.self, forKey: .freeStorageBytes) ?? 0
+    }
 }
 
 struct LabeledValueRecord: Codable, Equatable, Sendable {
@@ -727,7 +754,7 @@ struct InstalledAppRecord: Codable, Identifiable, Equatable, Sendable {
     var detectionSource: String? = nil
 }
 
-struct ManifestItem: Codable, Identifiable, Sendable {
+struct ManifestItem: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let category: TransferCategory
     let fileName: String

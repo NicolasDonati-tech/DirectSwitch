@@ -454,18 +454,29 @@ object AndroidLiveMotionBridge {
                     info.offset = 0
                     info.size = read
                     info.presentationTimeUs = extractor.sampleTime.coerceAtLeast(0L)
-                    info.flags = extractor.sampleFlags
+                    val sampleFlags = extractor.sampleFlags
+                    var bufferFlags = 0
+                    if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                        bufferFlags = bufferFlags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+                    }
+                    if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0) {
+                        bufferFlags = bufferFlags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+                    }
+                    info.flags = bufferFlags
                     muxer.writeSampleData(dstTrack, buf, info)
                 }
                 extractor.advance()
             }
+            started = false
+            muxer.stop()
             dstMp4.exists() && dstMp4.length() > 1024L
         } catch (_: Throwable) {
             dstMp4.delete()
             false
         } finally {
             runCatching { extractor.release() }
-            runCatching { if (started) muxer?.stop(); muxer?.release() }
+            runCatching { if (started) muxer?.stop() }
+            runCatching { muxer?.release() }
         }
     }
 }
