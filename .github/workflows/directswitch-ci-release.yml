@@ -30,6 +30,7 @@ jobs:
           DS_KEY_ALIAS: ${{ secrets.DS_KEY_ALIAS }}
           DS_KEY_PASSWORD: ${{ secrets.DS_KEY_PASSWORD }}
         run: |
+          set -o pipefail
           ANDROID_DIR="DirectSwitch-Android"
           if [ -d "DirectSwitch/DirectSwitch-Android" ]; then
             ANDROID_DIR="DirectSwitch/DirectSwitch-Android"
@@ -38,10 +39,19 @@ jobs:
           chmod +x gradlew
           if [ -n "${{ secrets.DS_KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.DS_KEYSTORE_BASE64 }}" | base64 -d > directswitch-release-key.jks
-            DS_STORE_FILE="$PWD/directswitch-release-key.jks" ./gradlew --console=plain testDebugUnitTest assembleRelease
+            DS_STORE_FILE="$PWD/directswitch-release-key.jks" ./gradlew --console=plain testDebugUnitTest assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/android-ci.log"
             rm -f directswitch-release-key.jks
           else
-            ./gradlew --console=plain testDebugUnitTest assembleDebug
+            ./gradlew --console=plain testDebugUnitTest assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/android-ci.log"
+          fi
+
+      - name: Emit Android failure summary
+        if: failure()
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/android-ci.log" ]; then
+            grep -E "(^e: |FAILED|AssertionError|Exception|FAILURE:)" "$GITHUB_WORKSPACE/android-ci.log" | tail -n 15 | while IFS= read -r line; do
+              echo "::error::ANDROID_CI: $line"
+            done
           fi
 
       - name: Upload Android APK Artifact

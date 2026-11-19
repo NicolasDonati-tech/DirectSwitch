@@ -1359,8 +1359,10 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(allCategories.count, 14)
         XCTAssertTrue(allCategories.contains { $0.id == "social_messaging" })
         XCTAssertTrue(allCategories.contains { $0.id == "music_streaming" })
-        XCTAssertTrue(allCategories.contains { $0.id == "games_entertainment" })
-        XCTAssertTrue(allCategories.contains { $0.id == "health_fitness" })
+        XCTAssertTrue(allCategories.contains { $0.id == "games_popular" })
+        XCTAssertTrue(allCategories.contains { $0.id == "health_school" })
+        XCTAssertTrue(allCategories.contains { $0.id == "security_vpn" })
+        XCTAssertTrue(allCategories.contains { $0.id == "crypto_finance" })
 
         var seenBundles: Set<String> = []
         var seenStoreIds: Set<Int> = []
