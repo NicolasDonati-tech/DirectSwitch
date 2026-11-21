@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -261,12 +262,12 @@ fun AppleTopNavigationBar(
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBackIos,
-                        contentDescription = "Indietro",
+                        contentDescription = com.directswitch.android.protocol.DirectSwitchL10n.tr("Indietro"),
                         tint = DirectSwitchTheme.blue,
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "Indietro",
+                        text = com.directswitch.android.protocol.DirectSwitchL10n.tr("Indietro"),
                         fontSize = 16.sp,
                         color = DirectSwitchTheme.blue
                     )
@@ -362,7 +363,7 @@ fun InfoCircleButton(
                         modifier = Modifier.size(24.dp)
                     )
                     Text(
-                        text = title,
+                        text = com.directswitch.android.protocol.DirectSwitchL10n.tr(title),
                         fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.textPrimary
@@ -370,7 +371,7 @@ fun InfoCircleButton(
                 }
 
                 Text(
-                    text = message,
+                    text = com.directswitch.android.protocol.DirectSwitchL10n.tr(message),
                     fontSize = 15.sp,
                     lineHeight = 21.sp,
                     color = DirectSwitchTheme.textSecondary
@@ -390,7 +391,7 @@ fun InfoCircleButton(
                     )
                 ) {
                     Text(
-                        text = "Chiudi",
+                        text = com.directswitch.android.protocol.DirectSwitchL10n.tr("Chiudi"),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -434,12 +435,14 @@ fun DirectSwitchPrimaryButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    isLoading: Boolean = false,
+    loadingText: String? = null,
     containerColor: Color = DirectSwitchTheme.blue,
     icon: ImageVector? = null
 ) {
     Button(
-        onClick = onClick,
-        enabled = enabled,
+        onClick = { if (!isLoading) onClick() },
+        enabled = enabled && !isLoading,
         modifier = modifier
             .fillMaxWidth()
             .height(48.dp),
@@ -447,24 +450,38 @@ fun DirectSwitchPrimaryButton(
         colors = ButtonDefaults.buttonColors(
             containerColor = containerColor,
             contentColor = Color.White,
-            disabledContainerColor = containerColor.copy(alpha = 0.48f),
-            disabledContentColor = Color.White.copy(alpha = 0.9f)
+            disabledContainerColor = if (isLoading) containerColor else containerColor.copy(alpha = 0.44f),
+            disabledContentColor = Color.White
         ),
         contentPadding = PaddingValues(horizontal = 16.dp)
     ) {
-        if (icon != null) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp)
+        if (isLoading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.2.dp,
+                color = Color.White
             )
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = loadingText ?: text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        } else {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text(
+                text = text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
         }
-        Text(
-            text = text,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        )
     }
 }
 

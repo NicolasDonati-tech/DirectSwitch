@@ -228,6 +228,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
     private var manifestItems: [String: ManifestItem] = [:]
     private var completedItemIds: Set<String> = []
     private var skippedItemIds: Set<String> = []
+    private var liveVideoAccountedIds: Set<String> = []
+    private var motionSplitLiveBytesByItemId: [String: Int64] = [:]
     private var pendingLiveVideoTempURLs: [String: URL] = [:]
     private var receiverDestSession: iOSDocumentsSandboxBridge.ReceiverDestinationSession?
     private var senderUploadedIdsBySession: [String: Set<String>] = [:]
@@ -445,6 +447,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
         manifestItems.removeAll()
         completedItemIds.removeAll()
         skippedItemIds.removeAll()
+        liveVideoAccountedIds.removeAll()
+        motionSplitLiveBytesByItemId.removeAll()
         cleanupPendingLiveVideos()
         peerName = ""
         peerPlatform = nil
@@ -1462,6 +1466,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 manifestItems.removeAll()
                 completedItemIds.removeAll()
                 skippedItemIds.removeAll()
+                liveVideoAccountedIds.removeAll()
+                motionSplitLiveBytesByItemId.removeAll()
                 completedItems = 0
                 totalItems = 0
                 transferredBytes = 0
@@ -1633,9 +1639,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             }
 
             let remainingBytesToWrite = acceptedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            let remainingLiveBytesToWrite = acceptedItems.reduce(Int64(0)) { sum, item in
+                guard item.isLivePhoto == true, !liveVideoAccountedIds.contains(item.id) else { return sum }
+                return sum + max(0, item.livePhotoVideoSizeBytes ?? 0)
+            }
+            let totalRemainingBytesToWrite = remainingBytesToWrite + remainingLiveBytesToWrite
             let freeNow = iOSStorageCapacityChecker.freeStorageBytes()
-            if remainingBytesToWrite > max(0, freeNow - 150 * 1024 * 1024) {
-                errorMessage = "Spazio libero insufficiente su questo iPhone per i restanti \(DirectSwitchUIHelpers.formatBytes(remainingBytesToWrite))."
+            if totalRemainingBytesToWrite > max(0, freeNow - 150 * 1024 * 1024) {
+                errorMessage = "Spazio libero insufficiente su questo iPhone per i restanti \(DirectSwitchUIHelpers.formatBytes(totalRemainingBytesToWrite))."
                 sendPlainJson(connection: connection, status: 507, json: #"{"error":"insufficient_storage"}"#)
                 return
             }
@@ -1648,7 +1659,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 previouslyCompletedItems: previouslyCompletedInSession,
                 queuedItemsCount: acceptedItems.count,
                 previouslySentBytes: transferredBytes,
-                remainingEstimatedPrimaryBytes: remainingBytesToWrite
+                remainingEstimatedPrimaryBytes: remainingBytesToWrite,
+                remainingEstimatedLiveBytes: remainingLiveBytesToWrite
             )
             receiverProgressAccounting = acc
             speedMeter = SlidingTransferSpeedMeter()
@@ -1768,20 +1780,32 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 try? FileManager.default.removeItem(at: prev)
             }
             pendingLiveVideoTempURLs[itemId] = tempLivePlainURL
-            transferredBytes += plainBytes
-            receiverProgressAccounting?.recordLiveVideoUploaded(estimatedLiveBytes: 0, actualBytes: plainBytes)
-            transferredBytesCount = receiverProgressAccounting?.transferredBytes ?? transferredBytes
-            if let acc = receiverProgressAccounting {
-                totalBytesCount = acc.totalBytesForProgress
-                etaLabel = etaTracker.update(
-                    progressFraction: acc.progressFraction,
-                    isCompleted: false,
-                    hasTransferableItems: acc.initialTotalItems > 0
-                )
+            let isAndroidMotionSplit = (headers["x-ds-motion-split"] == "1")
+            if isAndroidMotionSplit {
+                // Su Android Motion Photo il file sorgente `item.sizeBytes` include già JPEG + MP4:
+                // accumuliamo questi byte per riconciliarli insieme allo still in `PUT /v1/item/` senza raddoppiare il totale!
+                motionSplitLiveBytesByItemId[itemId] = plainBytes
+                speedMegabytesPerSec = speedMeter.record(bytes: plainBytes)
             } else {
-                totalBytesCount = max(transferredBytes, totalBytesCount + plainBytes)
+                let firstLiveAccount = liveVideoAccountedIds.insert(itemId).inserted
+                let estLiveBytes = firstLiveAccount ? max(0, item.livePhotoVideoSizeBytes ?? 0) : 0
+                receiverProgressAccounting?.recordLiveVideoUploaded(estimatedLiveBytes: estLiveBytes, actualBytes: plainBytes)
+                if let acc = receiverProgressAccounting {
+                    transferredBytes = acc.transferredBytes
+                    transferredBytesCount = acc.transferredBytes
+                    totalBytesCount = acc.totalBytesForProgress
+                    etaLabel = etaTracker.update(
+                        progressFraction: acc.progressFraction,
+                        isCompleted: false,
+                        hasTransferableItems: acc.initialTotalItems > 0
+                    )
+                } else {
+                    transferredBytes += plainBytes
+                    transferredBytesCount = transferredBytes
+                    totalBytesCount = max(transferredBytes, totalBytesCount + plainBytes)
+                }
+                speedMegabytesPerSec = speedMeter.record(bytes: plainBytes)
             }
-            speedMegabytesPerSec = speedMeter.record(bytes: plainBytes)
             sendPlainJson(connection: connection, status: 200, json: #"{"ok":true}"#)
             return
         }
@@ -1844,7 +1868,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 latitude: item.latitude,
                 longitude: item.longitude,
                 isLivePhoto: item.isLivePhoto,
-                livePhotoVideoFileName: item.livePhotoVideoFileName
+                livePhotoVideoFileName: item.livePhotoVideoFileName,
+                livePhotoVideoSizeBytes: item.livePhotoVideoSizeBytes
             )
             let safeExt = URL(fileURLWithPath: effectiveItem.fileName).pathExtension
             let tempPlainURL = FileManager.default.temporaryDirectory
@@ -1916,10 +1941,23 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             completedItemIds.insert(itemId)
             completedItems += 1
             currentItemName = item.fileName
-            transferredBytes += plainBytes
-            receiverProgressAccounting?.recordPrimaryItemUploaded(estimatedPrimaryBytes: item.sizeBytes, actualBytes: plainBytes)
-            transferredBytesCount = receiverProgressAccounting?.transferredBytes ?? transferredBytes
+            let splitLiveBytes = motionSplitLiveBytesByItemId.removeValue(forKey: itemId) ?? 0
+            let effectiveActualBytes = plainBytes + splitLiveBytes
+            if splitLiveBytes == 0,
+               item.isLivePhoto == true,
+               let estLive = item.livePhotoVideoSizeBytes,
+               estLive > 0,
+               liveVideoAccountedIds.insert(itemId).inserted {
+                // La clip Live Photo non è arrivata (es. X-DS-Live-Skipped): detraiamo la stima identicamente al mittente
+                receiverProgressAccounting?.recordLiveVideoSkipped(estimatedLiveBytes: estLive)
+            }
+            receiverProgressAccounting?.recordPrimaryItemUploaded(
+                estimatedPrimaryBytes: item.sizeBytes,
+                actualBytes: effectiveActualBytes
+            )
             if let acc = receiverProgressAccounting {
+                transferredBytes = acc.transferredBytes
+                transferredBytesCount = acc.transferredBytes
                 totalBytesCount = acc.totalBytesForProgress
                 etaLabel = etaTracker.update(
                     progressFraction: acc.progressFraction,
@@ -1927,6 +1965,8 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                     hasTransferableItems: acc.initialTotalItems > 0
                 )
             } else {
+                transferredBytes += effectiveActualBytes
+                transferredBytesCount = transferredBytes
                 totalBytesCount = max(transferredBytesCount, totalBytesCount)
             }
             speedMegabytesPerSec = speedMeter.record(bytes: plainBytes)
@@ -1950,12 +1990,21 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                !completedItemIds.contains(itemId),
                !skippedItemIds.contains(itemId) {
                 skippedItemIds.insert(itemId)
+                motionSplitLiveBytesByItemId.removeValue(forKey: itemId)
                 if let pendingLive = pendingLiveVideoTempURLs.removeValue(forKey: itemId) {
                     try? FileManager.default.removeItem(at: pendingLive)
                 }
-                receiverProgressAccounting?.recordItemFailedOrSkipped(estimatedPrimaryBytes: item.sizeBytes)
+                let estLive = (item.isLivePhoto == true && liveVideoAccountedIds.insert(itemId).inserted)
+                    ? max(0, item.livePhotoVideoSizeBytes ?? 0)
+                    : 0
+                receiverProgressAccounting?.recordItemFailedOrSkipped(
+                    estimatedPrimaryBytes: item.sizeBytes,
+                    estimatedLiveBytes: estLive
+                )
                 failedItemsCount = receiverProgressAccounting?.failedItemsCount ?? (failedItemsCount + 1)
                 if let acc = receiverProgressAccounting {
+                    transferredBytes = acc.transferredBytes
+                    transferredBytesCount = acc.transferredBytes
                     totalBytesCount = acc.totalBytesForProgress
                     etaLabel = etaTracker.update(
                         progressFraction: acc.progressFraction,
@@ -2525,12 +2574,17 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if includeReminders && previouslySentIds.isEmpty { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
 
             let nowCutoff = Date()
-            let contacts = (includeContacts && previouslySentIds.isEmpty) ? iOSContactsSmartMerger.readAllContacts() : []
+            let needContacts = includeContacts && previouslySentIds.isEmpty
+            let contacts: [ContactTransferRecord] = needContacts
+                ? await Task.detached(priority: .userInitiated) { iOSContactsSmartMerger.readAllContacts() }.value
+                : []
             if includeContacts && !isResume {
                 updatePreparationItem(id: "contacts", targetCount: contacts.count, isReady: true)
             }
-            let rawCalendars = (includeCalendars && previouslySentIds.isEmpty)
-                ? iOSCalendarMigrator.readEvents(upToDate: calendarsUpToTodayOnly ? nowCutoff : nil)
+            let needCalendars = includeCalendars && previouslySentIds.isEmpty
+            let calCutoffOpt: Date? = calendarsUpToTodayOnly ? nowCutoff : nil
+            let rawCalendars: [CalendarEventRecord] = needCalendars
+                ? await Task.detached(priority: .userInitiated) { iOSCalendarMigrator.readEvents(upToDate: calCutoffOpt) }.value
                 : []
             let calendars = deltaBaseline.map { CompletedMigrationStore.filterDeltaCalendars(rawCalendars, record: $0) } ?? rawCalendars
             if includeCalendars && !isResume {
@@ -2543,9 +2597,11 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             if includeReminders && !isResume {
                 updatePreparationItem(id: "reminders", targetCount: reminders.count, isReady: true)
             }
+            let allowCloudMedia = mediaFilters.includeICloudOnlyMedia
             let scanResult = await iOSPhotoKitMigrator.scanLibraryAssetsDetailed(
                 includePhotos: includePhotos,
-                includeVideos: includeVideos
+                includeVideos: includeVideos,
+                allowCloudOnly: allowCloudMedia
             )
             let filteredByUserAssets = scanResult.items.filter { entry in
                 if let retrySet = onlyRetryItemIds, !retrySet.isEmpty {
@@ -2577,11 +2633,14 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 updatePreparationItem(id: "videos", targetCount: vCount, isReady: true)
             }
 
-            let collectedDocs = iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
-                explicitPicked: pickedDocuments,
-                includeDocuments: includeDocuments,
-                includeWhatsAppVault: isTargetedRetry ? false : includeWhatsAppVault
-            )
+            let includeWaForDocs = isTargetedRetry ? false : includeWhatsAppVault
+            let collectedDocs = await Task.detached(priority: .userInitiated) {
+                iOSDocumentsSandboxBridge.collectAllVerifiedDocumentsForTransfer(
+                    explicitPicked: pickedDocuments,
+                    includeDocuments: includeDocuments,
+                    includeWhatsAppVault: includeWaForDocs
+                )
+            }.value
             let activeAudioEntries = includeAudio ? pickedAudioFiles : []
             let rawFilteredDocs = (collectedDocs.items + activeAudioEntries).filter { pair in
                 if let retrySet = onlyRetryItemIds, !retrySet.isEmpty {
@@ -2614,11 +2673,9 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             let remainingEstimatedPrimaryInitial = allItems
                 .filter { !currentSentIds.contains($0.id) }
                 .reduce(Int64(0)) { $0 + $1.sizeBytes }
-            let remainingEstimatedLiveInitial: Int64 = qrPayload.receiverPlatform == .IOS
-                ? scannedAssets
-                    .filter { !currentSentIds.contains($0.item.id) }
-                    .reduce(Int64(0)) { $0 + $1.liveVideoBytes }
-                : 0
+            let remainingEstimatedLiveInitial: Int64 = scannedAssets
+                .filter { !currentSentIds.contains($0.item.id) }
+                .reduce(Int64(0)) { $0 + $1.liveVideoBytes }
             let remainingEstimatedBytes = remainingEstimatedPrimaryInitial + remainingEstimatedLiveInitial
 
             let hsReq = HandshakeRequest(
@@ -2901,7 +2958,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                             ? "Invio \(entry.item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
                             : "Scaricamento da iCloud di \(entry.item.fileName) (\(self.completedItems + 1)/\(self.totalItems))..."
                     }
-                    guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(entry.asset) else {
+                    guard let plainTempURL = await iOSPhotoKitMigrator.exportAssetToTempFile(
+                        entry.asset,
+                        allowNetwork: allowCloudMedia || !entry.isLocallyAvailable
+                    ) else {
                         let initialLiveEst = heldLiveEstimate
                         await notifyReceiverSkippedItem(entry.item.id)
                         await MainActor.run {
@@ -2963,7 +3023,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
 
                     if isIosLiveTarget {
                         var recordedLive = false
-                        if let liveTempURL = await iOSPhotoKitMigrator.exportLivePairedVideoToTempFile(entry.asset) {
+                        if let liveTempURL = await iOSPhotoKitMigrator.exportLivePairedVideoToTempFile(
+                            entry.asset,
+                            allowNetwork: allowCloudMedia || !entry.isLocallyAvailable
+                        ) {
                             defer { try? FileManager.default.removeItem(at: liveTempURL) }
                             let currentBaseUrl = await channelCoordinator.snapshotBaseUrl()
                             if let liveSent = try? await Self.encryptAndStreamToEndpoint(

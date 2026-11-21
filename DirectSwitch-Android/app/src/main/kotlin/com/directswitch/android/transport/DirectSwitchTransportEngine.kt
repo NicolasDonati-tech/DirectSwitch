@@ -364,6 +364,7 @@ class DirectSwitchTransferServer(
     private val pendingLiveVideoTempFiles = ConcurrentHashMap<String, File>()
     private val completedIds = ConcurrentHashMap.newKeySet<String>()
     private val skippedIds = ConcurrentHashMap.newKeySet<String>()
+    private val liveVideoAccountedIds = ConcurrentHashMap.newKeySet<String>()
     private val transferredBytesCounter = AtomicLong(0L)
     private val completedFilesCounter = AtomicInteger(0)
     private val healedTimelineCounter = AtomicInteger(0)
@@ -396,6 +397,7 @@ class DirectSwitchTransferServer(
         cleanupPendingLiveVideoFiles()
         completedIds.clear()
         skippedIds.clear()
+        liveVideoAccountedIds.clear()
         docFolderCounts.clear()
         transferredBytesCounter.set(0L)
         completedFilesCounter.set(0)
@@ -791,6 +793,7 @@ class DirectSwitchTransferServer(
                         manifestMap.clear()
                         completedIds.clear()
                         skippedIds.clear()
+                        liveVideoAccountedIds.clear()
                         docFolderCounts.clear()
                         transferredBytesCounter.set(0L)
                         completedFilesCounter.set(0)
@@ -1005,11 +1008,19 @@ class DirectSwitchTransferServer(
                         emptyList()
                     }
                     val remainingBytesToReceive = acceptedItems.sumOf { it.sizeBytes }
+                    val remainingLiveBytesToReceive = acceptedItems.sumOf { item ->
+                        if (item.isLivePhoto == true && item.id !in liveVideoAccountedIds) {
+                            (item.livePhotoVideoSizeBytes ?: 0L).coerceAtLeast(0L)
+                        } else {
+                            0L
+                        }
+                    }
+                    val totalRemainingToReceive = remainingBytesToReceive + remainingLiveBytesToReceive
                     val (freeNow, _) = StorageCapacityChecker.getFreeAndTotalBytes(context)
-                    if (remainingBytesToReceive > 0L &&
-                        remainingBytesToReceive > (freeNow - 150L * 1024L * 1024L).coerceAtLeast(0L)
+                    if (totalRemainingToReceive > 0L &&
+                        totalRemainingToReceive > (freeNow - 150L * 1024L * 1024L).coerceAtLeast(0L)
                     ) {
-                        val neededText = TransferDisplayFormatting.formatBytes(remainingBytesToReceive)
+                        val neededText = TransferDisplayFormatting.formatBytes(totalRemainingToReceive)
                         _progress.value = _progress.value.copy(
                             errorMessage = "Spazio libero insufficiente su questo telefono per i restanti $neededText."
                         )
@@ -1026,7 +1037,8 @@ class DirectSwitchTransferServer(
                             remainingEstimatedBytes = remainingBytesToReceive,
                             previouslyCompletedItems = previouslyCompletedInSession,
                             previouslySentBytes = previouslySentBytes,
-                            previouslyFailedItems = previouslyFailedInSession
+                            previouslyFailedItems = previouslyFailedInSession,
+                            remainingEstimatedLiveBytes = remainingLiveBytesToReceive
                         )
                         rxProgressAccounting = accounting
                         rxSpeedMeter = SlidingTransferSpeedMeter()
@@ -1164,7 +1176,42 @@ class DirectSwitchTransferServer(
                         return
                     }
                     pendingLiveVideoTempFiles.put(itemId, tempLiveFile)?.delete()
-                    transferredBytesCounter.addAndGet(plainBytes)
+                    val (doneBytesNow, totBytesNow, speedMbs, etaLabelStr, pctInt) = synchronized(rxProgressLock) {
+                        val firstLive = liveVideoAccountedIds.add(itemId)
+                        val estLive = if (firstLive) (item.livePhotoVideoSizeBytes ?: 0L).coerceAtLeast(0L) else 0L
+                        rxProgressAccounting?.recordLiveVideoUploaded(estLive, plainBytes)
+                        val acc = rxProgressAccounting
+                        val done = acc?.transferredBytes ?: transferredBytesCounter.addAndGet(plainBytes)
+                        if (acc != null) transferredBytesCounter.set(done)
+                        val tot = acc?.totalBytesForProgress?.coerceAtLeast(done) ?: done
+                        val spd = rxSpeedMeter.record(plainBytes)
+                        val frac = acc?.progressFraction ?: 0f
+                        val eta = rxEtaTracker.update(
+                            progressFraction = frac,
+                            isCompleted = false,
+                            hasTransferableItems = (acc?.initialTotalItems ?: 0) > 0
+                        )
+                        val pct = TransferDisplayFormatting.percentageInt(frac.toDouble(), false)
+                        listOf(done, tot, spd, eta, pct)
+                    }
+                    val liveDoneLong = doneBytesNow as Long
+                    val liveTotLong = totBytesNow as Long
+                    val liveSpd = speedMbs as Double
+                    val liveEta = etaLabelStr as String?
+                    val livePct = pctInt as Int
+                    _progress.value = _progress.value.copy(
+                        transferredBytes = liveDoneLong,
+                        totalBytes = liveTotLong,
+                        speedMegabytesPerSec = liveSpd,
+                        etaLabel = liveEta,
+                        sessionStage = TransferSessionStage.TRANSFERRING
+                    )
+                    DirectSwitchKeepAliveService.updateProgress(
+                        context = context,
+                        percent = livePct,
+                        statusText = "Ricezione: ${TransferDisplayFormatting.formatBytes(liveDoneLong)} / ${TransferDisplayFormatting.formatBytes(liveTotLong)}",
+                        etaSubText = liveEta
+                    )
                     writeJsonResponse(output, 200, """{"ok":true,"bytes":$plainBytes}""")
                 }
 
@@ -1338,12 +1385,18 @@ class DirectSwitchTransferServer(
                             }
 
                             val doneFiles = completedFilesCounter.incrementAndGet()
-                            val doneBytes = transferredBytesCounter.addAndGet(plainBytes)
-                            val (reconciledTotalBytes, speedMbs, etaStr, pctNow) = synchronized(rxProgressLock) {
-                                rxProgressAccounting?.recordUploaded(item.sizeBytes, plainBytes)
-                                val tot = rxProgressAccounting?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: doneBytes
-                                val spd = rxSpeedMeter.record(plainBytes)
+                            val (doneBytesAny, reconciledTotalBytes, speedMbs, etaStr, pctNow) = synchronized(rxProgressLock) {
+                                val estLive = (item.livePhotoVideoSizeBytes ?: 0L).coerceAtLeast(0L)
+                                if (item.isLivePhoto == true && estLive > 0L && liveVideoAccountedIds.add(itemId)) {
+                                    // La clip Live Photo non è arrivata (saltata lato mittente): detraiamo la stima in modo identico
+                                    rxProgressAccounting?.recordLiveVideoSkipped(estLive)
+                                }
+                                rxProgressAccounting?.recordPrimaryItemUploaded(item.sizeBytes, plainBytes)
                                 val acc = rxProgressAccounting
+                                val done = acc?.transferredBytes ?: transferredBytesCounter.addAndGet(plainBytes)
+                                if (acc != null) transferredBytesCounter.set(done)
+                                val tot = acc?.totalBytesForProgress?.coerceAtLeast(done) ?: done
+                                val spd = rxSpeedMeter.record(plainBytes)
                                 val frac = acc?.progressFraction ?: 0f
                                 val eta = rxEtaTracker.update(
                                     progressFraction = frac,
@@ -1351,8 +1404,9 @@ class DirectSwitchTransferServer(
                                     hasTransferableItems = (acc?.initialTotalItems ?: 0) > 0
                                 )
                                 val pct = TransferDisplayFormatting.percentageInt(frac.toDouble(), false)
-                                listOf(tot, spd, eta, pct)
+                                listOf(done, tot, spd, eta, pct)
                             }
+                            val doneBytes = doneBytesAny as Long
                             val totBytesLong = reconciledTotalBytes as Long
                             val speedDouble = speedMbs as Double
                             val etaLabelStr = etaStr as String?
@@ -1407,9 +1461,14 @@ class DirectSwitchTransferServer(
                     val item = manifestMap[itemId]
                     if (item != null && itemId !in completedIds && skippedIds.add(itemId)) {
                         val (reconciledTotal, failedNow, etaStr) = synchronized(rxProgressLock) {
-                            rxProgressAccounting?.recordFailedOrSkipped(item.sizeBytes)
+                            val estLive = if (item.isLivePhoto == true && liveVideoAccountedIds.add(itemId)) {
+                                (item.livePhotoVideoSizeBytes ?: 0L).coerceAtLeast(0L)
+                            } else {
+                                0L
+                            }
+                            rxProgressAccounting?.recordItemFailedOrSkipped(item.sizeBytes, estLive)
                             val acc = rxProgressAccounting
-                            val doneBytes = transferredBytesCounter.get()
+                            val doneBytes = acc?.transferredBytes ?: transferredBytesCounter.get()
                             val tot = acc?.totalBytesForProgress?.coerceAtLeast(doneBytes) ?: _progress.value.totalBytes
                             val failed = acc?.failedItemsCount ?: (_progress.value.failedItemsCount + 1)
                             val eta = rxEtaTracker.update(
@@ -2451,6 +2510,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                     }
 
                                     // 2) Motion Photo (Android) -> Live Photo (iOS): estrae still + clip MP4 e invia /v1/item-live-video/
+                                    var sentMotionSplitLiveBytes = 0L
                                     if (entry.manifestItem.category == TransferCategory.PHOTOS &&
                                         handshakeResp.receiverPlatform == DevicePlatform.IOS
                                     ) {
@@ -2492,6 +2552,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                                     .header("X-DS-Plain-Length", livePlainLen.toString())
                                                     .header("X-DS-Sha256", liveSha)
                                                     .header("X-DS-Live-Ext", "mp4")
+                                                    .header("X-DS-Motion-Split", "1")
                                                     .header("Connection", "close")
                                                     .put(liveBody)
                                                     .build()
@@ -2499,6 +2560,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                                     activeClient.newCall(liveReq).execute().use { it.code }
                                                 }.getOrDefault(-1)
                                                 if (liveCode in 200..299) {
+                                                    sentMotionSplitLiveBytes = livePlainLen
                                                     convertedMotionCounter.incrementAndGet()
                                                 } else {
                                                     // Se il ricevente non supporta /v1/item-live-video, inviamo lo still originale intatto
@@ -2704,10 +2766,11 @@ class DirectSwitchTransferClient(private val context: Context) {
                                     completedItemIdsSet.add(entry.manifestItem.id)
                                     var shouldSaveCheckpoint = false
                                     progressLock.withLock {
-                                        accounting.recordUploaded(entry.manifestItem.sizeBytes, plainLen)
+                                        val effectiveSentBytes = plainLen + sentMotionSplitLiveBytes
+                                        accounting.recordPrimaryItemUploaded(entry.manifestItem.sizeBytes, effectiveSentBytes)
                                         checkpointUploadedBytes = accounting.transferredBytes
                                         checkpointTotalBytes = accounting.totalBytesForProgress
-                                        val speedMbs = speedMeter.record(plainLen)
+                                        val speedMbs = speedMeter.record(effectiveSentBytes)
                                         val frac = accounting.progressFraction
                                         val eta = etaTracker.update(
                                             progressFraction = frac,

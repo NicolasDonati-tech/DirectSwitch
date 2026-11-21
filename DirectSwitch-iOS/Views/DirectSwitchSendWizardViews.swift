@@ -23,93 +23,6 @@ enum iOSDocumentPickerMode: String, Identifiable {
     var id: String { rawValue }
 }
 
-@MainActor
-final class iOSNativeDocumentPickerPresenter: NSObject, UIDocumentPickerDelegate {
-    static let shared = iOSNativeDocumentPickerPresenter()
-
-    private var pendingCallback: (([URL]) -> Void)?
-    private var pendingCancelCallback: (() -> Void)?
-
-    func present(
-        mode: iOSDocumentPickerMode,
-        onPickedURLs: @escaping ([URL]) -> Void,
-        onCancelled: (() -> Void)? = nil
-    ) {
-        guard let topVC = Self.topMostViewController() else {
-            onCancelled?()
-            return
-        }
-        if topVC is UIDocumentPickerViewController {
-            return
-        }
-        if topVC is UIAlertController || topVC.isBeingDismissed || topVC.presentedViewController?.isBeingDismissed == true {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 280_000_000)
-                self.present(mode: mode, onPickedURLs: onPickedURLs, onCancelled: onCancelled)
-            }
-            return
-        }
-        self.pendingCallback = onPickedURLs
-        self.pendingCancelCallback = onCancelled
-
-        let contentTypes: [UTType]
-        let asCopy: Bool
-        switch mode {
-        case .files:
-            contentTypes = [.item]
-            asCopy = false
-        case .audioOrNotes:
-            contentTypes = [.audio, .plainText, .pdf, .item]
-            asCopy = false
-        case .passwordCsv:
-            contentTypes = [.commaSeparatedText, .plainText]
-            asCopy = false
-        case .positions, .folders, .receiverDestinations, .receiverFallbackRoot:
-            contentTypes = [.folder]
-            asCopy = false
-        }
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: asCopy)
-        picker.allowsMultipleSelection = (mode == .files || mode == .audioOrNotes)
-        picker.shouldShowFileExtensions = true
-        picker.delegate = self
-        picker.modalPresentationStyle = .formSheet
-        topVC.present(picker, animated: true)
-    }
-
-    nonisolated func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        let picked = urls
-        Task { @MainActor in
-            let cb = self.pendingCallback
-            self.pendingCallback = nil
-            self.pendingCancelCallback = nil
-            cb?(picked)
-        }
-    }
-
-    nonisolated func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        Task { @MainActor in
-            let cancel = self.pendingCancelCallback
-            self.pendingCallback = nil
-            self.pendingCancelCallback = nil
-            cancel?()
-        }
-    }
-
-    private static func topMostViewController() -> UIViewController? {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
-        guard let root = activeScene?.windows.first(where: { $0.isKeyWindow })?.rootViewController
-            ?? activeScene?.windows.first?.rootViewController else {
-            return nil
-        }
-        var top = root
-        while let presented = top.presentedViewController, !presented.isBeingDismissed {
-            top = presented
-        }
-        return top
-    }
-}
-
 enum SendTargetDestination: Equatable {
     case newIPhone
     case newAndroid
@@ -118,6 +31,7 @@ enum SendTargetDestination: Equatable {
 // MARK: - Passo 1 Mittente: Collega il nuovo iPhone o Passa a Android (tutto dentro DirectSwitch)
 
 struct SendConnectStepView: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
     let targetDestination: SendTargetDestination
     let discoveredBeacons: [DiscoveryBeaconPayload]
     @Binding var selectedBeacon: DiscoveryBeaconPayload?
@@ -138,7 +52,7 @@ struct SendConnectStepView: View {
     @State private var showWifiQrSheet: Bool = false
 
     private var headerTitle: String {
-        "Invia"
+        l10n.tr("Invia")
     }
 
     var body: some View {
@@ -154,7 +68,11 @@ struct SendConnectStepView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "Come inviare i dati",
-                            message: "Sull'altro telefono (iPhone o Android) apri DirectSwitch e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR.\n\nSe il collegamento non parte, assicurati che la voce «Rete locale» sia attiva in Impostazioni → DirectSwitch."
+                            message: l10n.tr(
+                                "Sull'altro telefono (iPhone o Android) apri DirectSwitch e tocca 'Ricevi'. Comparirà qui in automatico: toccalo e inserisci il codice a 6 cifre, oppure inquadra il codice QR.\n\nSe il collegamento non parte, assicurati che la voce «Rete locale» sia attiva in Impostazioni → DirectSwitch.",
+                                en: "On the other phone (iPhone or Android), open DirectSwitch and tap 'Receive'. It will appear here automatically: tap it and enter the 6-digit code, or scan the QR code.\n\nIf connection doesn't start, make sure Local Network is enabled in Settings → DirectSwitch.",
+                                fr: "Sur l'autre téléphone (iPhone ou Android), ouvrez DirectSwitch et touchez « Recevoir ». Il apparaîtra ici automatiquement : touchez-le et saisissez le code à 6 chiffres ou scannez le code QR."
+                            )
                         )
                     }
                 }
@@ -169,12 +87,16 @@ struct SendConnectStepView: View {
                 // Card 1: Rilevamento automatico + Codice a 6 cifre (stile Passa a iOS / Passa a Android, sottotitoli dentro ⓘ)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 6) {
-                        Text("Dispositivi rilevati")
+                        Text(l10n.tr("Dispositivi rilevati"))
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "Rilevamento automatico",
-                            message: "Assicurati che sull'altro telefono sia aperta la schermata 'Ricevi' di DirectSwitch sulla stessa rete Wi-Fi o Hotspot e che «Rete locale» sia attiva."
+                            message: l10n.tr(
+                                "Assicurati che sull'altro telefono sia aperta la schermata 'Ricevi' di DirectSwitch sulla stessa rete Wi-Fi o Hotspot e che «Rete locale» sia attiva.",
+                                en: "Make sure the 'Receive' screen of DirectSwitch is open on the other phone on the same Wi-Fi or Hotspot and Local Network is enabled.",
+                                fr: "Vérifiez que l'écran « Recevoir » est ouvert sur l'autre téléphone sur le même Wi-Fi ou partage de connexion."
+                            )
                         )
                         Spacer()
                         if discoveredBeacons.isEmpty {
@@ -182,7 +104,9 @@ struct SendConnectStepView: View {
                                 .scaleEffect(0.85)
                                 .tint(AppleTheme.blue)
                         } else {
-                            Text(discoveredBeacons.count == 1 ? "1 pronto" : "\(discoveredBeacons.count) pronti")
+                            Text(discoveredBeacons.count == 1
+                                 ? l10n.tr("1 pronto", en: "1 ready", fr: "1 prêt")
+                                 : l10n.tr("\(discoveredBeacons.count) pronti", en: "\(discoveredBeacons.count) ready", fr: "\(discoveredBeacons.count) prêts"))
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(AppleTheme.green)
                                 .padding(.horizontal, 8)
@@ -196,7 +120,7 @@ struct SendConnectStepView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 12) {
                                 AppleSettingsIcon(systemName: "wifi", color: AppleTheme.blue)
-                                Text("Ricerca dell'altro telefono...")
+                                Text(l10n.tr("Ricerca dell'altro telefono..."))
                                     .font(.system(size: 15, weight: .medium))
                                     .foregroundColor(AppleTheme.textPrimary)
                                 Spacer()
@@ -207,7 +131,7 @@ struct SendConnectStepView: View {
                                     HStack(spacing: 6) {
                                         Image(systemName: "gearshape")
                                             .font(.system(size: 12, weight: .semibold))
-                                        Text("Non trova il telefono? Verifica «Rete locale» in Impostazioni")
+                                        Text(l10n.tr("Non trova il telefono? Verifica «Rete locale» in Impostazioni"))
                                             .font(.system(size: 12, weight: .semibold))
                                     }
                                     .foregroundColor(AppleTheme.blue)
@@ -257,12 +181,16 @@ struct SendConnectStepView: View {
 
                         VStack(spacing: 12) {
                             HStack(spacing: 6) {
-                                Text("Codice a 6 cifre")
+                                Text(l10n.tr("Codice a 6 cifre"))
                                     .font(.system(size: 15, weight: .semibold))
                                     .foregroundColor(AppleTheme.textPrimary)
                                 InfoCircleButton(
                                     title: "Codice a 6 cifre",
-                                    message: "Inserisci il codice monouso a 6 cifre mostrato sullo schermo di \(activeBeacon.receiverName)."
+                                    message: l10n.tr(
+                                        "Inserisci il codice monouso a 6 cifre mostrato sullo schermo di \(activeBeacon.receiverName).",
+                                        en: "Enter the one-time 6-digit code shown on \(activeBeacon.receiverName).",
+                                        fr: "Saisissez le code unique à 6 chiffres affiché sur \(activeBeacon.receiverName)."
+                                    )
                                 )
                             }
 
@@ -273,10 +201,12 @@ struct SendConnectStepView: View {
                             }
 
                             ApplePrimaryButton(
-                                title: isPairingBusy ? "Collegamento in corso..." : "Continua",
-                                icon: isPairingBusy ? nil : "arrow.right",
+                                title: l10n.tr("Continua"),
+                                icon: "arrow.right",
                                 color: AppleTheme.blue,
-                                isDisabled: pinInput.filter({ $0.isNumber }).count < 6 || isPairingBusy,
+                                isDisabled: pinInput.filter({ $0.isNumber }).count < 6,
+                                isLoading: isPairingBusy,
+                                loadingTitle: l10n.tr("Collegamento in corso..."),
                                 action: onConfirmPin
                             )
                         }
@@ -301,20 +231,28 @@ struct SendConnectStepView: View {
                 // Card 2: Fotocamera QR (inquadra direttamente il QR del nuovo iPhone o Android)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 6) {
-                        Text("Collega con codice QR")
+                        Text(l10n.tr("Collega con codice QR", en: "Connect via QR code", fr: "Connecter par code QR"))
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
-                            title: "Collegamento tramite codice QR",
+                            title: l10n.tr("Collegamento tramite codice QR", en: "QR Code pairing", fr: "Liaison par code QR"),
                             message: targetDestination == .newAndroid
-                                ? "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo Android (funziona anche in Hotspot 5GHz senza rete Wi-Fi di casa)."
-                                : "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo iPhone."
+                                ? l10n.tr(
+                                    "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo Android (funziona anche in Hotspot 5GHz senza rete Wi-Fi di casa).",
+                                    en: "Scan the QR code shown on the new Android's 'Receive' screen (also works via 5GHz Hotspot without home Wi-Fi).",
+                                    fr: "Scannez le code QR affiché sur l'écran « Recevoir » du nouvel Android (fonctionne aussi en point d'accès 5 GHz)."
+                                )
+                                : l10n.tr(
+                                    "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo iPhone.",
+                                    en: "Scan the QR code shown on the new iPhone's 'Receive' screen.",
+                                    fr: "Scannez le code QR affiché sur l'écran « Recevoir » du nouvel iPhone."
+                                )
                         )
                         Spacer()
                     }
 
                     AppleSecondaryButton(
-                        title: showCameraScanner ? "Chiudi fotocamera" : "Inquadra codice QR",
+                        title: showCameraScanner ? l10n.tr("Chiudi fotocamera") : l10n.tr("Inquadra codice QR"),
                         icon: showCameraScanner ? "xmark" : "camera.viewfinder",
                         tint: AppleTheme.blue
                     ) {
@@ -341,7 +279,7 @@ struct SendConnectStepView: View {
                         }
                     }) {
                         HStack(spacing: 4) {
-                            Text(showManualField ? "Nascondi inserimento manuale" : "Incolla codice di collegamento")
+                            Text(showManualField ? l10n.tr("Nascondi codice manuale") : l10n.tr("Inserisci codice manuale"))
                                 .font(.system(size: 13, weight: .medium))
                             Image(systemName: showManualField ? "chevron.up" : "chevron.down")
                                 .font(.system(size: 11, weight: .semibold))
@@ -354,7 +292,7 @@ struct SendConnectStepView: View {
 
                     if showManualField {
                         HStack(spacing: 8) {
-                            TextField("Incolla qui il codice", text: $manualCodeInput)
+                            TextField(l10n.tr("Incolla il codice completo qui"), text: $manualCodeInput)
                                 .font(.system(size: 14))
                                 .padding(.horizontal, 12)
                                 .frame(height: 42)
@@ -362,7 +300,7 @@ struct SendConnectStepView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                             Button(action: onApplyManualCode) {
-                                Text("Collega")
+                                Text(l10n.tr("Collega", en: "Connect", fr: "Connecter"))
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 14)
@@ -381,15 +319,19 @@ struct SendConnectStepView: View {
                 HStack(spacing: 12) {
                     AppleSettingsIcon(systemName: "wifi.circle.fill", color: AppleTheme.teal)
                     Button(action: { showWifiQrSheet = true }) {
-                        Text("Condividi Wi-Fi al nuovo telefono via QR")
+                        Text(l10n.tr("Condividi Wi-Fi al nuovo telefono via QR", en: "Share Wi-Fi to new phone via QR", fr: "Partager le Wi-Fi au nouveau téléphone via QR"))
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
                     .buttonStyle(.plain)
                     Spacer()
                     InfoCircleButton(
-                        title: "Condividi Wi-Fi senza iCloud",
-                        message: "Se il nuovo iPhone non è ancora collegato al tuo Wi-Fi di casa, genera qui un codice QR Wi-Fi standard: basterà inquadrarlo con l'app Fotocamera del nuovo iPhone per connetterlo in 1 tocco senza digitare la password."
+                        title: l10n.tr("Condividi Wi-Fi senza iCloud", en: "Share Wi-Fi without iCloud", fr: "Partager le Wi-Fi sans iCloud"),
+                        message: l10n.tr(
+                            "Se il nuovo iPhone non è ancora collegato al tuo Wi-Fi di casa, genera qui un codice QR Wi-Fi standard: basterà inquadrarlo con l'app Fotocamera del nuovo iPhone per connetterlo in 1 tocco senza digitare la password.",
+                            en: "If the new phone isn't on your Wi-Fi yet, generate a standard Wi-Fi QR code here: scan it with the new phone's Camera app to connect in 1 tap.",
+                            fr: "Si le nouveau téléphone n'est pas encore sur votre Wi-Fi, générez ici un code QR Wi-Fi à scanner avec son appareil photo."
+                        )
                     )
                 }
                 .appleCard(padding: 13)
@@ -423,6 +365,7 @@ struct SendConnectStepView: View {
 // MARK: - Generatore QR Wi-Fi standard (inquadrabile dalla Fotocamera nativa iOS senza iCloud)
 
 private struct WiFiShareQrSheetView: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var ssid: String = ""
     @State private var password: String = ""
@@ -447,23 +390,23 @@ private struct WiFiShareQrSheetView: View {
     var body: some View {
         VStack(spacing: 16) {
             HStack {
-                Text("QR Wi-Fi Rapido")
+                Text(l10n.tr("QR Wi-Fi Rapido", en: "Quick Wi-Fi QR", fr: "QR Wi-Fi Rapide"))
                     .font(.system(size: 20, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
                 Spacer()
-                Button("Chiudi") { dismiss() }
+                Button(l10n.tr("Chiudi")) { dismiss() }
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(AppleTheme.blue)
             }
             .padding(.top, 6)
 
-            Text("Inserisci il nome della rete Wi-Fi e la password: sul nuovo iPhone apri l'app Fotocamera e inquadra il QR per collegarti subito.")
+            Text(l10n.tr("Inserisci il nome della rete Wi-Fi e la password: sul nuovo iPhone apri l'app Fotocamera e inquadra il QR per collegarti subito.", en: "Enter the Wi-Fi network name and password: on the new phone open Camera and scan the QR to join instantly.", fr: "Saisissez le nom Wi-Fi et le mot de passe : scannez le QR avec l'Appareil photo du nouveau téléphone."))
                 .font(.system(size: 13))
                 .foregroundColor(AppleTheme.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(spacing: 10) {
-                TextField("Nome rete Wi-Fi (SSID)", text: $ssid)
+                TextField(l10n.tr("Nome rete Wi-Fi (SSID)", en: "Wi-Fi network name (SSID)", fr: "Nom du réseau Wi-Fi (SSID)"), text: $ssid)
                     .font(.system(size: 15))
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
@@ -472,7 +415,7 @@ private struct WiFiShareQrSheetView: View {
                     .background(AppleTheme.inputSurface)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                SecureField("Password Wi-Fi", text: $password)
+                SecureField(l10n.tr("Password Wi-Fi", en: "Wi-Fi Password", fr: "Mot de passe Wi-Fi"), text: $password)
                     .font(.system(size: 15))
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
@@ -505,7 +448,7 @@ private struct WiFiShareQrSheetView: View {
                             Image(systemName: "qrcode")
                                 .font(.system(size: 36))
                                 .foregroundColor(AppleTheme.textTertiary)
-                            Text("Digita il nome Wi-Fi")
+                            Text(l10n.tr("Digita il nome Wi-Fi", en: "Type Wi-Fi name", fr: "Saisissez le nom Wi-Fi"))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(AppleTheme.textTertiary)
                         }
@@ -524,6 +467,8 @@ private struct WiFiShareQrSheetView: View {
 // MARK: - Passo 2 Mittente: Scegli cosa copiare (tendine inline stile iPhone, tutto da spuntare)
 
 struct SendCategoriesStepView: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
+
     let pairedPayload: QrPairingPayload
     let scanSummary: iOSLocalDeviceScanSummary?
     let isLocalProUnlocked: Bool
@@ -532,6 +477,7 @@ struct SendCategoriesStepView: View {
     let availablePhotoAlbums: [String]
     let documentPrecheck: iOSDocumentsPrecheckReport?
     var isLoadingPositions: Bool = false
+    var isLaunchingTransfer: Bool = false
 
     let contactsPreload: ContactsPreloadState
     let photosPreload: PhotosPreloadState
@@ -662,7 +608,7 @@ struct SendCategoriesStepView: View {
         ScrollView {
             VStack(spacing: 14) {
                 HStack {
-                    Text("Passo 2 di 3")
+                    Text(l10n.tr("Passo 2 di 3"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(AppleTheme.blue)
                     Spacer()
@@ -680,7 +626,7 @@ struct SendCategoriesStepView: View {
                             includeWhatsApp = target
                         }
                     }) {
-                        Text(allSelected ? "Deseleziona tutto" : "Seleziona tutto")
+                        Text(allSelected ? l10n.tr("Deseleziona tutto") : l10n.tr("Seleziona tutto"))
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -700,21 +646,29 @@ struct SendCategoriesStepView: View {
                                 .foregroundColor(AppleTheme.green)
                         }
 
-                        Text("Collegato a \(pairedPayload.receiverName)")
+                        Text(l10n.tr("Collegato a \(pairedPayload.receiverName)", en: "Connected to \(pairedPayload.receiverName)", fr: "Connecté à \(pairedPayload.receiverName)"))
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
 
                         InfoCircleButton(
                             title: "Stato collegamento",
                             message: !isCrossOs
-                                ? "Collegamento diretto attivo e pronto alla copia speculare dei dati selezionati."
-                                : "Collegamento diretto attivo iPhone ↔ Android per copiare tutto gratuitamente su telefoni già configurati, senza formattare."
+                                ? l10n.tr(
+                                    "Collegamento diretto attivo e pronto alla copia speculare dei dati selezionati.",
+                                    en: "Direct connection active and ready to copy selected data.",
+                                    fr: "Connexion directe active et prête à copier les données sélectionnées."
+                                )
+                                : l10n.tr(
+                                    "Collegamento diretto attivo iPhone ↔ Android per copiare tutto gratuitamente su telefoni già configurati, senza formattare.",
+                                    en: "Direct iPhone ↔ Android connection active to copy everything free onto already set up phones without resetting.",
+                                    fr: "Connexion directe iPhone ↔ Android active pour tout copier gratuitement sans réinitialiser."
+                                )
                         )
 
                         Spacer()
 
                         Button(action: onChangePairedDevice) {
-                            Text("Cambia")
+                            Text(l10n.tr("Cambia"))
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(AppleTheme.blue)
                         }
@@ -724,10 +678,10 @@ struct SendCategoriesStepView: View {
                 .appleCard(padding: 14, selected: true)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Cosa inviare")
+                    Text(l10n.tr("Cosa inviare"))
                         .font(.system(size: 20, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Text("Spunta ogni voce per aprire la configurazione del passaggio al nuovo telefono.")
+                    Text(l10n.tr("Spunta ogni voce per aprire la configurazione del passaggio al nuovo telefono."))
                         .font(.system(size: 12.5))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
@@ -737,10 +691,10 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "person.crop.circle.fill",
                     iconColor: AppleTheme.blue,
-                    title: "Rubrica contatti",
+                    title: l10n.tr("Rubrica contatti"),
                     countBadge: badgeForCount(
                         max(contactsPreload.totalCount, scanSummary?.contactsCount ?? 0),
-                        unit: "contatti"
+                        unit: l10n.tr("contatti", en: "contacts", fr: "contacts")
                     ),
                     infoMessage: "Trasferisce tutti i contatti completi di foto profilo, compleanni, indirizzi di casa/lavoro, azienda, siti web ed etichette dei numeri unendo eventuali duplicati.",
                     isOn: $includeContacts
@@ -752,7 +706,7 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "photo.fill",
                     iconColor: AppleTheme.orange,
-                    title: "Foto, Live Photos e Album",
+                    title: l10n.tr("Foto, Live Photos e Album"),
                     countBadge: badgeForPhotos(
                         count: max(photosPreload.totalCount, scanSummary?.photosCount ?? 0),
                         liveCount: max(photosPreload.livePhotosCount, scanSummary?.livePhotosCount ?? 0),
@@ -768,11 +722,11 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "video.fill",
                     iconColor: AppleTheme.red,
-                    title: "Video originali",
+                    title: l10n.tr("Video originali"),
                     countBadge: badgeForMedia(
                         count: max(videosPreload.totalCount, scanSummary?.videosCount ?? 0),
                         bytes: max(videosPreload.estimatedBytes, scanSummary?.videosBytes ?? 0),
-                        unit: "video"
+                        unit: l10n.tr("video", en: "videos", fr: "vidéos")
                     ),
                     infoMessage: "Copia tutti i video in risoluzione originale (inclusi 4K 60fps e Slow-Motion) in streaming su disco senza compressione.",
                     isOn: $includeVideos
@@ -784,10 +738,10 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "calendar",
                     iconColor: AppleTheme.slate,
-                    title: "Calendari",
+                    title: l10n.tr("Calendari"),
                     countBadge: badgeForCount(
                         calendarsUpToTodayOnly ? calendarsSync.totalUpToTodayCount : max(calendarsSync.totalAllCount, scanSummary?.calendarEventsCount ?? 0),
-                        unit: "eventi"
+                        unit: l10n.tr("eventi", en: "events", fr: "événements")
                     ),
                     infoMessage: "Importa lo storico completo degli appuntamenti (-10/+10 anni) con ricorrenze annuali/settimanali e avvisi oppure fino alla data odierna.",
                     isOn: $includeCalendars
@@ -799,10 +753,10 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "checklist",
                     iconColor: AppleTheme.blue,
-                    title: "Promemoria",
+                    title: l10n.tr("Promemoria"),
                     countBadge: badgeForCount(
                         remindersUpToTodayOnly ? remindersSync.totalUpToTodayCount : max(remindersSync.totalAllCount, scanSummary?.remindersCount ?? 0),
-                        unit: "promemoria"
+                        unit: l10n.tr("promemoria", en: "reminders", fr: "rappels")
                     ),
                     infoMessage: "Trasferisce le tue liste di Promemoria Apple con scadenze, note, priorità e stato di completamento senza usare iCloud.",
                     isOn: $includeReminders
@@ -814,8 +768,10 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "doc.fill",
                     iconColor: AppleTheme.teal,
-                    title: "Documenti e Posizioni File",
-                    countBadge: docsCount > 0 ? "\(max(1, docFoldersCount)) cartelle • \(docsCount) file" : "iCloud Drive, Su iPhone, Chrome",
+                    title: l10n.tr("Documenti e Posizioni File"),
+                    countBadge: docsCount > 0
+                        ? l10n.tr("\(max(1, docFoldersCount)) cartelle • \(docsCount) file", en: "\(max(1, docFoldersCount)) folders • \(docsCount) files", fr: "\(max(1, docFoldersCount)) dossiers • \(docsCount) fichiers")
+                        : "iCloud Drive, Su iPhone, Chrome",
                     infoMessage: "Copia intere posizioni (iCloud Drive, Su iPhone, Chrome o altra posizione aggiunta dall'utente) ricreando identica tutta la gerarchia sul nuovo telefono.",
                     isOn: $includeDocuments
                 ) {
@@ -826,8 +782,10 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "waveform",
                     iconColor: AppleTheme.teal,
-                    title: "Audio, Memo Vocali & Note",
-                    countBadge: pickedAudioFiles.isEmpty ? "Memo vocali, MP3, Note" : "\(pickedAudioFiles.count) file pronti",
+                    title: l10n.tr("Audio, Memo Vocali & Note"),
+                    countBadge: pickedAudioFiles.isEmpty
+                        ? l10n.tr("Memo vocali, MP3, Note")
+                        : l10n.tr("\(pickedAudioFiles.count) file pronti", en: "\(pickedAudioFiles.count) files ready", fr: "\(pickedAudioFiles.count) fichiers prêts"),
                     infoMessage: "Trasferisce registrazioni vocali, file audio (.m4a, .mp3, .wav) e Note esportate (.txt, .pdf) nella cartella dedicata del nuovo telefono.",
                     isOn: $includeAudio
                 ) {
@@ -842,8 +800,8 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "square.grid.2x2.fill",
                     iconColor: AppleTheme.blue,
-                    title: "App scaricate",
-                    countBadge: selectedAppsCount > 0 ? "\(selectedAppsCount) app pronte" : nil,
+                    title: l10n.tr("App scaricate"),
+                    countBadge: selectedAppsCount > 0 ? l10n.tr("\(selectedAppsCount) app pronte", en: "\(selectedAppsCount) apps ready", fr: "\(selectedAppsCount) apps prêtes") : nil,
                     infoMessage: "Rileva automaticamente le app installate su questo iPhone tramite verifica schemi iOS + Album/Foto e permette di aggiungerne altre dalle categorie in stile iPhone.",
                     isOn: $includeApps
                 ) {
@@ -854,8 +812,8 @@ struct SendCategoriesStepView: View {
                 categoryDropdownCard(
                     icon: "bubble.left.and.bubble.right.fill",
                     iconColor: AppleTheme.green,
-                    title: "Chat WhatsApp",
-                    countBadge: "Gratuito • Codice QR",
+                    title: l10n.tr("Chat WhatsApp"),
+                    countBadge: l10n.tr("Gratuito • Codice QR"),
                     infoMessage: isCrossOs
                         ? "Guida gratuita al passaggio delle chat dentro WhatsApp sul nuovo Android tramite una sola scansione QR (senza Android Switch e senza formattare)."
                         : "Apre una schermata dedicata gratuita per trasferire la cronologia chat dentro WhatsApp tramite Codice QR.",
@@ -869,10 +827,14 @@ struct SendCategoriesStepView: View {
                     HStack(spacing: 10) {
                         AppleSettingsIcon(systemName: "clock.arrow.circlepath", color: AppleTheme.teal)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Recupero Delta attivo")
+                            Text(l10n.tr("Recupero Delta attivo"))
                                 .font(.system(size: 14, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
-                            Text("Salta i \(delta.transferredDedupKeys.count) elementi già copiati su \(delta.peerName): trasferisce solo le novità.")
+                            Text(l10n.tr(
+                                "Salta i \(delta.transferredDedupKeys.count) elementi già copiati su \(delta.peerName): trasferisce solo le novità.",
+                                en: "Skips \(delta.transferredDedupKeys.count) items already copied to \(delta.peerName): transfers new items only.",
+                                fr: "Ignore \(delta.transferredDedupKeys.count) éléments déjà copiés vers \(delta.peerName) : copie les nouveautés."
+                            ))
                                 .font(.system(size: 12))
                                 .foregroundColor(AppleTheme.textSecondary)
                         }
@@ -885,10 +847,10 @@ struct SendCategoriesStepView: View {
                 HStack(spacing: 12) {
                     AppleSettingsIcon(systemName: "battery.25", color: AppleTheme.orange)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Triage Batteria Critica")
+                        Text(l10n.tr("Triage Batteria Critica"))
                             .font(.system(size: 14.5, weight: .semibold))
                             .foregroundColor(AppleTheme.textPrimary)
-                        Text("Salva prima Password, Documenti, Audio e Foto Preferite (auto ≤ 15%).")
+                        Text(l10n.tr("Salva prima Password, Documenti, Audio e Foto Preferite (auto ≤ 15%)."))
                             .font(.system(size: 12))
                             .foregroundColor(AppleTheme.textSecondary)
                     }
@@ -901,8 +863,8 @@ struct SendCategoriesStepView: View {
 
                 ApplePrimaryButton(
                     title: isOnlyWhatsAppSelected
-                        ? "Vai al passaggio Chat WhatsApp"
-                        : (activeDeltaBaseline != nil ? "Copia solo le novità (Delta)" : "Copia le voci selezionate"),
+                        ? l10n.tr("Vai al passaggio Chat WhatsApp")
+                        : (activeDeltaBaseline != nil ? l10n.tr("Copia solo le novità (Delta)") : l10n.tr("Copia le voci selezionate")),
                     icon: isOnlyWhatsAppSelected
                         ? "bubble.left.and.bubble.right.fill"
                         : "arrow.right",
@@ -910,6 +872,8 @@ struct SendCategoriesStepView: View {
                         ? AppleTheme.green
                         : AppleTheme.blue,
                     isDisabled: !anySelected,
+                    isLoading: isLaunchingTransfer,
+                    loadingTitle: l10n.tr("Avvio preparazione..."),
                     action: onStartCopy
                 )
                 .padding(.top, 4)
@@ -979,8 +943,8 @@ struct SendCategoriesStepView: View {
                     .foregroundColor(contactsPreload.isLoading ? AppleTheme.blue : AppleTheme.green)
 
                 Text(contactsPreload.isLoading
-                    ? "Precaricamento rubrica: \(loaded) / \(max(loaded, total)) contatti"
-                    : "\(total) contatti totali preparati")
+                    ? l10n.tr("Precaricamento rubrica: \(loaded) / \(max(loaded, total)) contatti", en: "Loading contacts: \(loaded) / \(max(loaded, total))", fr: "Chargement contacts : \(loaded) / \(max(loaded, total))")
+                    : l10n.tr("\(total) contatti idonei al trasferimento", en: "\(total) contacts ready for transfer", fr: "\(total) contacts prêts au transfert"))
                     .font(.system(size: 13.5, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
 
@@ -988,7 +952,7 @@ struct SendCategoriesStepView: View {
 
                 if !contactsPreload.isLoading {
                     Button(action: onPreloadContacts) {
-                        Text("Ricarica")
+                        Text(l10n.tr("Ricarica"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -1004,7 +968,7 @@ struct SendCategoriesStepView: View {
                 .tint(contactsPreload.isLoading ? AppleTheme.blue : AppleTheme.green)
             }
 
-            Text("Include numeri con etichette, foto profilo, email, indirizzi, compleanni ed eventuale unione duplicati.")
+            Text(l10n.tr("Include numeri con etichette, foto profilo, email, indirizzi, compleanni ed eventuale unione duplicati."))
                 .font(.system(size: 12))
                 .foregroundColor(AppleTheme.textSecondary)
         }
@@ -1016,16 +980,16 @@ struct SendCategoriesStepView: View {
     private var photosDropdownContent: some View {
         if scanSummary?.photosDenied == true {
             permissionDeniedInlineView(
-                message: "Permesso Foto disattivato su questo iPhone.",
-                buttonTitle: "Abilita Foto in Impostazioni"
+                message: l10n.tr("Permesso Foto disattivato su questo iPhone.", en: "Photos permission is off on this iPhone.", fr: "L'accès Photos est désactivé sur cet iPhone."),
+                buttonTitle: l10n.tr("Abilita Foto in Impostazioni", en: "Enable Photos in Settings", fr: "Activer Photos dans Réglages")
             )
         } else {
-            let total = max(photosPreload.totalCount, scanSummary?.photosCount ?? 0)
+            let total = photosPreload.isCompleted ? photosPreload.totalCount : max(photosPreload.totalCount, scanSummary?.photosCount ?? 0)
             let loaded = photosPreload.isCompleted ? total : photosPreload.loadedCount
-            let live = max(photosPreload.livePhotosCount, scanSummary?.livePhotosCount ?? 0)
+            let live = photosPreload.isCompleted ? photosPreload.livePhotosCount : max(photosPreload.livePhotosCount, scanSummary?.livePhotosCount ?? 0)
             let albums = max(photosPreload.albumsCount, scanSummary?.photoAlbumsCount ?? 0)
-            let iCloud = max(photosPreload.iCloudCount, scanSummary?.iCloudPhotosCount ?? 0)
-            let bytes = max(photosPreload.estimatedBytes, scanSummary?.photosBytes ?? 0)
+            let iCloud = photosPreload.isCompleted ? photosPreload.iCloudCount : max(photosPreload.iCloudCount, scanSummary?.iCloudPhotosCount ?? 0)
+            let bytes = photosPreload.isCompleted ? photosPreload.estimatedBytes : max(photosPreload.estimatedBytes, scanSummary?.photosBytes ?? 0)
 
             HStack(spacing: 8) {
                 Image(systemName: photosPreload.isLoading ? "photo.stack.fill" : "checkmark.circle.fill")
@@ -1033,8 +997,8 @@ struct SendCategoriesStepView: View {
                     .foregroundColor(photosPreload.isLoading ? AppleTheme.orange : AppleTheme.green)
 
                 Text(photosPreload.isLoading
-                    ? "Precaricamento immagini: \(loaded) / \(max(loaded, total)) foto"
-                    : "\(total) foto totali preparate")
+                    ? l10n.tr("Verifica foto idonee: \(loaded) / \(max(loaded, total))", en: "Checking eligible photos: \(loaded) / \(max(loaded, total))", fr: "Vérification photos prêtes : \(loaded) / \(max(loaded, total))")
+                    : l10n.tr("\(total) foto idonee al trasferimento", en: "\(total) photos eligible for transfer", fr: "\(total) photos prêtes au transfert"))
                     .font(.system(size: 13.5, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
 
@@ -1042,7 +1006,7 @@ struct SendCategoriesStepView: View {
 
                 if !photosPreload.isLoading {
                     Button(action: onPreloadPhotos) {
-                        Text("Ricarica")
+                        Text(l10n.tr("Ricarica"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -1058,14 +1022,28 @@ struct SendCategoriesStepView: View {
                 .tint(photosPreload.isLoading ? AppleTheme.orange : AppleTheme.green)
             }
 
-            Text("\(live) Live Photos • \(albums) album utente • \(bytes > 0 ? DirectSwitchUIHelpers.formatBytes(bytes) : "qualità originale HEIC/RAW")")
+            Text(l10n.tr(
+                "\(live) Live Photos • \(albums) album utente • \(bytes > 0 ? DirectSwitchUIHelpers.formatBytes(bytes) : "qualità originale HEIC/RAW")",
+                en: "\(live) Live Photos • \(albums) user albums • \(bytes > 0 ? DirectSwitchUIHelpers.formatBytes(bytes) : "original HEIC/RAW quality")",
+                fr: "\(live) Live Photos • \(albums) albums • \(bytes > 0 ? DirectSwitchUIHelpers.formatBytes(bytes) : "qualité originale HEIC/RAW")"
+            ))
                 .font(.system(size: 12))
                 .foregroundColor(AppleTheme.textSecondary)
 
             if iCloud > 0 {
-                Text("\(iCloud) foto ottimizzate su iCloud: verranno scaricate automaticamente durante la copia (mantieni attiva Internet su questo iPhone).")
+                Text(mediaFilters.includeICloudOnlyMedia
+                    ? l10n.tr(
+                        "\(iCloud) foto solo su iCloud incluse: verranno scaricate durante la copia (richiede Internet attiva).",
+                        en: "\(iCloud) iCloud-only photos included: will download during transfer (requires Internet).",
+                        fr: "\(iCloud) photos iCloud incluses : téléchargées pendant la copie (Internet requis)."
+                    )
+                    : l10n.tr(
+                        "\(iCloud) foto presenti solo su iCloud (non in locale) escluse automaticamente per evitare file illeggibili.",
+                        en: "\(iCloud) iCloud-only photos (not downloaded locally) automatically excluded to prevent unreadable files.",
+                        fr: "\(iCloud) photos uniquement sur iCloud exclues automatiquement pour éviter les fichiers illisibles."
+                    ))
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundColor(AppleTheme.blue)
+                    .foregroundColor(AppleTheme.textSecondary)
             }
 
             PhotoFilterChipsBar(filters: $mediaFilters, availableAlbums: availablePhotoAlbums)
@@ -1078,14 +1056,14 @@ struct SendCategoriesStepView: View {
     private var videosDropdownContent: some View {
         if scanSummary?.photosDenied == true {
             permissionDeniedInlineView(
-                message: "Permesso Foto e Video disattivato su questo iPhone.",
-                buttonTitle: "Abilita Foto in Impostazioni"
+                message: l10n.tr("Permesso Foto e Video disattivato su questo iPhone.", en: "Photos & Videos permission is off.", fr: "L'accès Photos et Vidéos est désactivé."),
+                buttonTitle: l10n.tr("Abilita Foto in Impostazioni", en: "Enable Photos in Settings", fr: "Activer Photos dans Réglages")
             )
         } else {
-            let total = max(videosPreload.totalCount, scanSummary?.videosCount ?? 0)
+            let total = videosPreload.isCompleted ? videosPreload.totalCount : max(videosPreload.totalCount, scanSummary?.videosCount ?? 0)
             let loaded = videosPreload.isCompleted ? total : videosPreload.loadedCount
-            let iCloud = max(videosPreload.iCloudCount, scanSummary?.iCloudVideosCount ?? 0)
-            let bytes = max(videosPreload.estimatedBytes, scanSummary?.videosBytes ?? 0)
+            let iCloud = videosPreload.isCompleted ? videosPreload.iCloudCount : max(videosPreload.iCloudCount, scanSummary?.iCloudVideosCount ?? 0)
+            let bytes = videosPreload.isCompleted ? videosPreload.estimatedBytes : max(videosPreload.estimatedBytes, scanSummary?.videosBytes ?? 0)
 
             HStack(spacing: 8) {
                 Image(systemName: videosPreload.isLoading ? "video.fill" : "checkmark.circle.fill")
@@ -1093,8 +1071,8 @@ struct SendCategoriesStepView: View {
                     .foregroundColor(videosPreload.isLoading ? AppleTheme.red : AppleTheme.green)
 
                 Text(videosPreload.isLoading
-                    ? "Precaricamento video: \(loaded) / \(max(loaded, total)) video"
-                    : "\(total) video originali preparati")
+                    ? l10n.tr("Verifica video idonei: \(loaded) / \(max(loaded, total))", en: "Checking eligible videos: \(loaded) / \(max(loaded, total))", fr: "Vérification vidéos prêtes : \(loaded) / \(max(loaded, total))")
+                    : l10n.tr("\(total) video idonei al trasferimento", en: "\(total) videos eligible for transfer", fr: "\(total) vidéos prêtes au transfert"))
                     .font(.system(size: 13.5, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
 
@@ -1102,7 +1080,7 @@ struct SendCategoriesStepView: View {
 
                 if !videosPreload.isLoading {
                     Button(action: onPreloadVideos) {
-                        Text("Ricarica")
+                        Text(l10n.tr("Ricarica"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -1118,14 +1096,28 @@ struct SendCategoriesStepView: View {
                 .tint(videosPreload.isLoading ? AppleTheme.red : AppleTheme.green)
             }
 
-            Text("Qualità 4K 60fps e Slow-Motion preservata\(bytes > 0 ? " • \(DirectSwitchUIHelpers.formatBytes(bytes))" : "").")
+            Text(l10n.tr(
+                "Qualità 4K 60fps e Slow-Motion preservata\(bytes > 0 ? " • \(DirectSwitchUIHelpers.formatBytes(bytes))" : "").",
+                en: "4K 60fps & Slow-Motion quality preserved\(bytes > 0 ? " • \(DirectSwitchUIHelpers.formatBytes(bytes))" : "").",
+                fr: "Qualité 4K 60 ips et Ralenti préservée\(bytes > 0 ? " • \(DirectSwitchUIHelpers.formatBytes(bytes))" : "")."
+            ))
                 .font(.system(size: 12))
                 .foregroundColor(AppleTheme.textSecondary)
 
             if iCloud > 0 {
-                Text("\(iCloud) video su iCloud: verranno scaricati automaticamente uno alla volta durante la copia (mantieni attiva Internet su questo iPhone).")
+                Text(mediaFilters.includeICloudOnlyMedia
+                    ? l10n.tr(
+                        "\(iCloud) video su iCloud inclusi: verranno scaricati uno alla volta durante la copia.",
+                        en: "\(iCloud) iCloud-only videos included: will download one at a time during copy.",
+                        fr: "\(iCloud) vidéos iCloud incluses : téléchargées une par une pendant la copie."
+                    )
+                    : l10n.tr(
+                        "\(iCloud) video presenti solo su iCloud (non in locale) esclusi automaticamente.",
+                        en: "\(iCloud) iCloud-only videos (not local) automatically excluded.",
+                        fr: "\(iCloud) vidéos uniquement sur iCloud exclues automatiquement."
+                    ))
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundColor(AppleTheme.blue)
+                    .foregroundColor(AppleTheme.textSecondary)
             }
 
             VideoFilterChipsBar(filters: $mediaFilters)
@@ -1138,8 +1130,8 @@ struct SendCategoriesStepView: View {
     private var calendarsDropdownContent: some View {
         if scanSummary?.calendarsDenied == true {
             permissionDeniedInlineView(
-                message: "Permesso Calendari disattivato su questo iPhone.",
-                buttonTitle: "Abilita Calendari in Impostazioni"
+                message: l10n.tr("Permesso Calendari disattivato su questo iPhone.", en: "Calendars permission is disabled on this iPhone.", fr: "L'autorisation Calendriers est désactivée sur cet iPhone."),
+                buttonTitle: l10n.tr("Abilita Calendari in Impostazioni", en: "Enable Calendars in Settings", fr: "Activer Calendriers dans Réglages")
             )
         } else {
             let activeCount = calendarsUpToTodayOnly
@@ -1157,11 +1149,11 @@ struct SendCategoriesStepView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(calendarsSync.isLoading
-                        ? "Aggiornamento alla data odierna in corso..."
-                        : "Aggiornato al \(formattedSyncTimestamp(calendarsSync.lastUpdatedAt))")
+                        ? l10n.tr("Aggiornamento alla data odierna in corso...", en: "Updating to today's date...", fr: "Mise à jour à la date du jour...")
+                        : l10n.tr("Aggiornato al \(formattedSyncTimestamp(calendarsSync.lastUpdatedAt))", en: "Updated on \(formattedSyncTimestamp(calendarsSync.lastUpdatedAt))", fr: "Mis à jour le \(formattedSyncTimestamp(calendarsSync.lastUpdatedAt))"))
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Text("\(activeCount) eventi pronti al passaggio")
+                    Text(l10n.tr("\(activeCount) eventi pronti al passaggio", en: "\(activeCount) events ready to copy", fr: "\(activeCount) événements prêts à copier"))
                         .font(.system(size: 12))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
@@ -1170,7 +1162,7 @@ struct SendCategoriesStepView: View {
 
                 if !calendarsSync.isLoading {
                     Button(action: onRefreshCalendars) {
-                        Text("Aggiorna")
+                        Text(l10n.tr("Aggiorna"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -1180,10 +1172,10 @@ struct SendCategoriesStepView: View {
 
             Toggle(isOn: $calendarsUpToTodayOnly) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Trasferisci solo fino ad oggi (\(shortTodayLabel))")
+                    Text(l10n.tr("Trasferisci solo fino ad oggi (\(shortTodayLabel))", en: "Transfer only up to today (\(shortTodayLabel))", fr: "Transférer uniquement jusqu'à aujourd'hui (\(shortTodayLabel))"))
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Text("Se spento trasferisce sia storico sia eventi futuri (-10/+10 anni).")
+                    Text(l10n.tr("Se spento trasferisce sia storico sia eventi futuri (-10/+10 anni).", en: "When off, copies both past and future events (-10/+10 years).", fr: "Si désactivé, copie l'historique et les événements futurs (-10/+10 ans)."))
                         .font(.system(size: 11))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
@@ -1198,8 +1190,8 @@ struct SendCategoriesStepView: View {
     private var remindersDropdownContent: some View {
         if scanSummary?.remindersDenied == true {
             permissionDeniedInlineView(
-                message: "Permesso Promemoria disattivato su questo iPhone.",
-                buttonTitle: "Abilita Promemoria in Impostazioni"
+                message: l10n.tr("Permesso Promemoria disattivato su questo iPhone.", en: "Reminders permission is disabled on this iPhone.", fr: "L'autorisation Rappels est désactivée sur cet iPhone."),
+                buttonTitle: l10n.tr("Abilita Promemoria in Impostazioni", en: "Enable Reminders in Settings", fr: "Activer Rappels dans Réglages")
             )
         } else {
             let activeCount = remindersUpToTodayOnly
@@ -1217,11 +1209,11 @@ struct SendCategoriesStepView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(remindersSync.isLoading
-                        ? "Aggiornamento alla data odierna in corso..."
-                        : "Aggiornato al \(formattedSyncTimestamp(remindersSync.lastUpdatedAt))")
+                        ? l10n.tr("Aggiornamento alla data odierna in corso...", en: "Updating to today's date...", fr: "Mise à jour à la date du jour...")
+                        : l10n.tr("Aggiornato al \(formattedSyncTimestamp(remindersSync.lastUpdatedAt))", en: "Updated on \(formattedSyncTimestamp(remindersSync.lastUpdatedAt))", fr: "Mis à jour le \(formattedSyncTimestamp(remindersSync.lastUpdatedAt))"))
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Text("\(activeCount) promemoria pronti al passaggio")
+                    Text(l10n.tr("\(activeCount) promemoria pronti al passaggio", en: "\(activeCount) reminders ready to copy", fr: "\(activeCount) rappels prêts à copier"))
                         .font(.system(size: 12))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
@@ -1230,7 +1222,7 @@ struct SendCategoriesStepView: View {
 
                 if !remindersSync.isLoading {
                     Button(action: onRefreshReminders) {
-                        Text("Aggiorna")
+                        Text(l10n.tr("Aggiorna"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                     }
@@ -1240,10 +1232,10 @@ struct SendCategoriesStepView: View {
 
             Toggle(isOn: $remindersUpToTodayOnly) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Solo scadenze fino ad oggi (\(shortTodayLabel))")
+                    Text(l10n.tr("Solo scadenze fino ad oggi (\(shortTodayLabel))", en: "Only due dates up to today (\(shortTodayLabel))", fr: "Uniquement les échéances jusqu'à aujourd'hui (\(shortTodayLabel))"))
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Text("Se spento trasferisce tutte le liste complete anche con scadenze future.")
+                    Text(l10n.tr("Se spento trasferisce tutte le liste complete anche con scadenze future.", en: "When off, copies all lists including future due dates.", fr: "Si désactivé, copie toutes les listes y compris les échéances futures."))
                         .font(.system(size: 11))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
@@ -1266,14 +1258,18 @@ struct SendCategoriesStepView: View {
 
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Aggiungi e spunta le posizioni")
+                Text(l10n.tr("Aggiungi e spunta le posizioni"))
                     .font(.system(size: 13.5, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
                 Text(isLoadingPositions
-                    ? "Caricamento posizione e cartelle in corso…"
+                    ? l10n.tr("Caricamento posizione e cartelle in corso…")
                     : (docsCount > 0
-                        ? "\(max(1, docFoldersCount)) cartelle preparate • \(docsCount) file • \(DirectSwitchUIHelpers.formatBytes(activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0))"
-                        : "Seleziona iCloud Drive, Su iPhone, Chrome o un'altra posizione"))
+                        ? l10n.tr(
+                            "\(max(1, docFoldersCount)) cartelle • \(docsCount) file idonei al trasferimento • \(DirectSwitchUIHelpers.formatBytes(activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0))",
+                            en: "\(max(1, docFoldersCount)) folders • \(docsCount) eligible files • \(DirectSwitchUIHelpers.formatBytes(activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0))",
+                            fr: "\(max(1, docFoldersCount)) dossiers • \(docsCount) fichiers prêts • \(DirectSwitchUIHelpers.formatBytes(activePrecheck?.totalBytes ?? scanSummary?.documentsBytes ?? 0))"
+                        )
+                        : l10n.tr("Seleziona iCloud Drive, Su iPhone, Chrome o un'altra posizione")))
                     .font(.system(size: 12))
                     .foregroundColor(isLoadingPositions ? AppleTheme.blue : AppleTheme.textSecondary)
             }
@@ -1286,7 +1282,7 @@ struct SendCategoriesStepView: View {
                 Button(action: onRefreshDocumentCheck) {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.clockwise")
-                        Text("Ricontrolla")
+                        Text(l10n.tr("Ricontrolla"))
                     }
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(AppleTheme.blue)
@@ -1295,23 +1291,23 @@ struct SendCategoriesStepView: View {
             }
 
             InfoCircleButton(
-                title: "Posizioni File su iPhone",
-                message: "Scegli direttamente le posizioni intere invece dei singoli file:\n\n• iCloud Drive\n• Su iPhone\n• Chrome (Su iPhone → Chrome)\n• Altra posizione (Google Drive / USB / Cartella)\n\nTocca una posizione non ancora collegata, entra dentro nell'app File e premi «Apri» in alto a destra per preparare tutte le sue cartelle."
+                title: l10n.tr("Posizioni File su iPhone", en: "File Locations on iPhone", fr: "Emplacements de fichiers"),
+                message: l10n.tr(
+                    "Scegli direttamente le posizioni intere invece dei singoli file:\n\n• iCloud Drive\n• Su iPhone\n• Chrome (Su iPhone → Chrome)\n• Altra posizione (Google Drive / USB / Cartella)\n\nTocca una posizione non ancora collegata, entra dentro nell'app File e premi «Apri» in alto a destra per preparare tutte le sue cartelle.",
+                    en: "Pick whole storage locations instead of individual files:\n\n• iCloud Drive\n• On My iPhone\n• Chrome (On My iPhone → Chrome)\n• Other location (Google Drive / USB / Folder)\n\nTap a location below, open it in the Files sheet, and tap 'Open' at the top right.",
+                    fr: "Choisissez des emplacements complets :\n\n• iCloud Drive\n• Sur mon iPhone\n• Chrome\n• Autre emplacement (Drive / USB / Dossier)\n\nTouchez un emplacement ci-dessous, ouvrez-le puis touchez « Ouvrir » en haut à droite."
+                )
             )
         }
 
         if unreadableCount > 0 {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(AppleTheme.orange)
-                    .font(.system(size: 14))
-                Text("\(unreadableCount) file sono solo su iCloud e non scaricati in locale: scaricali in File prima di avviare.")
-                    .font(.system(size: 12))
-                    .foregroundColor(AppleTheme.textPrimary)
-            }
-            .padding(10)
-            .background(AppleTheme.orange.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Text(l10n.tr(
+                "\(unreadableCount) file presenti solo su iCloud (non scaricati) esclusi automaticamente.",
+                en: "\(unreadableCount) iCloud-only files (not downloaded locally) automatically excluded.",
+                fr: "\(unreadableCount) fichiers uniquement sur iCloud exclus automatiquement."
+            ))
+            .font(.system(size: 11.5))
+            .foregroundColor(AppleTheme.textSecondary)
         }
 
         VStack(spacing: 7) {
@@ -1334,7 +1330,7 @@ struct SendCategoriesStepView: View {
         }
 
         AppleSecondaryButton(
-            title: "Aggiungi altra posizione",
+            title: l10n.tr("Aggiungi altra posizione"),
             icon: "externaldrive.fill",
             tint: AppleTheme.blue,
             action: onAddFolders
@@ -1348,7 +1344,7 @@ struct SendCategoriesStepView: View {
         if hasAuthorizedAnyPositions {
             HStack {
                 Spacer()
-                Button("Rimuovi posizioni aggiunte", action: onClearStagedFiles)
+                Button(l10n.tr("Rimuovi posizioni aggiunte"), action: onClearStagedFiles)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(AppleTheme.red)
                     .buttonStyle(.plain)
@@ -1423,17 +1419,17 @@ struct SendCategoriesStepView: View {
                         Text(title)
                             .font(.system(size: 13.5, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
-                        Text("Tocca per aggiungere posizione e preparare tutto")
+                        Text(l10n.tr("Tocca per aggiungere posizione e preparare tutto"))
                             .font(.system(size: 11.5))
                             .foregroundColor(AppleTheme.textSecondary)
                     }
                     Spacer()
-                    Text("Aggiungi")
+                    Text(l10n.tr("Aggiungi"))
                         .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundColor(AppleTheme.textPrimary)
+                        .foregroundColor(AppleTheme.blue)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(AppleTheme.inputSurface)
+                        .background(AppleTheme.blue.opacity(0.12))
                         .clipShape(Capsule())
                 }
                 .padding(.horizontal, 10)
@@ -1452,10 +1448,11 @@ struct SendCategoriesStepView: View {
     private func preparedFoldersSubtitle(for loc: iOSDocumentLocationSummary) -> String {
         let foldersCount = max(loc.folderCount, loc.fileCount > 0 ? 1 : 0)
         let foldersPart = foldersCount == 1
-            ? "1 cartella preparata"
-            : "\(foldersCount) cartelle preparate"
+            ? l10n.tr("1 cartella preparata", en: "1 folder ready", fr: "1 dossier prêt")
+            : l10n.tr("\(foldersCount) cartelle preparate", en: "\(foldersCount) folders ready", fr: "\(foldersCount) dossiers prêts")
         if loc.fileCount > 0 {
-            return "\(foldersPart) • \(loc.fileCount) file • \(DirectSwitchUIHelpers.formatBytes(loc.totalBytes))"
+            let fileLabel = l10n.tr("file", en: "files", fr: "fichiers")
+            return "\(foldersPart) • \(loc.fileCount) \(fileLabel) • \(DirectSwitchUIHelpers.formatBytes(loc.totalBytes))"
         }
         return foldersPart
     }
@@ -1475,18 +1472,18 @@ struct SendCategoriesStepView: View {
                         .foregroundColor(AppleTheme.green)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("App verificate su questo iPhone (\(selectedAppsCount))")
+                    Text(l10n.tr("App verificate su questo iPhone (\(selectedAppsCount))", en: "Verified apps on this iPhone (\(selectedAppsCount))", fr: "Apps vérifiées sur cet iPhone (\(selectedAppsCount))"))
                         .font(.system(size: 14, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
                     Text(photoDetectedAppsCount > 0
-                        ? "\(verifiedLocalAppsCount) schemi iOS + \(photoDetectedAppsCount) da Album/Foto"
-                        : "\(verifiedLocalAppsCount) app rilevate in automatico su iPhone")
+                        ? l10n.tr("\(verifiedLocalAppsCount) schemi iOS + \(photoDetectedAppsCount) da Album/Foto", en: "\(verifiedLocalAppsCount) iOS schemes + \(photoDetectedAppsCount) from Albums/Photos", fr: "\(verifiedLocalAppsCount) schémas iOS + \(photoDetectedAppsCount) depuis Albums/Photos")
+                        : l10n.tr("\(verifiedLocalAppsCount) app rilevate in automatico su iPhone", en: "\(verifiedLocalAppsCount) apps auto-detected on iPhone", fr: "\(verifiedLocalAppsCount) apps détectées automatiquement sur iPhone"))
                         .font(.system(size: 11.5))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
                 Spacer()
                 Button(action: onRescanAutomaticApps) {
-                    Text("Aggiorna")
+                    Text(l10n.tr("Aggiorna"))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(AppleTheme.blue)
                 }
@@ -1500,7 +1497,7 @@ struct SendCategoriesStepView: View {
                         Image(systemName: "photo.on.rectangle.angled")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
-                        Text("Rileva altre app anche da Album e Metadati Foto")
+                        Text(l10n.tr("Rileva altre app anche da Album e Metadati Foto", en: "Detect more apps from Photo Albums & Metadata", fr: "Détecter d'autres apps depuis Albums et Photos"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(AppleTheme.blue)
                         Spacer()
@@ -1517,13 +1514,13 @@ struct SendCategoriesStepView: View {
             }
 
             if isCrossOs {
-                Text("Le app Google di sistema (Gmail, Maps, Chrome, YouTube, Drive) restano escluse perché già su Android.")
+                Text(l10n.tr("Le app Google di sistema (Gmail, Maps, Chrome, YouTube, Drive) restano escluse perché già su Android.", en: "Built-in Google apps (Gmail, Maps, Chrome, YouTube, Drive) are skipped since they're already on Android.", fr: "Les apps Google système (Gmail, Maps, Chrome, YouTube, Drive) sont exclues car déjà sur Android."))
                     .font(.system(size: 11.5))
                     .foregroundColor(AppleTheme.textTertiary)
             }
 
             if let note = appImportStatusNote, !note.isEmpty {
-                Text(note)
+                Text(l10n.tr(note))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(note.hasPrefix("⚠") ? AppleTheme.orange : AppleTheme.green)
             }
@@ -1548,7 +1545,7 @@ struct SendCategoriesStepView: View {
                 }
                 .padding(.top, 2)
             } else {
-                Text("Nessuna app extra rilevata finora in automatico. Scegli dalle categorie qui sotto oppure usa la ricerca.")
+                Text(l10n.tr("Nessuna app extra rilevata finora in automatico. Scegli dalle categorie qui sotto oppure usa la ricerca.", en: "No extra apps auto-detected yet. Pick from categories below or use search.", fr: "Aucune app supplémentaire détectée. Choisissez dans les catégories ci-dessous ou utilisez la recherche."))
                     .font(.system(size: 12))
                     .foregroundColor(AppleTheme.textSecondary)
             }
@@ -1558,7 +1555,7 @@ struct SendCategoriesStepView: View {
                 HStack {
                     Spacer()
                     Button(action: resetAction) {
-                        Text("Ripristina solo rilevate")
+                        Text(l10n.tr("Ripristina solo rilevate", en: "Reset to detected only", fr: "Réinitialiser aux détectées"))
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundColor(AppleTheme.orange)
                     }
@@ -1574,11 +1571,11 @@ struct SendCategoriesStepView: View {
         VStack(alignment: .leading, spacing: 9) {
             let totalCuratedAppsCount = visibleQuickCategories.reduce(0) { $0 + $1.apps.count }
             HStack {
-                Text("Categorie estese stile iPhone")
+                Text(l10n.tr("Categorie estese stile iPhone", en: "Extended App Categories", fr: "Catégories d'apps étendues"))
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(AppleTheme.textPrimary)
                 Spacer()
-                Text("\(visibleQuickCategories.count) cat. • \(totalCuratedAppsCount) app")
+                Text(l10n.tr("\(visibleQuickCategories.count) cat. • \(totalCuratedAppsCount) app", en: "\(visibleQuickCategories.count) cat. • \(totalCuratedAppsCount) apps", fr: "\(visibleQuickCategories.count) cat. • \(totalCuratedAppsCount) apps"))
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(AppleTheme.blue)
             }
@@ -1586,7 +1583,7 @@ struct SendCategoriesStepView: View {
             HStack(spacing: 8) {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .foregroundColor(AppleTheme.textSecondary)
-                TextField("Filtra velocemente tra le \(totalCuratedAppsCount) app del catalogo...", text: $catalogFilterQuery)
+                TextField(l10n.tr("Filtra velocemente tra le \(totalCuratedAppsCount) app del catalogo...", en: "Quickly filter across \(totalCuratedAppsCount) catalog apps...", fr: "Filtrer parmi les \(totalCuratedAppsCount) apps du catalogue..."), text: $catalogFilterQuery)
                     .font(.system(size: 13))
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
@@ -1656,14 +1653,14 @@ struct SendCategoriesStepView: View {
 
         // Blocco 3: Ricerca esatta su App Store (icona + nome, zero "+" blu)
         VStack(alignment: .leading, spacing: 8) {
-            Text("Cerca altre app su App Store")
+            Text(l10n.tr("Cerca altre app su App Store", en: "Search more apps on App Store", fr: "Chercher d'autres apps sur l'App Store"))
                 .font(.system(size: 13.5, weight: .bold))
                 .foregroundColor(AppleTheme.textPrimary)
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(AppleTheme.textSecondary)
-                TextField("Cerca un'app (es. banca, SPID, utility)...", text: $appSearchQuery)
+                TextField(l10n.tr("Cerca un'app (es. banca, SPID, utility)...", en: "Search an app (e.g. bank, transit, utility)...", fr: "Chercher une app (ex. banque, utilitaire)..."), text: $appSearchQuery)
                     .font(.system(size: 13.5))
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
@@ -1681,7 +1678,7 @@ struct SendCategoriesStepView: View {
                     .buttonStyle(.plain)
                 }
                 Button(action: triggerInlineAppStoreSearch) {
-                    Text(isSearchingAppStore ? "..." : "Cerca")
+                    Text(isSearchingAppStore ? "..." : l10n.tr("Cerca", en: "Search", fr: "Chercher"))
                         .font(.system(size: 12.5, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
@@ -1731,7 +1728,7 @@ struct SendCategoriesStepView: View {
                                         Image(systemName: "checkmark")
                                             .font(.system(size: 11, weight: .bold))
                                     }
-                                    Text(alreadyAdded ? "Selezionata" : "Seleziona")
+                                    Text(alreadyAdded ? l10n.tr("Selezionata", en: "Selected", fr: "Sélectionnée") : l10n.tr("Seleziona", en: "Select", fr: "Sélectionner"))
                                         .font(.system(size: 12, weight: .bold))
                                 }
                                 .foregroundColor(alreadyAdded ? AppleTheme.green : AppleTheme.textPrimary)
@@ -1761,13 +1758,13 @@ struct SendCategoriesStepView: View {
             Image(systemName: "qrcode")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(AppleTheme.green)
-            Text("Passaggio guidato gratuito tramite Codice QR")
+            Text(l10n.tr("Passaggio guidato gratuito tramite Codice QR", en: "Free guided transfer via QR Code", fr: "Transfert guidé gratuit par Code QR"))
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(AppleTheme.textPrimary)
         }
         Text(isCrossOs
-            ? "Trasferisce cronologia chat, foto, video e messaggi vocali direttamente dentro WhatsApp verso Android senza resettare il telefono."
-            : "Trasferisce tutta la cronologia chat, allegati e vocali direttamente da iPhone a iPhone dentro WhatsApp senza occupare spazio iCloud.")
+            ? l10n.tr("Trasferisce cronologia chat, foto, video e messaggi vocali direttamente dentro WhatsApp verso Android senza resettare il telefono.", en: "Transfers chat history, photos, videos and voice notes directly inside WhatsApp to Android without resetting your phone.", fr: "Transfère l'historique des chats, photos, vidéos et vocaux dans WhatsApp vers Android sans réinitialiser le téléphone.")
+            : l10n.tr("Trasferisce tutta la cronologia chat, allegati e vocali direttamente da iPhone a iPhone dentro WhatsApp senza occupare spazio iCloud.", en: "Transfers full chat history, attachments and voice notes directly from iPhone to iPhone inside WhatsApp without using iCloud.", fr: "Transfère tout l'historique des chats, pièces jointes et vocaux d'iPhone à iPhone dans WhatsApp sans utiliser iCloud."))
             .font(.system(size: 12))
             .foregroundColor(AppleTheme.textSecondary)
     }
@@ -1824,18 +1821,20 @@ struct SendCategoriesStepView: View {
     private func badgeForPhotos(count: Int?, liveCount: Int?, bytes: Int64?) -> String? {
         guard let c = count, c > 0 else { return nil }
         let livePart = (liveCount ?? 0) > 0 ? " (\(liveCount!) Live)" : ""
+        let unit = l10n.tr("foto", en: "photos", fr: "photos")
         if let b = bytes, b > 0 {
-            return "\(c) foto\(livePart) • \(DirectSwitchUIHelpers.formatBytes(b))"
+            return "\(c) \(unit)\(livePart) • \(DirectSwitchUIHelpers.formatBytes(b))"
         }
-        return "\(c) foto\(livePart)"
+        return "\(c) \(unit)\(livePart)"
     }
 
     private func badgeForMedia(count: Int?, bytes: Int64?, unit: String) -> String? {
         guard let c = count, c > 0 else { return nil }
+        let locUnit = l10n.tr(unit)
         if let b = bytes, b > 0 {
-            return "\(c) \(unit) • \(DirectSwitchUIHelpers.formatBytes(b))"
+            return "\(c) \(locUnit) • \(DirectSwitchUIHelpers.formatBytes(b))"
         }
-        return "\(c) \(unit)"
+        return "\(c) \(locUnit)"
     }
 }
 
@@ -1940,6 +1939,7 @@ struct QrCameraScannerView: UIViewControllerRepresentable {
 // MARK: - Scanner QR dedicato per aprire direttamente «Trasferisci la cronologia chat» di WhatsApp senza passare dalla Fotocamera iOS
 
 struct WhatsAppMigrationQrScannerSheet: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var scannerSessionToken: Int = 0
     @State private var feedbackMessage: String? = nil
@@ -1949,12 +1949,12 @@ struct WhatsAppMigrationQrScannerSheet: View {
             HStack {
                 HStack(spacing: 8) {
                     AppleSettingsIcon(systemName: "qrcode.viewfinder", color: AppleTheme.green)
-                    Text("Inquadra QR di WhatsApp")
+                    Text(l10n.tr("Inquadra QR di WhatsApp", en: "Scan WhatsApp QR", fr: "Scannez le QR WhatsApp"))
                         .font(.system(size: 19, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
                 }
                 Spacer()
-                Button("Chiudi") {
+                Button(l10n.tr("Chiudi")) {
                     dismiss()
                 }
                 .font(.system(size: 15, weight: .semibold))
@@ -1962,7 +1962,7 @@ struct WhatsAppMigrationQrScannerSheet: View {
             }
             .padding(.top, 6)
 
-            Text("Inquadra il codice QR mostrato da WhatsApp sul nuovo telefono: DirectSwitch aprirà direttamente la schermata «Trasferisci la cronologia chat» dentro WhatsApp Personale, saltando la Fotocamera di iPhone e il bottone giallo.")
+            Text(l10n.tr("Inquadra il codice QR mostrato da WhatsApp sul nuovo telefono: DirectSwitch aprirà direttamente la schermata «Trasferisci la cronologia chat» dentro WhatsApp Personale, saltando la Fotocamera di iPhone e il bottone giallo.", en: "Point at the QR code shown by WhatsApp on the new phone: DirectSwitch opens WhatsApp's chat transfer directly.", fr: "Scannez le code QR affiché par WhatsApp sur le nouveau téléphone : DirectSwitch ouvre directement le transfert des discussions."))
                 .font(.system(size: 13))
                 .foregroundColor(AppleTheme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)

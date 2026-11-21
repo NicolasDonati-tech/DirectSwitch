@@ -43,7 +43,7 @@ struct DirectSwitchMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var transport = DirectSwitchTransportViewModel()
     @StateObject private var appInstaller = iOSSequentialAppInstaller()
-    @ObservedObject private var l10n = DirectSwitchLocalizationStore.shared
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
 
     @State private var activeStep: DirectSwitchWizardStep = .home
     @State private var isReceiverMode: Bool = false
@@ -110,6 +110,13 @@ struct DirectSwitchMainView: View {
 
     // File e archivi WhatsApp allegati + pre-controllo posizioni su iPhone
     @State private var isLoadingDocumentPositions: Bool = false
+    @State private var isLaunchingTransfer: Bool = false
+    @State private var showPositionsImporter: Bool = false
+    @State private var showFilesImporter: Bool = false
+    @State private var showAudioNotesImporter: Bool = false
+    @State private var showPasswordCsvImporter: Bool = false
+    @State private var showReceiverDestImporter: Bool = false
+    @State private var showReceiverFallbackImporter: Bool = false
     @State private var pickedDocuments: [(ManifestItem, URL)] = []
     @State private var documentPrecheckReport: iOSDocumentsPrecheckReport? = nil
     @State private var pendingTransferPrecheckAlert: iOSDocumentsPrecheckReport? = nil
@@ -136,7 +143,7 @@ struct DirectSwitchMainView: View {
         case .receiveWaitCode:
             return l10n.text("nav_receive", fallbackItalian: "Ricevi")
         case .receiveConnected:
-            return "Collegato"
+            return l10n.text("nav_connected", fallbackItalian: "Collegato")
         case .sendConnect:
             return l10n.text("nav_connect", fallbackItalian: "Invia")
         case .sendSelectCategories:
@@ -145,10 +152,10 @@ struct DirectSwitchMainView: View {
             return l10n.text("nav_preparing", fallbackItalian: "Preparazione")
         case .transferProgress:
             if isDedicatedWhatsAppScreenActive {
-                return "Chat WhatsApp"
+                return l10n.tr("Chat WhatsApp")
             }
             if isReceiverMode && transport.isCompleted && transport.activeTransferScope.isAppsOnly {
-                return "App pronte"
+                return l10n.text("nav_apps_ready", fallbackItalian: "App pronte")
             }
             return transport.isCompleted
                 ? l10n.text("nav_done", fallbackItalian: "Completato")
@@ -314,6 +321,7 @@ struct DirectSwitchMainView: View {
                                     availablePhotoAlbums: availablePhotoAlbums,
                                     documentPrecheck: documentPrecheckReport,
                                     isLoadingPositions: isLoadingDocumentPositions,
+                                    isLaunchingTransfer: isLaunchingTransfer,
                                     contactsPreload: contactsPreload,
                                     photosPreload: photosPreload,
                                     videosPreload: videosPreload,
@@ -580,20 +588,73 @@ struct DirectSwitchMainView: View {
         .onOpenURL { incomingURL in
             handleIncomingURL(incomingURL)
         }
+        .background {
+            // Selettori File nativi SwiftUI isolati per tipo: elimina completamente il bug UIKit "schermata bianca" su iOS 17/18/26!
+            ZStack {
+                Color.clear.fileImporter(
+                    isPresented: $showPositionsImporter,
+                    allowedContentTypes: [.folder],
+                    allowsMultipleSelection: false
+                ) { result in
+                    handleFileImporterResult(result, mode: .positions)
+                }
+                Color.clear.fileImporter(
+                    isPresented: $showFilesImporter,
+                    allowedContentTypes: [.item],
+                    allowsMultipleSelection: true
+                ) { result in
+                    handleFileImporterResult(result, mode: .files)
+                }
+                Color.clear.fileImporter(
+                    isPresented: $showAudioNotesImporter,
+                    allowedContentTypes: [.audio, .plainText, .pdf, .item],
+                    allowsMultipleSelection: true
+                ) { result in
+                    handleFileImporterResult(result, mode: .audioOrNotes)
+                }
+                Color.clear.fileImporter(
+                    isPresented: $showPasswordCsvImporter,
+                    allowedContentTypes: [.commaSeparatedText, .plainText],
+                    allowsMultipleSelection: false
+                ) { result in
+                    handleFileImporterResult(result, mode: .passwordCsv)
+                }
+                Color.clear.fileImporter(
+                    isPresented: $showReceiverDestImporter,
+                    allowedContentTypes: [.folder],
+                    allowsMultipleSelection: false
+                ) { result in
+                    handleFileImporterResult(result, mode: .receiverDestinations)
+                }
+                Color.clear.fileImporter(
+                    isPresented: $showReceiverFallbackImporter,
+                    allowedContentTypes: [.folder],
+                    allowsMultipleSelection: false
+                ) { result in
+                    handleFileImporterResult(result, mode: .receiverFallbackRoot)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .onChange(of: mediaFilters.includeICloudOnlyMedia) { _ in
+            if includePhotos { enqueuePreloadPhotos() }
+            if includeVideos { enqueuePreloadVideos() }
+            refreshAuthorizedSummary()
+        }
         .alert(
-            "Controllo posizioni sul telefono",
+            l10n.tr("Controllo posizioni sul telefono"),
             isPresented: Binding(
                 get: { pendingTransferPrecheckAlert != nil },
                 set: { if !$0 { pendingTransferPrecheckAlert = nil } }
             ),
             presenting: pendingTransferPrecheckAlert
         ) { report in
-            Button("Seleziona posizione") {
+            Button(l10n.tr("Seleziona posizione")) {
                 pendingTransferPrecheckAlert = nil
                 presentDocumentPicker(mode: .positions)
             }
             if report.totalFiles > 0 {
-                Button("Continua comunque") {
+                Button(l10n.tr("Continua comunque")) {
                     let paired = pairedTargetPayload
                     pendingTransferPrecheckAlert = nil
                     if let paired {
@@ -601,7 +662,7 @@ struct DirectSwitchMainView: View {
                     }
                 }
             } else if includeContacts || includePhotos || includeVideos || includeCalendars || includeReminders || includeAudio || includeApps || includeWhatsApp {
-                Button("Invia escludendo Documenti") {
+                Button(l10n.tr("Invia escludendo Documenti")) {
                     includeDocuments = false
                     let paired = pairedTargetPayload
                     pendingTransferPrecheckAlert = nil
@@ -610,7 +671,7 @@ struct DirectSwitchMainView: View {
                     }
                 }
             }
-            Button("Annulla", role: .cancel) {
+            Button(l10n.tr("Annulla"), role: .cancel) {
                 pendingTransferPrecheckAlert = nil
             }
         } message: { report in
@@ -701,151 +762,221 @@ struct DirectSwitchMainView: View {
     }
 
     private func presentDocumentPicker(mode: iOSDocumentPickerMode) {
-        iOSNativeDocumentPickerPresenter.shared.present(
-            mode: mode,
-            onPickedURLs: { urls in
-                guard !urls.isEmpty else { return }
-                switch mode {
-                case .receiverDestinations:
-                    Task {
-                        let summary = await Task.detached(priority: .userInitiated) {
-                            _ = iOSDocumentsSandboxBridge.authorizeReceiverDestinationBookmarks(urls)
-                            return iOSDocumentsSandboxBridge.receiverDestinationsSummary()
-                        }.value
-                        receiverAuthorizedDestinations = summary.destinations
-                        receiverFallbackRootLabel = summary.fallbackRoot
-                    }
-                case .receiverFallbackRoot:
-                    Task {
-                        let summary = await Task.detached(priority: .userInitiated) {
-                            _ = iOSDocumentsSandboxBridge.setReceiverFallbackRootBookmark(urls)
-                            return iOSDocumentsSandboxBridge.receiverDestinationsSummary()
-                        }.value
-                        receiverAuthorizedDestinations = summary.destinations
-                        receiverFallbackRootLabel = summary.fallbackRoot
-                    }
-                case .positions, .folders:
-                    isLoadingDocumentPositions = true
-                    let currentStaged = pickedDocuments.map(\.0)
-                    let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
-                    Task {
-                        let (summary, precheck) = await Task.detached(priority: .userInitiated) {
-                            _ = iOSDocumentsSandboxBridge.authorizePositionBookmarks(urls)
-                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
-                                stagedItems: currentStaged,
-                                includePairedLiveVideoBytes: includeLiveBytes
-                            )
-                            let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
-                                stagedItems: currentStaged,
-                                includeWhatsAppVault: false
-                            )
-                            return (sum, pre)
-                        }.value
-                        scanSummary = summary
-                        documentPrecheckReport = precheck
-                        isLoadingDocumentPositions = false
-                        if let lastAdded = precheck.locationSummaries.last {
-                            sharedVaultToast = "Posizione «\(lastAdded.locationName)» caricata (\(lastAdded.fileCount) file)"
-                        }
-                    }
-                case .files:
-                    isLoadingDocumentPositions = true
-                    let existingStaged = pickedDocuments.map(\.0)
-                    let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
-                    Task {
-                        let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
-                            let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
-                            let allStaged = existingStaged + imp.map(\.0)
-                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
-                                stagedItems: allStaged,
-                                includePairedLiveVideoBytes: includeLiveBytes
-                            )
-                            let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
-                                stagedItems: allStaged,
-                                includeWhatsAppVault: false
-                            )
-                            return (imp, sum, pre)
-                        }.value
-                        pickedDocuments.append(contentsOf: imported)
-                        scanSummary = summary
-                        documentPrecheckReport = precheck
-                        isLoadingDocumentPositions = false
-                    }
-                case .audioOrNotes:
-                    Task {
-                        let imported = await Task.detached(priority: .userInitiated) {
-                            iOSAudioAndCallLogMigrator.importPickedAudioOrNoteURLs(urls)
-                        }.value
-                        if !imported.isEmpty {
-                            pickedAudioFiles.append(contentsOf: imported)
-                            includeAudio = true
-                            sharedVaultToast = "\(imported.count) file audio/note pronti per la copia"
-                        }
-                    }
-                case .passwordCsv:
-                    isLoadingDocumentPositions = true
-                    let existingStaged = pickedDocuments.map(\.0)
-                    let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
-                    Task {
-                        let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
-                            let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
-                            let allStaged = existingStaged + imp.map(\.0)
-                            let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
-                                stagedItems: allStaged,
-                                includePairedLiveVideoBytes: includeLiveBytes
-                            )
-                            let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
-                                stagedItems: allStaged,
-                                includeWhatsAppVault: false
-                            )
-                            return (imp, sum, pre)
-                        }.value
-                        if !imported.isEmpty {
-                            pickedDocuments.append(contentsOf: imported)
-                            includeDocuments = true
-                            sharedVaultToast = "CSV Password pronto (verrà sovrascritto a zeri a fine trasferimento)"
-                        }
-                        scanSummary = summary
-                        documentPrecheckReport = precheck
-                        isLoadingDocumentPositions = false
-                    }
+        // Resetta eventuali flag stale prima di presentare il selettore nativo SwiftUI `.fileImporter`
+        showPositionsImporter = false
+        showFilesImporter = false
+        showAudioNotesImporter = false
+        showPasswordCsvImporter = false
+        showReceiverDestImporter = false
+        showReceiverFallbackImporter = false
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            switch mode {
+            case .positions, .folders:
+                self.showPositionsImporter = true
+            case .files:
+                self.showFilesImporter = true
+            case .audioOrNotes:
+                self.showAudioNotesImporter = true
+            case .passwordCsv:
+                self.showPasswordCsvImporter = true
+            case .receiverDestinations:
+                self.showReceiverDestImporter = true
+            case .receiverFallbackRoot:
+                self.showReceiverFallbackImporter = true
+            }
+        }
+    }
+
+    private func handleFileImporterResult(_ result: Result<[URL], Error>, mode: iOSDocumentPickerMode) {
+        switch result {
+        case .success(let urls):
+            handlePickedDocumentURLs(urls, mode: mode)
+        case .failure:
+            isLoadingDocumentPositions = false
+        }
+    }
+
+    private func handlePickedDocumentURLs(_ urls: [URL], mode: iOSDocumentPickerMode) {
+        guard !urls.isEmpty else { return }
+        let allowCloud = mediaFilters.includeICloudOnlyMedia
+        switch mode {
+        case .receiverDestinations:
+            Task {
+                let summary = await Task.detached(priority: .userInitiated) {
+                    _ = iOSDocumentsSandboxBridge.authorizeReceiverDestinationBookmarks(urls)
+                    return iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+                }.value
+                receiverAuthorizedDestinations = summary.destinations
+                receiverFallbackRootLabel = summary.fallbackRoot
+            }
+        case .receiverFallbackRoot:
+            Task {
+                let summary = await Task.detached(priority: .userInitiated) {
+                    _ = iOSDocumentsSandboxBridge.setReceiverFallbackRootBookmark(urls)
+                    return iOSDocumentsSandboxBridge.receiverDestinationsSummary()
+                }.value
+                receiverAuthorizedDestinations = summary.destinations
+                receiverFallbackRootLabel = summary.fallbackRoot
+            }
+        case .positions, .folders:
+            isLoadingDocumentPositions = true
+            let currentStaged = pickedDocuments.map(\.0)
+            Task {
+                let (summary, precheck) = await Task.detached(priority: .userInitiated) {
+                    _ = iOSDocumentsSandboxBridge.authorizePositionBookmarks(urls)
+                    let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                        stagedItems: currentStaged,
+                        includePairedLiveVideoBytes: true,
+                        allowCloudOnly: allowCloud
+                    )
+                    let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                        stagedItems: currentStaged,
+                        includeWhatsAppVault: false
+                    )
+                    return (sum, pre)
+                }.value
+                scanSummary = summary
+                documentPrecheckReport = precheck
+                isLoadingDocumentPositions = false
+                if let lastAdded = precheck.locationSummaries.last {
+                    sharedVaultToast = l10n.tr(
+                        "Posizione «\(lastAdded.locationName)» caricata (\(lastAdded.fileCount) file idonei)",
+                        en: "Location \"\(lastAdded.locationName)\" ready (\(lastAdded.fileCount) eligible files)",
+                        fr: "Emplacement « \(lastAdded.locationName) » prêt (\(lastAdded.fileCount) fichiers prêts)"
+                    )
                 }
             }
-        )
+        case .files:
+            isLoadingDocumentPositions = true
+            let existingStaged = pickedDocuments.map(\.0)
+            Task {
+                let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
+                    let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
+                    let allStaged = existingStaged + imp.map(\.0)
+                    let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                        stagedItems: allStaged,
+                        includePairedLiveVideoBytes: true,
+                        allowCloudOnly: allowCloud
+                    )
+                    let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                        stagedItems: allStaged,
+                        includeWhatsAppVault: false
+                    )
+                    return (imp, sum, pre)
+                }.value
+                pickedDocuments.append(contentsOf: imported)
+                scanSummary = summary
+                documentPrecheckReport = precheck
+                isLoadingDocumentPositions = false
+            }
+        case .audioOrNotes:
+            Task {
+                let imported = await Task.detached(priority: .userInitiated) {
+                    iOSAudioAndCallLogMigrator.importPickedAudioOrNoteURLs(urls)
+                }.value
+                if !imported.isEmpty {
+                    pickedAudioFiles.append(contentsOf: imported)
+                    includeAudio = true
+                    sharedVaultToast = l10n.tr(
+                        "\(imported.count) file audio/note pronti per la copia",
+                        en: "\(imported.count) audio/note files ready to copy",
+                        fr: "\(imported.count) fichiers audio/notes prêts à copier"
+                    )
+                }
+            }
+        case .passwordCsv:
+            isLoadingDocumentPositions = true
+            let existingStaged = pickedDocuments.map(\.0)
+            Task {
+                let (imported, summary, precheck) = await Task.detached(priority: .userInitiated) {
+                    let imp = iOSDocumentsSandboxBridge.importPickedDocumentURLs(urls)
+                    let allStaged = existingStaged + imp.map(\.0)
+                    let sum = iOSDeviceDataAnalyzer.scanAuthorizedSummary(
+                        stagedItems: allStaged,
+                        includePairedLiveVideoBytes: true,
+                        allowCloudOnly: allowCloud
+                    )
+                    let pre = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                        stagedItems: allStaged,
+                        includeWhatsAppVault: false
+                    )
+                    return (imp, sum, pre)
+                }.value
+                if !imported.isEmpty {
+                    pickedDocuments.append(contentsOf: imported)
+                    includeDocuments = true
+                    sharedVaultToast = l10n.tr(
+                        "CSV Password pronto (verrà sovrascritto a zeri a fine trasferimento)",
+                        en: "Password CSV ready (securely zero-wiped after transfer)",
+                        fr: "CSV Mots de passe prêt (effacé par écrasement après le transfert)"
+                    )
+                }
+                scanSummary = summary
+                documentPrecheckReport = precheck
+                isLoadingDocumentPositions = false
+            }
+        }
     }
 
     private func precheckAlertMessage(for report: iOSDocumentsPrecheckReport) -> String {
         let selectedCount = report.locationSummaries.filter(\.isSelected).count
         if !report.locationSummaries.isEmpty && selectedCount == 0 {
-            return "Nessuna posizione è selezionata con la spunta. Seleziona almeno una posizione da trasferire nell'elenco oppure aggiungine un'altra."
+            return l10n.tr(
+                "Nessuna posizione è selezionata con la spunta. Seleziona almeno una posizione da trasferire nell'elenco oppure aggiungine un'altra.",
+                en: "No location is checked. Select at least one location in the list or add another one.",
+                fr: "Aucun emplacement n'est coché. Sélectionnez-en au moins un ou ajoutez-en un autre."
+            )
         }
         if report.totalFiles == 0 && report.unreadableFilesCount == 0 {
-            return "Nessun file trovato nelle posizioni selezionate. Tocca «Seleziona posizione», entra nella posizione da trasferire (es. Su iPhone o iCloud Drive) e premi «Apri» in alto a destra."
+            return l10n.tr(
+                "Nessun file idoneo trovato nelle posizioni selezionate. Tocca «Seleziona posizione», entra nella posizione da trasferire (es. Su iPhone o iCloud Drive) e premi «Apri» in alto a destra.",
+                en: "No eligible files found in selected locations. Tap 'Select location', open the folder (e.g. On My iPhone or iCloud Drive) and tap 'Open' at the top right.",
+                fr: "Aucun fichier prêt dans les emplacements sélectionnés. Touchez « Sélectionner un emplacement », ouvrez le dossier et touchez « Ouvrir » en haut à droite."
+            )
         }
         if report.totalFiles == 0 && report.unreadableFilesCount > 0 {
-            return "Trovati \(report.unreadableFilesCount) file non ancora scaricati o non leggibili (es. su iCloud Drive). Scaricali nell'app File prima di copiare la posizione."
+            return l10n.tr(
+                "Trovati \(report.unreadableFilesCount) file solo su iCloud e non scaricati localmente. Scaricali nell'app File prima di copiarli.",
+                en: "Found \(report.unreadableFilesCount) iCloud-only files not downloaded locally. Download them in the Files app first.",
+                fr: "\(report.unreadableFilesCount) fichiers uniquement sur iCloud non téléchargés. Téléchargez-les d'abord dans Fichiers."
+            )
         }
-        if report.unreadableFilesCount > 0 {
-            return "Pronti \(report.totalFiles) file in \(max(1, selectedCount)) posizioni selezionate (\(report.folderSummaries.count) cartelle), ma \(report.unreadableFilesCount) file risultano illeggibili o solo su iCloud e verrebbero saltati."
-        }
-        return "Controllo completato: \(max(1, selectedCount)) posizioni selezionate (\(report.totalFiles) file in \(report.folderSummaries.count) cartelle) pronte."
+        return l10n.tr(
+            "Controllo completato: \(report.totalFiles) file idonei al trasferimento in \(max(1, selectedCount)) posizioni selezionate.",
+            en: "Check complete: \(report.totalFiles) eligible files ready in \(max(1, selectedCount)) selected locations.",
+            fr: "Vérification terminée : \(report.totalFiles) fichiers prêts dans \(max(1, selectedCount)) emplacements."
+        )
     }
 
     private func launchSenderTransfer() {
-        guard let paired = pairedTargetPayload else { return }
+        guard let paired = pairedTargetPayload, !isLaunchingTransfer else { return }
         if includeDocuments {
+            isLaunchingTransfer = true
             let staged = pickedDocuments.map(\.0)
-            let precheck = iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
-                stagedItems: staged,
-                includeWhatsAppVault: false
-            )
-            documentPrecheckReport = precheck
-            if precheck.totalFiles == 0 || precheck.unreadableFilesCount > 0 {
-                pendingTransferPrecheckAlert = precheck
-                return
+            Task {
+                let precheck = await Task.detached(priority: .userInitiated) {
+                    iOSDocumentsSandboxBridge.inspectPreTransferDocuments(
+                        stagedItems: staged,
+                        includeWhatsAppVault: false
+                    )
+                }.value
+                documentPrecheckReport = precheck
+                isLaunchingTransfer = false
+                // Blocca con avviso SOLO se non ci sono file idonei trasferibili (i file solo-iCloud vengono già esclusi a priori)
+                if precheck.totalFiles == 0 {
+                    pendingTransferPrecheckAlert = precheck
+                    return
+                }
+                launchSenderTransferWithPayload(paired, isResume: false)
             }
+            return
         }
-        launchSenderTransferWithPayload(paired, isResume: false)
+        isLaunchingTransfer = true
+        DispatchQueue.main.async {
+            self.launchSenderTransferWithPayload(paired, isResume: false)
+            self.isLaunchingTransfer = false
+        }
     }
 
     private func resumeSavedCheckpoint(_ checkpoint: TransferCheckpointRecord) {
@@ -1043,15 +1174,16 @@ struct DirectSwitchMainView: View {
     private func enqueuePreloadPhotos() {
         photosPreload.isLoading = true
         photosPreload.isCompleted = false
+        let allowCloud = mediaFilters.includeICloudOnlyMedia
         categoryTaskQueue.enqueue {
             photosPreload.isLoading = true
             photosPreload.isCompleted = false
             _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
             refreshAuthorizedSummary()
-            let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
             let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(
                 for: .image,
-                includePairedLiveVideoBytes: includeLiveBytes
+                includePairedLiveVideoBytes: true,
+                allowCloudOnly: allowCloud
             ) { loaded, tot, live, albums, iCloudCount, bytes in
                 Task { @MainActor in
                     guard photosPreload.isLoading else { return }
@@ -1090,12 +1222,17 @@ struct DirectSwitchMainView: View {
     private func enqueuePreloadVideos() {
         videosPreload.isLoading = true
         videosPreload.isCompleted = false
+        let allowCloud = mediaFilters.includeICloudOnlyMedia
         categoryTaskQueue.enqueue {
             videosPreload.isLoading = true
             videosPreload.isCompleted = false
             _ = await iOSPhotoKitMigrator.requestAccessIfNeeded()
             refreshAuthorizedSummary()
-            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(for: .video) { loaded, tot, _, _, iCloudCount, bytes in
+            let res = await iOSPhotoKitMigrator.preloadMediaStatsWithProgress(
+                for: .video,
+                includePairedLiveVideoBytes: false,
+                allowCloudOnly: allowCloud
+            ) { loaded, tot, _, _, iCloudCount, bytes in
                 Task { @MainActor in
                     guard videosPreload.isLoading else { return }
                     videosPreload = VideosPreloadState(
@@ -1156,13 +1293,14 @@ struct DirectSwitchMainView: View {
             )
             let staged = pickedDocuments.map(\.0)
             let remCount = allList.count
-            let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
+            let allowCloud = mediaFilters.includeICloudOnlyMedia
             let (summary, precheck) = await Task.detached(priority: .utility) {
                 (
                     iOSDeviceDataAnalyzer.scanAuthorizedSummary(
                         stagedItems: staged,
                         knownRemindersCount: remCount,
-                        includePairedLiveVideoBytes: includeLiveBytes
+                        includePairedLiveVideoBytes: true,
+                        allowCloudOnly: allowCloud
                     ),
                     iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
                 )
@@ -1318,13 +1456,14 @@ struct DirectSwitchMainView: View {
 
     private func refreshAuthorizedSummary() {
         let staged = pickedDocuments.map(\.0)
-        let includeLiveBytes = pairedTargetPayload?.receiverPlatform == .IOS
+        let allowCloud = mediaFilters.includeICloudOnlyMedia
         Task {
             let (summary, precheck) = await Task.detached(priority: .utility) {
                 (
                     iOSDeviceDataAnalyzer.scanAuthorizedSummary(
                         stagedItems: staged,
-                        includePairedLiveVideoBytes: includeLiveBytes
+                        includePairedLiveVideoBytes: true,
+                        allowCloudOnly: allowCloud
                     ),
                     iOSDocumentsSandboxBridge.inspectPreTransferDocuments(stagedItems: staged, includeWhatsAppVault: false)
                 )
@@ -1405,6 +1544,7 @@ struct DirectSwitchMainView: View {
 // MARK: - Schermata Home pulita (solo Invia sopra e Ricevi sotto, sottotitoli dentro ⓘ)
 
 private struct DirectSwitchHomeView: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
     let resumableCheckpoint: TransferCheckpointRecord?
     var onResumeCheckpoint: (TransferCheckpointRecord) -> Void
     var onDismissCheckpoint: () -> Void
@@ -1460,7 +1600,7 @@ private struct DirectSwitchHomeView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
                         AppleSettingsIcon(systemName: "arrow.right", color: AppleTheme.blue)
-                        Text("Invia")
+                        Text(l10n.tr("Invia"))
                             .font(.system(size: 19, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
                         Spacer()
@@ -1471,7 +1611,7 @@ private struct DirectSwitchHomeView: View {
                     }
 
                     ApplePrimaryButton(
-                        title: "Invia",
+                        title: l10n.tr("Invia"),
                         icon: "arrow.right",
                         color: AppleTheme.blue,
                         action: onStartSendToIPhone
@@ -1483,7 +1623,7 @@ private struct DirectSwitchHomeView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
                         AppleSettingsIcon(systemName: "arrow.left", color: AppleTheme.teal)
-                        Text("Ricevi")
+                        Text(l10n.tr("Ricevi"))
                             .font(.system(size: 19, weight: .bold))
                             .foregroundColor(AppleTheme.textPrimary)
                         Spacer()
@@ -1494,7 +1634,7 @@ private struct DirectSwitchHomeView: View {
                     }
 
                     ApplePrimaryButton(
-                        title: "Ricevi",
+                        title: l10n.tr("Ricevi"),
                         icon: "arrow.left",
                         color: AppleTheme.teal,
                         action: onStartReceive
@@ -1513,6 +1653,7 @@ private struct DirectSwitchHomeView: View {
 private struct DirectSwitchTransferProgressView: View {
     @ObservedObject var transport: DirectSwitchTransportViewModel
     @ObservedObject var appInstaller: iOSSequentialAppInstaller
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
     let isReceiverMode: Bool
     let isProUnlocked: Bool
     let canSendAnotherCategory: Bool
@@ -1595,11 +1736,12 @@ private struct DirectSwitchTransferProgressView: View {
     }
 
     private func formattedCountWithAlreadyPresent(imported: Int, alreadyPresent: Int) -> String {
+        let alreadyWord = l10n.tr("già presenti", en: "already present", fr: "déjà présents")
         if imported == 0 && alreadyPresent > 0 {
-            return "0 (\(alreadyPresent) già presenti)"
+            return "0 (\(alreadyPresent) \(alreadyWord))"
         }
         if alreadyPresent > 0 {
-            return "\(imported) (+\(alreadyPresent) già presenti)"
+            return "\(imported) (+\(alreadyPresent) \(alreadyWord))"
         }
         return "\(imported)"
     }
@@ -1763,7 +1905,7 @@ private struct DirectSwitchTransferProgressView: View {
         guard !isReceiverAppsOnlyPhase, !isReceiverAppsPhase, !transport.isCompleted else {
             return nil
         }
-        return transport.etaLabel
+        return l10n.translateEta(transport.etaLabel)
     }
 
     var body: some View {
@@ -2103,13 +2245,17 @@ private struct DirectSwitchTransferProgressView: View {
                             }
                             .padding(.top, 14)
 
-                            Text("Trasferimento completato")
+                            Text(l10n.tr("Trasferimento completato"))
                                 .font(.system(size: 24, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
 
                             Text(isReceiverMode
-                                 ? "Le voci selezionate sono pronte su questo iPhone"
-                                 : "Le voci selezionate sono state copiate su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)")
+                                 ? l10n.tr("Le voci selezionate sono pronte su questo iPhone")
+                                 : l10n.tr(
+                                     "Le voci selezionate sono state copiate su \(transport.peerName.isEmpty ? "il nuovo telefono" : transport.peerName)",
+                                     en: "Selected items were copied to \(transport.peerName.isEmpty ? "the new phone" : transport.peerName)",
+                                     fr: "Les éléments sélectionnés ont été copiés sur \(transport.peerName.isEmpty ? "le nouveau téléphone" : transport.peerName)"
+                                 ))
                                 .font(.system(size: 14))
                                 .foregroundColor(AppleTheme.textSecondary)
                                 .multilineTextAlignment(.center)
@@ -2120,20 +2266,20 @@ private struct DirectSwitchTransferProgressView: View {
                             .padding(.top, 14)
 
                         if transport.errorMessage != nil {
-                            Text("Trasferimento in pausa (\(percentageInt)%)")
+                            Text(l10n.tr("Trasferimento in pausa (\(percentageInt)%)", en: "Transfer paused (\(percentageInt)%)", fr: "Transfert en pause (\(percentageInt)%)"))
                                 .font(.system(size: 23, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
 
-                            Text("I file già copiati sono al sicuro e non verranno duplicati")
+                            Text(l10n.tr("I file già copiati sono al sicuro e non verranno duplicati"))
                                 .font(.system(size: 14))
                                 .foregroundColor(AppleTheme.textSecondary)
                                 .multilineTextAlignment(.center)
                         } else {
-                            Text(isReceiverMode ? "Copia su questo iPhone..." : "Copia delle voci selezionate...")
+                            Text(isReceiverMode ? l10n.tr("Copia su questo iPhone...") : l10n.tr("Copia delle voci selezionate..."))
                                 .font(.system(size: 23, weight: .bold))
                                 .foregroundColor(AppleTheme.textPrimary)
 
-                            Text("Tieni entrambi i telefoni vicini fino al termine")
+                            Text(l10n.tr("Tieni entrambi i telefoni vicini fino al termine"))
                                 .font(.system(size: 14))
                                 .foregroundColor(AppleTheme.textSecondary)
                                 .multilineTextAlignment(.center)
@@ -2419,7 +2565,8 @@ private struct DirectSwitchTransferProgressView: View {
                         items: MigrationReceiptBuilder.defaultChecklist(
                             hasWhatsApp: scope.whatsApp || transport.pendingNativeWhatsAppMigration,
                             hasApps: scope.apps,
-                            hasSkipped: !transport.skippedItems.isEmpty || transport.failedItemsCount > 0
+                            hasSkipped: !transport.skippedItems.isEmpty || transport.failedItemsCount > 0,
+                            languageCode: l10n.effectiveCode
                         ),
                         receiptText: MigrationReceiptBuilder.buildReceiptText(
                             peerName: transport.peerName,
@@ -2433,20 +2580,21 @@ private struct DirectSwitchTransferProgressView: View {
                             importedSms: transport.importedSms,
                             importedCallLogs: transport.importedCallLogs,
                             appsCount: isReceiverMode ? transport.receivedInstalledApps.count : transport.sentInstalledAppsCount,
-                            skippedCount: max(transport.skippedItems.count, transport.failedItemsCount)
+                            skippedCount: max(transport.skippedItems.count, transport.failedItemsCount),
+                            languageCode: l10n.effectiveCode
                         )
                     )
 
                     if canSendAnotherCategory {
                         AppleSecondaryButton(
-                            title: "Trasferisci un'altra voce a questo telefono",
+                            title: l10n.tr("Trasferisci un'altra voce a questo telefono"),
                             icon: "arrow.uturn.backward.circle.fill",
                             tint: AppleTheme.blue,
                             action: onTransferAnotherCategory
                         )
                     }
                     ApplePrimaryButton(
-                        title: "Fine",
+                        title: l10n.tr("Fine"),
                         icon: "checkmark",
                         color: AppleTheme.blue,
                         action: onFinish
@@ -2454,14 +2602,14 @@ private struct DirectSwitchTransferProgressView: View {
                 } else if transport.errorMessage != nil {
                     if canSendAnotherCategory {
                         AppleSecondaryButton(
-                            title: "Torna alla scelta delle voci",
+                            title: l10n.tr("Torna alla scelta delle voci"),
                             icon: "arrow.uturn.backward",
                             tint: AppleTheme.blue,
                             action: onTransferAnotherCategory
                         )
                     }
                     AppleSecondaryButton(
-                        title: "Torna alla Home",
+                        title: l10n.tr("Torna alla Home"),
                         icon: "house",
                         tint: AppleTheme.slate,
                         action: onFinish
@@ -2546,7 +2694,7 @@ private struct DirectSwitchTransferProgressView: View {
     private func summaryRow(icon: String, color: Color, title: String, value: String) -> some View {
         HStack(spacing: 12) {
             AppleSettingsIcon(systemName: icon, color: color)
-            Text(title)
+            Text(l10n.tr(title))
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(AppleTheme.textPrimary)
             Spacer()

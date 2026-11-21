@@ -284,7 +284,8 @@ enum iOSDeviceDataAnalyzer {
     static func scanAuthorizedSummary(
         stagedItems: [ManifestItem] = [],
         knownRemindersCount: Int = 0,
-        includePairedLiveVideoBytes: Bool = false
+        includePairedLiveVideoBytes: Bool = true,
+        allowCloudOnly: Bool = false
     ) -> iOSLocalDeviceScanSummary {
         let (freeBytes, totalBytes) = iOSStorageCapacityChecker.freeAndTotalStorageBytes()
         let rawContactsStatus = CNContactStore.authorizationStatus(for: .contacts)
@@ -321,22 +322,31 @@ enum iOSDeviceDataAnalyzer {
             let fetched = PHAsset.fetchAssets(with: nil)
             fetched.enumerateObjects { asset, _, _ in
                 if asset.mediaType == .image {
-                    photosCount += 1
-                    if asset.mediaSubtypes.contains(.photoLive) {
-                        livePhotosCount += 1
-                    }
                     let measured = iOSPhotoKitMigrator.measureAssetBytes(
                         asset,
-                        includePairedLiveVideoBytes: includePairedLiveVideoBytes
+                        includePairedLiveVideoBytes: includePairedLiveVideoBytes,
+                        allowCloudOnly: allowCloudOnly
                     )
-                    photosBytes += measured.bytes
+                    if measured.isEligible {
+                        photosCount += 1
+                        if measured.hasEligibleLiveVideo {
+                            livePhotosCount += 1
+                        }
+                        photosBytes += measured.bytes
+                    }
                     if !measured.isLocallyAvailable {
                         iCloudPhotosCount += 1
                     }
                 } else if asset.mediaType == .video {
-                    videosCount += 1
-                    let measured = iOSPhotoKitMigrator.measureAssetBytes(asset, includePairedLiveVideoBytes: false)
-                    videosBytes += measured.bytes
+                    let measured = iOSPhotoKitMigrator.measureAssetBytes(
+                        asset,
+                        includePairedLiveVideoBytes: false,
+                        allowCloudOnly: allowCloudOnly
+                    )
+                    if measured.isEligible {
+                        videosCount += 1
+                        videosBytes += measured.bytes
+                    }
                     if !measured.isLocallyAvailable {
                         iCloudVideosCount += 1
                     }
@@ -869,29 +879,127 @@ enum iOSPhotoKitMigrator {
         return await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
-    /// Misura i byte reali (`fileSize` di `PHAssetResource`) e la disponibilità locale dell'asset senza mai usare stime arbitrarie.
-    static func measureAssetBytes(
-        _ asset: PHAsset,
-        includePairedLiveVideoBytes: Bool = false
-    ) -> (bytes: Int64, isLocallyAvailable: Bool) {
-        guard let primary = primaryMediaResource(for: asset) else {
-            return (0, true)
+    private static func resourceFileSize(_ resource: PHAssetResource) -> Int64? {
+        if let v = resource.value(forKey: "fileSize") as? Int64 {
+            return v
         }
-        let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
-        let primarySize = (primary.value(forKey: "fileSize") as? Int64) ?? 1_048_576
-        let liveSize: Int64
-        if includePairedLiveVideoBytes, asset.mediaType == .image, let paired = pairedLiveVideoResource(for: asset) {
-            liveSize = max(0, (paired.value(forKey: "fileSize") as? Int64) ?? 0)
-        } else {
-            liveSize = 0
+        if let n = resource.value(forKey: "fileSize") as? NSNumber {
+            return n.int64Value
         }
-        return (max(0, primarySize) + liveSize, isLocal)
+        return nil
     }
 
-    /// Precaricamento progressivo di foto/Live Photos/album o video leggendo il peso reale `PHAssetResource` sul Rullino iOS.
+    private static func resourceIsLocallyAvailable(_ resource: PHAssetResource) -> Bool {
+        if let b = resource.value(forKey: "locallyAvailable") as? Bool {
+            return b
+        }
+        if let n = resource.value(forKey: "locallyAvailable") as? NSNumber {
+            return n.boolValue
+        }
+        return true
+    }
+
+    /// Individua la migliore risorsa principale realmente leggibile e trasferibile di un `PHAsset`:
+    /// - Preferisce sempre una risorsa disponibile in locale (`locallyAvailable == true`) con `fileSize > 0`,
+    ///   evitando fallimenti su foto modificate la cui versione `.fullSizePhoto` è solo su iCloud mentre `.photo` è locale.
+    /// - Quando `allowCloudOnly == false` (predefinito), esclude a priori gli asset non scaricati localmente
+    ///   così la selezione mostra solo i file realmente idonei al trasferimento (zero sorprese di file illeggibili).
+    static func bestTransferablePrimaryResource(
+        for asset: PHAsset,
+        allowCloudOnly: Bool = false
+    ) -> (resource: PHAssetResource, isLocallyAvailable: Bool, fileSize: Int64)? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard !resources.isEmpty else { return nil }
+
+        let orderedCandidates: [PHAssetResource]
+        if asset.mediaType == .video {
+            let fullVid = resources.filter { $0.type == .fullSizeVideo }
+            let origVid = resources.filter { $0.type == .video }
+            let otherVid = resources.filter {
+                $0.type != .fullSizeVideo && $0.type != .video && $0.type != .adjustmentData
+            }
+            orderedCandidates = fullVid + origVid + otherVid
+        } else {
+            let fullPhoto = resources.filter { $0.type == .fullSizePhoto }
+            let origPhoto = resources.filter { $0.type == .photo }
+            let altPhoto = resources.filter { $0.type == .alternatePhoto }
+            let otherPhoto = resources.filter {
+                $0.type != .fullSizePhoto && $0.type != .photo && $0.type != .alternatePhoto &&
+                $0.type != .adjustmentData && $0.type != .pairedVideo && $0.type != .fullSizePairedVideo
+            }
+            orderedCandidates = fullPhoto + origPhoto + altPhoto + otherPhoto
+        }
+
+        // 1. Prima scelta: risorsa realmente disponibile in locale con dimensione valida (> 0)
+        for res in orderedCandidates {
+            let isLocal = resourceIsLocallyAvailable(res)
+            guard isLocal else { continue }
+            let rawSize = resourceFileSize(res)
+            if let s = rawSize, s <= 0 { continue }
+            return (res, true, max(1, rawSize ?? 1_048_576))
+        }
+
+        // 2. Solo se l'utente ha esplicitamente abilitato gli elementi su iCloud (ed evitando album condivisi non scaricati)
+        guard allowCloudOnly, asset.sourceType != .typeCloudShared else {
+            return nil
+        }
+        for res in orderedCandidates {
+            let rawSize = resourceFileSize(res)
+            if let s = rawSize, s <= 0 { continue }
+            return (res, false, max(1, rawSize ?? 1_048_576))
+        }
+        return nil
+    }
+
+    /// Individua la clip `.MOV` accoppiata di una Live Photo solo se effettivamente trasferibile.
+    static func bestTransferablePairedLiveResource(
+        for asset: PHAsset,
+        allowCloudOnly: Bool = false
+    ) -> (resource: PHAssetResource, fileSize: Int64)? {
+        guard asset.mediaType == .image, asset.mediaSubtypes.contains(.photoLive) else {
+            return nil
+        }
+        let resources = PHAssetResource.assetResources(for: asset)
+        let candidates = resources.filter { $0.type == .fullSizePairedVideo } + resources.filter { $0.type == .pairedVideo }
+        for res in candidates {
+            let isLocal = resourceIsLocallyAvailable(res)
+            let rawSize = resourceFileSize(res) ?? 0
+            if isLocal && rawSize > 0 {
+                return (res, rawSize)
+            }
+        }
+        guard allowCloudOnly else { return nil }
+        for res in candidates {
+            let rawSize = resourceFileSize(res) ?? 0
+            if rawSize > 0 {
+                return (res, rawSize)
+            }
+        }
+        return nil
+    }
+
+    /// Misura i byte reali (`fileSize` di `PHAssetResource`) e l'idoneità effettiva al trasferimento.
+    static func measureAssetBytes(
+        _ asset: PHAsset,
+        includePairedLiveVideoBytes: Bool = true,
+        allowCloudOnly: Bool = false
+    ) -> (bytes: Int64, isLocallyAvailable: Bool, isEligible: Bool, hasEligibleLiveVideo: Bool) {
+        if let localOrEligible = bestTransferablePrimaryResource(for: asset, allowCloudOnly: allowCloudOnly) {
+            let livePair: (resource: PHAssetResource, fileSize: Int64)? = (includePairedLiveVideoBytes && asset.mediaType == .image)
+                ? bestTransferablePairedLiveResource(for: asset, allowCloudOnly: allowCloudOnly)
+                : nil
+            let liveSize = livePair?.fileSize ?? 0
+            return (localOrEligible.fileSize + liveSize, localOrEligible.isLocallyAvailable, true, livePair != nil)
+        }
+        let hasCloudCandidate = bestTransferablePrimaryResource(for: asset, allowCloudOnly: true) != nil
+        return (0, !hasCloudCandidate, false, false)
+    }
+
+    /// Precaricamento progressivo dei soli media realmente idonei al trasferimento (leggendo `PHAssetResource` reale).
     static func preloadMediaStatsWithProgress(
         for mediaType: PHAssetMediaType,
-        includePairedLiveVideoBytes: Bool = false,
+        includePairedLiveVideoBytes: Bool = true,
+        allowCloudOnly: Bool = false,
         onProgress: @Sendable @escaping (_ loaded: Int, _ total: Int, _ liveCount: Int, _ albumsCount: Int, _ iCloudCount: Int, _ estimatedBytes: Int64) -> Void
     ) async -> (total: Int, liveCount: Int, albumsCount: Int, iCloudCount: Int, estimatedBytes: Int64) {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -904,36 +1012,41 @@ enum iOSPhotoKitMigrator {
                 ? PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil).count
                 : 0
             let fetched = PHAsset.fetchAssets(with: mediaType, options: nil)
-            let total = fetched.count
-            guard total > 0 else {
+            let rawTotal = fetched.count
+            guard rawTotal > 0 else {
                 onProgress(0, 0, 0, albumsCount, 0, 0)
                 return (0, 0, albumsCount, 0, 0)
             }
-            onProgress(0, total, 0, albumsCount, 0, 0)
-            let step = max(1, total / 24)
-            var loaded = 0
+            onProgress(0, rawTotal, 0, albumsCount, 0, 0)
+            let step = max(1, rawTotal / 24)
+            var scanned = 0
+            var eligibleCount = 0
             var liveCount = 0
             var iCloudCount = 0
             var bytes: Int64 = 0
             fetched.enumerateObjects { asset, _, _ in
-                loaded += 1
-                if mediaType == .image && asset.mediaSubtypes.contains(.photoLive) {
-                    liveCount += 1
-                }
+                scanned += 1
                 let measured = measureAssetBytes(
                     asset,
-                    includePairedLiveVideoBytes: mediaType == .image && includePairedLiveVideoBytes
+                    includePairedLiveVideoBytes: mediaType == .image && includePairedLiveVideoBytes,
+                    allowCloudOnly: allowCloudOnly
                 )
-                bytes += measured.bytes
+                if measured.isEligible {
+                    eligibleCount += 1
+                    if measured.hasEligibleLiveVideo {
+                        liveCount += 1
+                    }
+                    bytes += measured.bytes
+                }
                 if !measured.isLocallyAvailable {
                     iCloudCount += 1
                 }
-                if loaded % step == 0 || loaded == total {
-                    onProgress(loaded, total, liveCount, albumsCount, iCloudCount, bytes)
+                if scanned % step == 0 || scanned == rawTotal {
+                    onProgress(eligibleCount, max(eligibleCount, rawTotal - (allowCloudOnly ? 0 : iCloudCount)), liveCount, albumsCount, iCloudCount, bytes)
                 }
             }
-            onProgress(total, total, liveCount, albumsCount, iCloudCount, bytes)
-            return (total, liveCount, albumsCount, iCloudCount, bytes)
+            onProgress(eligibleCount, eligibleCount, liveCount, albumsCount, iCloudCount, bytes)
+            return (eligibleCount, liveCount, albumsCount, iCloudCount, bytes)
         }.value
     }
     static func mimeTypeForFileName(_ fileName: String, isVideo: Bool) -> String {
@@ -1249,76 +1362,86 @@ enum iOSPhotoKitMigrator {
         let isLocallyAvailable: Bool
     }
 
-    /// Scansiona Foto, Live Photos e Video del Rullino iOS preservando Album utente, Preferiti (❤️), coordinate GPS
-    /// e usando un ID deterministico basato su `localIdentifier`. Ordina prima gli asset locali e in coda gli eventuali
-    /// elementi solo su iCloud così i trasferimenti non subiscono rallentamenti iniziali.
+    /// Scansiona Foto, Live Photos e Video del Rullino iOS fuori dal Main Thread preservando Album utente, Preferiti (❤️),
+    /// coordinate GPS e dimensione reale della clip Live Photo (`livePhotoVideoSizeBytes`) per parità 1:1 tra mittente e ricevente.
+    /// Quando `allowCloudOnly == false` (predefinito), include SOLO elementi verificati localmente idonei al trasferimento.
     static func scanLibraryAssetsDetailed(
         includePhotos: Bool,
-        includeVideos: Bool
+        includeVideos: Bool,
+        allowCloudOnly: Bool = false
     ) async -> (items: [ScannedLibraryAssetEntry], iCloudOptimizedCount: Int) {
         guard includePhotos || includeVideos else { return ([], 0) }
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else { return ([], 0) }
 
-        let albumMap = buildAssetAlbumMap()
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        let fetched = PHAsset.fetchAssets(with: opts)
-        var localEntries: [ScannedLibraryAssetEntry] = []
-        var cloudEntries: [ScannedLibraryAssetEntry] = []
-        var cloudOptimized = 0
+        return await Task.detached(priority: .userInitiated) {
+            let albumMap = buildAssetAlbumMap()
+            let opts = PHFetchOptions()
+            opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            let fetched = PHAsset.fetchAssets(with: opts)
+            var localEntries: [ScannedLibraryAssetEntry] = []
+            var cloudEntries: [ScannedLibraryAssetEntry] = []
+            var cloudOptimized = 0
 
-        fetched.enumerateObjects { asset, idx, _ in
-            let isVideo = asset.mediaType == .video
-            let isPhoto = asset.mediaType == .image
-            if (isVideo && !includeVideos) || (isPhoto && !includePhotos) || (!isVideo && !isPhoto) {
-                return
+            fetched.enumerateObjects { asset, idx, _ in
+                let isVideo = asset.mediaType == .video
+                let isPhoto = asset.mediaType == .image
+                if (isVideo && !includeVideos) || (isPhoto && !includePhotos) || (!isVideo && !isPhoto) {
+                    return
+                }
+                guard let chosen = bestTransferablePrimaryResource(for: asset, allowCloudOnly: allowCloudOnly) else {
+                    if bestTransferablePrimaryResource(for: asset, allowCloudOnly: true) != nil {
+                        cloudOptimized += 1
+                    }
+                    return
+                }
+                let primary = chosen.resource
+                let isLocal = chosen.isLocallyAvailable
+                if !isLocal {
+                    cloudOptimized += 1
+                }
+                let pairedLive = isPhoto ? bestTransferablePairedLiveResource(for: asset, allowCloudOnly: allowCloudOnly) : nil
+                let liveSize = pairedLive?.fileSize ?? 0
+                let size = chosen.fileSize
+                let createdMs = Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000.0)
+                let fileName = primary.originalFilename.isEmpty ? "media_\(idx).\(isVideo ? "mov" : "jpg")" : primary.originalFilename
+                let albumName = albumMap[asset.localIdentifier] ?? "iPhone_Camera"
+                let cat: TransferCategory = isVideo ? .VIDEOS : .PHOTOS
+                let stableId = stableManifestItemId(
+                    localIdentifier: asset.localIdentifier,
+                    category: cat,
+                    fallbackIndex: idx
+                )
+                let item = ManifestItem(
+                    id: stableId,
+                    category: cat,
+                    fileName: fileName,
+                    relativeAlbumOrFolder: albumName,
+                    sizeBytes: size,
+                    capturedEpochMillis: createdMs,
+                    dedupKey: "\(fileName.lowercased())_\(size)_\(createdMs)",
+                    mimeType: mimeTypeForFileName(fileName, isVideo: isVideo),
+                    isFavorite: asset.isFavorite ? true : nil,
+                    latitude: asset.location?.coordinate.latitude,
+                    longitude: asset.location?.coordinate.longitude,
+                    isLivePhoto: pairedLive != nil ? true : nil,
+                    livePhotoVideoFileName: pairedLive?.resource.originalFilename,
+                    livePhotoVideoSizeBytes: liveSize > 0 ? liveSize : nil
+                )
+                let entry = ScannedLibraryAssetEntry(
+                    item: item,
+                    asset: asset,
+                    liveVideoBytes: max(0, liveSize),
+                    isLocallyAvailable: isLocal
+                )
+                if isLocal {
+                    localEntries.append(entry)
+                } else {
+                    cloudEntries.append(entry)
+                }
             }
-            guard let primary = primaryMediaResource(for: asset) else { return }
-            let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
-            if !isLocal {
-                cloudOptimized += 1
-            }
-            let pairedLive = isPhoto ? pairedLiveVideoResource(for: asset) : nil
-            let liveSize = (pairedLive?.value(forKey: "fileSize") as? Int64) ?? 0
-            let size = (primary.value(forKey: "fileSize") as? Int64) ?? 1_048_576
-            let createdMs = Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000.0)
-            let fileName = primary.originalFilename.isEmpty ? "media_\(idx).\(isVideo ? "mov" : "jpg")" : primary.originalFilename
-            let albumName = albumMap[asset.localIdentifier] ?? "iPhone_Camera"
-            let cat: TransferCategory = isVideo ? .VIDEOS : .PHOTOS
-            let stableId = stableManifestItemId(
-                localIdentifier: asset.localIdentifier,
-                category: cat,
-                fallbackIndex: idx
-            )
-            let item = ManifestItem(
-                id: stableId,
-                category: cat,
-                fileName: fileName,
-                relativeAlbumOrFolder: albumName,
-                sizeBytes: size,
-                capturedEpochMillis: createdMs,
-                dedupKey: "\(fileName.lowercased())_\(size)_\(createdMs)",
-                mimeType: mimeTypeForFileName(fileName, isVideo: isVideo),
-                isFavorite: asset.isFavorite ? true : nil,
-                latitude: asset.location?.coordinate.latitude,
-                longitude: asset.location?.coordinate.longitude,
-                isLivePhoto: pairedLive != nil ? true : nil,
-                livePhotoVideoFileName: pairedLive?.originalFilename
-            )
-            let entry = ScannedLibraryAssetEntry(
-                item: item,
-                asset: asset,
-                liveVideoBytes: max(0, liveSize),
-                isLocallyAvailable: isLocal
-            )
-            if isLocal {
-                localEntries.append(entry)
-            } else {
-                cloudEntries.append(entry)
-            }
-        }
-        return (localEntries + cloudEntries, cloudOptimized)
+            return (localEntries + cloudEntries, cloudOptimized)
+        }.value
     }
 
     static func scanLibraryAssetsWithMetadata(
@@ -1476,9 +1599,10 @@ enum iOSPhotoKitMigrator {
     /// 3) `PHImageManager` (`requestImageDataAndOrientation` `.current` e fallback `.original`), trattenendo l'eventuale anteprima ricevuta se iCloud cade,
     /// 4) Estrazione asincrona dalla cache locale di Foto (`.fastFormat` + `.opportunistic`, MAI `isSynchronous = true` che forza `.highQualityFormat`),
     /// 5) Per i video: `.highQualityFormat` -> `.mediumQualityFormat` -> `.fastFormat`, gestendo anche `AVComposition` (Slow-Mo/modificati).
-    static func exportAssetToTempFile(_ asset: PHAsset) async -> URL? {
-        if let primary = primaryMediaResource(for: asset) {
-            let isLocal = (primary.value(forKey: "locallyAvailable") as? Bool) ?? true
+    static func exportAssetToTempFile(_ asset: PHAsset, allowNetwork: Bool = true) async -> URL? {
+        if let chosen = bestTransferablePrimaryResource(for: asset, allowCloudOnly: allowNetwork) {
+            let primary = chosen.resource
+            let isLocal = chosen.isLocallyAvailable
             let maxTimeout: TimeInterval = isLocal
                 ? 60.0
                 : (asset.mediaType == .video ? 420.0 : 180.0)
@@ -1486,53 +1610,55 @@ enum iOSPhotoKitMigrator {
             if let exported = await exportResourceToTempFile(
                 primary,
                 prefix: "ds_exp",
-                allowNetwork: true,
+                allowNetwork: !isLocal && allowNetwork,
                 idleTimeoutSeconds: idleTimeout,
                 maxTotalSeconds: maxTimeout
             ) {
                 return exported
             }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            let resources = PHAssetResource.assetResources(for: asset)
-            let fallbackRes: PHAssetResource? = {
-                if asset.mediaType == .video {
-                    return resources.first(where: { $0.type == .video && $0 != primary }) ?? primary
-                } else {
-                    return resources.first(where: { $0.type == .photo && $0 != primary })
-                        ?? resources.first(where: { $0.type == .alternatePhoto && $0 != primary })
-                        ?? primary
+            if allowNetwork {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                let resources = PHAssetResource.assetResources(for: asset)
+                let fallbackRes: PHAssetResource? = {
+                    if asset.mediaType == .video {
+                        return resources.first(where: { $0.type == .video && $0 != primary }) ?? primary
+                    } else {
+                        return resources.first(where: { $0.type == .photo && $0 != primary })
+                            ?? resources.first(where: { $0.type == .alternatePhoto && $0 != primary })
+                            ?? primary
+                    }
+                }()
+                if let fallbackRes,
+                   let exported = await exportResourceToTempFile(
+                       fallbackRes,
+                       prefix: "ds_exp_fb",
+                       allowNetwork: true,
+                       idleTimeoutSeconds: 18.0,
+                       maxTotalSeconds: 120.0
+                   ) {
+                    return exported
                 }
-            }()
-            if let fallbackRes,
-               let exported = await exportResourceToTempFile(
-                   fallbackRes,
-                   prefix: "ds_exp_fb",
-                   allowNetwork: true,
-                   idleTimeoutSeconds: 18.0,
-                   maxTotalSeconds: 120.0
-               ) {
-                return exported
             }
         }
 
         if asset.mediaType == .image {
             if let highCurrent = await exportImageViaImageManager(
                 asset,
-                allowNetwork: true,
+                allowNetwork: allowNetwork,
                 deliveryMode: .highQualityFormat,
                 version: .current,
-                idleTimeoutSeconds: 22.0,
-                maxTotalSeconds: 150.0
+                idleTimeoutSeconds: allowNetwork ? 22.0 : 10.0,
+                maxTotalSeconds: allowNetwork ? 150.0 : 20.0
             ) {
                 return highCurrent
             }
             if let highOrig = await exportImageViaImageManager(
                 asset,
-                allowNetwork: true,
+                allowNetwork: allowNetwork,
                 deliveryMode: .highQualityFormat,
                 version: .original,
-                idleTimeoutSeconds: 18.0,
-                maxTotalSeconds: 90.0
+                idleTimeoutSeconds: allowNetwork ? 18.0 : 10.0,
+                maxTotalSeconds: allowNetwork ? 90.0 : 20.0
             ) {
                 return highOrig
             }
@@ -1540,25 +1666,25 @@ enum iOSPhotoKitMigrator {
         } else if asset.mediaType == .video {
             if let highVid = await exportVideoViaImageManager(
                 asset,
-                allowNetwork: true,
+                allowNetwork: allowNetwork,
                 deliveryMode: .highQualityFormat,
                 version: .current,
-                idleTimeoutSeconds: 25.0,
-                maxTotalSeconds: 360.0
+                idleTimeoutSeconds: allowNetwork ? 25.0 : 15.0,
+                maxTotalSeconds: allowNetwork ? 360.0 : 60.0
             ) {
                 return highVid
             }
             if let medVid = await exportVideoViaImageManager(
                 asset,
-                allowNetwork: true,
+                allowNetwork: allowNetwork,
                 deliveryMode: .mediumQualityFormat,
                 version: .current,
-                idleTimeoutSeconds: 20.0,
-                maxTotalSeconds: 180.0
+                idleTimeoutSeconds: allowNetwork ? 20.0 : 12.0,
+                maxTotalSeconds: allowNetwork ? 180.0 : 40.0
             ) {
                 return medVid
             }
-            if let fastNetVid = await exportVideoViaImageManager(
+            if allowNetwork, let fastNetVid = await exportVideoViaImageManager(
                 asset,
                 allowNetwork: true,
                 deliveryMode: .fastFormat,
@@ -1779,13 +1905,13 @@ enum iOSPhotoKitMigrator {
     }
 
     /// Esporta la componente video `.MOV` accoppiata di una Live Photo su file temporaneo.
-    static func exportLivePairedVideoToTempFile(_ asset: PHAsset) async -> URL? {
-        guard let paired = pairedLiveVideoResource(for: asset) else { return nil }
-        let isLocal = (paired.value(forKey: "locallyAvailable") as? Bool) ?? true
+    static func exportLivePairedVideoToTempFile(_ asset: PHAsset, allowNetwork: Bool = true) async -> URL? {
+        guard let paired = bestTransferablePairedLiveResource(for: asset, allowCloudOnly: allowNetwork)?.resource else { return nil }
+        let isLocal = resourceIsLocallyAvailable(paired)
         return await exportResourceToTempFile(
             paired,
             prefix: "ds_live",
-            allowNetwork: true,
+            allowNetwork: !isLocal && allowNetwork,
             idleTimeoutSeconds: isLocal ? 20.0 : 18.0,
             maxTotalSeconds: isLocal ? 45.0 : 90.0
         )

@@ -258,6 +258,7 @@ struct AppleTopNavigationBar: View {
     var isProUnlocked: Bool = true
     let onBack: () -> Void
     var onTapPassBadge: (() -> Void)? = nil
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -268,7 +269,7 @@ struct AppleTopNavigationBar: View {
                             HStack(spacing: 4) {
                                 Image(systemName: "chevron.left")
                                     .font(.system(size: 16, weight: .semibold))
-                                Text("Indietro")
+                                Text(l10n.tr("Indietro"))
                                     .font(.system(size: 16, weight: .regular))
                             }
                             .foregroundColor(AppleTheme.blue)
@@ -314,6 +315,7 @@ struct InfoCircleButton: View {
     let title: String
     let message: String
     @State private var isPresented: Bool = false
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
 
     var body: some View {
         Button(action: { isPresented = true }) {
@@ -330,14 +332,14 @@ struct InfoCircleButton: View {
                     Image(systemName: "info.circle.fill")
                         .font(.system(size: 22))
                         .foregroundColor(AppleTheme.blue)
-                    Text(title)
+                    Text(l10n.tr(title))
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(AppleTheme.textPrimary)
                     Spacer()
                 }
                 .padding(.top, 8)
 
-                Text(message)
+                Text(l10n.tr(message))
                     .font(.system(size: 15))
                     .foregroundColor(AppleTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -345,7 +347,7 @@ struct InfoCircleButton: View {
                 Spacer(minLength: 8)
 
                 Button(action: { isPresented = false }) {
-                    Text("Chiudi")
+                    Text(l10n.tr("Chiudi"))
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
@@ -365,31 +367,54 @@ struct InfoCircleButton: View {
 
 // MARK: - Pulsanti Apple HIG
 
+private struct ApplePressScaleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+            .brightness(configuration.isPressed ? -0.05 : 0.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 struct ApplePrimaryButton: View {
     let title: String
     var icon: String? = nil
     var color: Color = AppleTheme.blue
     var isDisabled: Bool = false
+    var isLoading: Bool = false
+    var loadingTitle: String? = nil
     var action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                if let iconName = icon {
-                    Image(systemName: iconName)
-                        .font(.system(size: 15, weight: .semibold))
+        Button {
+            guard !isDisabled && !isLoading else { return }
+            action()
+        } label: {
+            HStack(spacing: 9) {
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(0.9)
+                    Text(loadingTitle ?? title)
+                        .font(.system(size: 16, weight: .semibold))
+                } else {
+                    if let iconName = icon {
+                        Image(systemName: iconName)
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    Text(title)
+                        .font(.system(size: 16, weight: .semibold))
                 }
-                Text(title)
-                    .font(.system(size: 16, weight: .semibold))
             }
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
             .frame(height: 48)
-            .background(isDisabled ? color.opacity(0.50) : color)
+            .background(isLoading ? color : (isDisabled ? color.opacity(0.42) : color))
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
+        .buttonStyle(ApplePressScaleButtonStyle())
+        .disabled(isDisabled || isLoading)
     }
 }
 

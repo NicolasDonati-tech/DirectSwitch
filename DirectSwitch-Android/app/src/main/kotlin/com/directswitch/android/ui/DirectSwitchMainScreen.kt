@@ -222,7 +222,11 @@ fun DirectSwitchMainScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var currentLanguage by remember { mutableStateOf(DirectSwitchLanguage.load(context)) }
+    LaunchedEffect(Unit) {
+        DirectSwitchL10n.init(context)
+    }
+    val currentLanguage = DirectSwitchL10n.activeLanguage
+    var isLaunchingTransfer by remember { mutableStateOf(false) }
     var resumableCheckpoint by remember { mutableStateOf(TransferCheckpointStore.load(context)) }
     var completedDeltaRecord by remember {
         mutableStateOf(CompletedMigrationStore.load(CompletedMigrationStore.defaultFile(context.filesDir)))
@@ -583,6 +587,7 @@ fun DirectSwitchMainScreen(
     }
 
     fun resetAndGoHome() {
+        isLaunchingTransfer = false
         showCameraScanner = false
         autoDiscovery.stopAdvertising()
         autoDiscovery.stopScanning()
@@ -722,6 +727,7 @@ fun DirectSwitchMainScreen(
         resumeCheckpoint: TransferCheckpointRecord? = null,
         preserveOverflowPlan: Boolean = false
     ) {
+        isLaunchingTransfer = false
         pendingDocPrecheckReport = null
         isReceiverFlow = false
         vaultStatusNote = null
@@ -828,17 +834,17 @@ fun DirectSwitchMainScreen(
 
     val topTitle = when (step) {
         WizardStep.HOME -> "DirectSwitch"
-        WizardStep.RECEIVER_WAIT_CODE -> DirectSwitchL10n.text("nav_receive", currentLanguage, "Ricevi dati")
-        WizardStep.RECEIVER_CONNECTED -> "Collegato"
-        WizardStep.SENDER_CONNECT -> DirectSwitchL10n.text("nav_connect", currentLanguage, "Collega telefono")
-        WizardStep.SENDER_SELECT_CATEGORIES -> DirectSwitchL10n.text("nav_select", currentLanguage, "Cosa copiare")
-        WizardStep.TRANSFER_PREPARING -> DirectSwitchL10n.text("nav_preparing", currentLanguage, "Preparazione")
+        WizardStep.RECEIVER_WAIT_CODE -> DirectSwitchL10n.tr("Ricevi dati")
+        WizardStep.RECEIVER_CONNECTED -> DirectSwitchL10n.tr("Collegato")
+        WizardStep.SENDER_CONNECT -> DirectSwitchL10n.tr("Collega telefono")
+        WizardStep.SENDER_SELECT_CATEGORIES -> DirectSwitchL10n.tr("Cosa copiare")
+        WizardStep.TRANSFER_PREPARING -> DirectSwitchL10n.tr("Preparazione")
         WizardStep.TRANSFER_PROGRESS -> {
             val done = if (isReceiverFlow) serverProgress.isCompleted else clientProgress.isCompleted
-            if (done) DirectSwitchL10n.text("nav_done", currentLanguage, "Completato")
-            else DirectSwitchL10n.text("nav_copying", currentLanguage, "Copia dati")
+            if (done) DirectSwitchL10n.tr("Completato")
+            else DirectSwitchL10n.tr("Copia dati")
         }
-        WizardStep.QUICK_PORTAL -> "QR Rapido"
+        WizardStep.QUICK_PORTAL -> DirectSwitchL10n.tr("QR Rapido", en = "Quick QR", fr = "QR Rapide")
     }
 
     Column(
@@ -892,8 +898,7 @@ fun DirectSwitchMainScreen(
                     AndroidHomeView(
                         currentLanguage = currentLanguage,
                         onSelectLanguage = { lang ->
-                            currentLanguage = lang
-                            DirectSwitchLanguage.save(context, lang)
+                            DirectSwitchL10n.setLanguage(context, lang)
                         },
                         resumableCheckpoint = resumableCheckpoint,
                         onResumeCheckpoint = { cp -> resumeSavedCheckpoint(cp) },
@@ -1232,9 +1237,12 @@ fun DirectSwitchMainScreen(
                             },
                             activeDeltaBaseline = activeDeltaBaseline,
                             forceBatteryTriage = forceBatteryTriage,
+                            isLaunchingTransfer = isLaunchingTransfer,
                             onToggleForceBatteryTriage = { forceBatteryTriage = it },
                             onClearDeltaBaseline = { activeDeltaBaseline = null },
                             onStartTransfer = {
+                                if (isLaunchingTransfer) return@SenderCategoriesWizardView
+                                isLaunchingTransfer = true
                                 if (categories.documents) {
                                     scope.launch {
                                         val precheck = withContext(Dispatchers.IO) {
@@ -1247,6 +1255,7 @@ fun DirectSwitchMainScreen(
                                         val missingAllFiles =
                                             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !precheck.hasAllFilesAccess
                                         if (missingAllFiles || precheck.totalFiles == 0) {
+                                            isLaunchingTransfer = false
                                             pendingDocPrecheckReport = precheck
                                         } else {
                                             launchSenderTransfer(target)
@@ -1330,7 +1339,7 @@ fun DirectSwitchMainScreen(
             containerColor = DirectSwitchTheme.cardSurface,
             title = {
                 Text(
-                    text = "Controllo posizioni sul telefono",
+                    text = DirectSwitchL10n.tr("Controllo posizioni sul telefono", en = "Device storage locations check", fr = "Vérification des emplacements"),
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
@@ -1339,25 +1348,37 @@ fun DirectSwitchMainScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = when {
-                            noneSelected ->
-                                "Nessuna posizione è selezionata con la spunta. Seleziona almeno una posizione da trasferire nell'elenco oppure aggiungine un'altra."
-                            missingAllFiles ->
-                                "Per leggere e copiare le posizioni intere del telefono (Memoria interna, Download, Documenti, Scheda SD) ricreandole identiche sul nuovo telefono, attiva «Accesso a tutti i file»."
-                            activePrecheck.totalFiles == 0 ->
-                                "Nessun documento o file rilevato nelle posizioni selezionate al momento. Puoi aggiungere un'altra posizione (es. SD, USB o Drive) oppure continuare comunque."
-                            else ->
-                                "Pronte ${maxOf(1, accessibleLocations.size)} posizioni selezionate (${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle)."
+                            noneSelected -> DirectSwitchL10n.tr(
+                                "Nessuna posizione è selezionata con la spunta. Seleziona almeno una posizione da trasferire nell'elenco oppure aggiungine un'altra.",
+                                en = "No storage location is checked. Check at least one location to copy or add another one.",
+                                fr = "Aucun emplacement n'est coché. Cochez au moins un emplacement ou ajoutez-en un autre."
+                            )
+                            missingAllFiles -> DirectSwitchL10n.tr(
+                                "Per leggere e copiare le posizioni intere del telefono (Memoria interna, Download, Documenti, Scheda SD) ricreandole identiche sul nuovo telefono, attiva «Accesso a tutti i file».",
+                                en = "To read and copy full storage locations (Internal storage, Downloads, Documents, SD card) keeping folder structure intact, enable 'All files access'.",
+                                fr = "Pour lire et copier les emplacements complets (Stockage interne, Téléchargements, Documents, SD), activez « Accès à tous les fichiers »."
+                            )
+                            activePrecheck.totalFiles == 0 -> DirectSwitchL10n.tr(
+                                "Nessun documento o file rilevato nelle posizioni selezionate al momento. Puoi aggiungere un'altra posizione (es. SD, USB o Drive) oppure continuare comunque.",
+                                en = "No files found in the selected locations yet. Add another location (SD, USB, Drive) or continue anyway.",
+                                fr = "Aucun fichier trouvé dans les emplacements sélectionnés. Ajoutez un autre emplacement ou continuez."
+                            )
+                            else -> DirectSwitchL10n.tr(
+                                "Pronte ${maxOf(1, accessibleLocations.size)} posizioni selezionate (${activePrecheck.totalFiles} file in ${activePrecheck.folderSummaries.size} cartelle).",
+                                en = "${maxOf(1, accessibleLocations.size)} locations ready (${activePrecheck.totalFiles} files in ${activePrecheck.folderSummaries.size} folders).",
+                                fr = "${maxOf(1, accessibleLocations.size)} emplacements prêts (${activePrecheck.totalFiles} fichiers dans ${activePrecheck.folderSummaries.size} dossiers)."
+                            )
                         },
                         fontSize = 13.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
                     if (activePrecheck.locationSummaries.isNotEmpty()) {
                         Text(
-                            text = "Posizioni: " +
+                            text = DirectSwitchL10n.tr("Posizioni: ", en = "Locations: ", fr = "Emplacements : ") +
                                 activePrecheck.locationSummaries.joinToString(" • ") {
                                     val prefix = if (it.isSelected) "✓ " else "○ "
-                                    if (it.isAccessible) "$prefix${it.locationName} (${it.fileCount} file)"
-                                    else "$prefix${it.locationName} (accesso richiesto)"
+                                    if (it.isAccessible) "$prefix${it.locationName} (${it.fileCount} ${DirectSwitchL10n.tr("file", en = "files", fr = "fichiers")})"
+                                    else "$prefix${it.locationName} (${DirectSwitchL10n.tr("accesso richiesto", en = "access required", fr = "accès requis")})"
                                 },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
@@ -1374,7 +1395,7 @@ fun DirectSwitchMainScreen(
                             DocumentsAndWhatsAppScanner.openAllFilesAccessSettings(context)
                         }
                     ) {
-                        Text("Autorizza accesso completo", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                        Text(DirectSwitchL10n.tr("Autorizza accesso completo", en = "Allow full access", fr = "Autoriser l'accès complet"), fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
                     }
                 } else {
                     TextButton(
@@ -1383,7 +1404,7 @@ fun DirectSwitchMainScreen(
                             folderTreePickerLauncher.launch(null)
                         }
                     ) {
-                        Text("Autorizza posizione", fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                        Text(DirectSwitchL10n.tr("Autorizza posizione", en = "Authorize location", fr = "Autoriser l'emplacement"), fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
                     }
                 }
             },
@@ -1396,13 +1417,13 @@ fun DirectSwitchMainScreen(
                                 folderTreePickerLauncher.launch(null)
                             }
                         ) {
-                            Text("Autorizza posizione", color = DirectSwitchTheme.blue)
+                            Text(DirectSwitchL10n.tr("Autorizza posizione", en = "Authorize location", fr = "Autoriser l'emplacement"), color = DirectSwitchTheme.blue)
                         }
                     }
                     TextButton(
                         onClick = { launchSenderTransfer(activePrecheckTarget) }
                     ) {
-                        Text("Continua lo stesso", color = DirectSwitchTheme.textSecondary)
+                        Text(DirectSwitchL10n.tr("Continua lo stesso"), color = DirectSwitchTheme.textSecondary)
                     }
                 }
             }
@@ -1484,7 +1505,11 @@ private fun AndroidHomeView(
             )
             InfoCircleButton(
                 title = "DirectSwitch",
-                message = "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud."
+                message = DirectSwitchL10n.tr(
+                    "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud.",
+                    en = "Copy your data without resetting: transfers contacts, photos, 4K videos, calendars, SMS, call logs, audio, documents and WhatsApp chats directly between two already set-up phones over Wi-Fi P2P or USB-C.",
+                    fr = "Copiez vos données sans réinitialiser : contacts, photos, vidéos 4K, calendriers, SMS, appels, audio, documents et WhatsApp directement en Wi-Fi P2P ou USB-C."
+                )
             )
         }
     }
@@ -1516,20 +1541,24 @@ private fun AndroidHomeView(
             ) {
                 AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowForward, color = DirectSwitchTheme.blue)
                 Text(
-                    text = "Invia",
+                    text = DirectSwitchL10n.tr("Invia"),
                     fontSize = 19.sp,
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
             InfoCircleButton(
-                title = "Invia",
-                message = "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (Android o iPhone) dove hai aperto 'Ricevi'."
+                title = DirectSwitchL10n.tr("Invia"),
+                message = DirectSwitchL10n.tr(
+                    "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (Android o iPhone) dove hai aperto 'Ricevi'.",
+                    en = "Send data wirelessly from this phone directly to your other phone (Android or iPhone) where 'Receive' is open.",
+                    fr = "Envoyez vos données sans fil vers votre autre téléphone (Android ou iPhone) où « Recevoir » est ouvert."
+                )
             )
         }
 
         DirectSwitchPrimaryButton(
-            text = "Invia",
+            text = DirectSwitchL10n.tr("Invia"),
             onClick = onStartSend,
             containerColor = DirectSwitchTheme.blue
         )
@@ -1548,20 +1577,24 @@ private fun AndroidHomeView(
             ) {
                 AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowBack, color = DirectSwitchTheme.teal)
                 Text(
-                    text = "Ricevi",
+                    text = DirectSwitchL10n.tr("Ricevi"),
                     fontSize = 19.sp,
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
             InfoCircleButton(
-                title = "Ricevi",
-                message = "Mostra il codice monouso a 6 cifre (come 'Passa a iOS') o il codice QR per ricevere i dati dal tuo altro telefono senza cancellare nulla."
+                title = DirectSwitchL10n.tr("Ricevi"),
+                message = DirectSwitchL10n.tr(
+                    "Mostra il codice monouso a 6 cifre (come 'Passa a iOS') o il codice QR per ricevere i dati dal tuo altro telefono senza cancellare nulla.",
+                    en = "Show a 6-digit one-time code or QR code to receive data from your other phone without erasing anything.",
+                    fr = "Affichez le code à 6 chiffres ou le code QR pour recevoir des données sans rien effacer."
+                )
             )
         }
 
         DirectSwitchPrimaryButton(
-            text = "Ricevi",
+            text = DirectSwitchL10n.tr("Ricevi"),
             onClick = onStartReceive,
             containerColor = DirectSwitchTheme.teal
         )
@@ -1594,14 +1627,18 @@ private fun ReceiverPairingWizardView(
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
-            text = "Passo 1 di 2",
+            text = DirectSwitchL10n.tr("Passo 1 di 2", en = "Step 1 of 2", fr = "Étape 1 sur 2"),
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             color = DirectSwitchTheme.blue
         )
         InfoCircleButton(
-            title = "Come collegare i telefoni",
-            message = "Apri DirectSwitch sul vecchio telefono, tocca 'Invia al nuovo telefono' e digita il codice a 6 cifre mostrato qui sotto, oppure passa a 'Codice QR' per inquadrarlo (anche senza rete Wi-Fi attivando l'Hotspot 5GHz)."
+            title = DirectSwitchL10n.tr("Come collegare i telefoni", en = "How to connect phones", fr = "Comment connecter les téléphones"),
+            message = DirectSwitchL10n.tr(
+                "Apri DirectSwitch sul vecchio telefono, tocca 'Invia al nuovo telefono' e digita il codice a 6 cifre mostrato qui sotto, oppure passa a 'Codice QR' per inquadrarlo (anche senza rete Wi-Fi attivando l'Hotspot 5GHz).",
+                en = "Open DirectSwitch on the old phone, tap 'Send' and enter the 6-digit code shown below, or switch to 'QR Code' to scan it (even without Wi-Fi using 5GHz Hotspot).",
+                fr = "Ouvrez DirectSwitch sur l'ancien téléphone, touchez « Envoyer » et saisissez le code à 6 chiffres ci-dessous, ou scannez le « Code QR »."
+            )
         )
     }
 
@@ -1611,14 +1648,14 @@ private fun ReceiverPairingWizardView(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Text(
-            text = if (selectedTab == 0) "Inserisci il codice monouso" else "Inquadra il codice QR",
+            text = if (selectedTab == 0) DirectSwitchL10n.tr("Inserisci il codice monouso", en = "Enter one-time code", fr = "Saisissez le code unique") else DirectSwitchL10n.tr("Inquadra il codice QR", en = "Scan QR code", fr = "Scannez le code QR"),
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textPrimary,
             textAlign = TextAlign.Center
         )
         Text(
-            text = "Apri DirectSwitch sul vecchio telefono e tocca Invia",
+            text = DirectSwitchL10n.tr("Apri DirectSwitch sul vecchio telefono e tocca Invia", en = "Open DirectSwitch on your old phone and tap Send", fr = "Ouvrez DirectSwitch sur l'ancien téléphone et touchez Envoyer"),
             fontSize = 14.sp,
             color = DirectSwitchTheme.textSecondary,
             textAlign = TextAlign.Center
@@ -1635,7 +1672,7 @@ private fun ReceiverPairingWizardView(
                 .padding(3.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            listOf("Codice a 6 cifre", "Codice QR").forEachIndexed { idx, label ->
+            listOf(DirectSwitchL10n.tr("Codice a 6 cifre"), DirectSwitchL10n.tr("Codice QR")).forEachIndexed { idx, label ->
                 val active = selectedTab == idx
                 Box(
                     modifier = Modifier
@@ -1667,7 +1704,7 @@ private fun ReceiverPairingWizardView(
                 PassaAiOSCodeBoxes(code = pairingPin)
                 if (qrPayload != null) {
                     Text(
-                        text = "Visibile come ${qrPayload.receiverName}",
+                        text = DirectSwitchL10n.tr("Visibile come ${qrPayload.receiverName}", en = "Visible as ${qrPayload.receiverName}", fr = "Visible en tant que ${qrPayload.receiverName}"),
                         fontSize = 13.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
@@ -1695,7 +1732,7 @@ private fun ReceiverPairingWizardView(
                 }
                 if (pairingPin.length == 6) {
                     Text(
-                        text = "Codice: $pairingPin",
+                        text = DirectSwitchL10n.tr("Codice: $pairingPin", en = "Code: $pairingPin", fr = "Code : $pairingPin"),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.blue
@@ -1718,7 +1755,7 @@ private fun ReceiverPairingWizardView(
             )
             Spacer(modifier = Modifier.size(10.dp))
             Text(
-                text = "In attesa di collegamento...",
+                text = DirectSwitchL10n.tr("In attesa di collegamento..."),
                 fontSize = 14.sp,
                 color = DirectSwitchTheme.textSecondary
             )
@@ -1741,8 +1778,8 @@ private fun ReceiverPairingWizardView(
             ) {
                 AppleSettingsIcon(icon = Icons.Filled.WifiTethering, color = DirectSwitchTheme.teal)
                 Column {
-                    Text("Hotspot diretto 5GHz", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
-                    Text(hotspotNote ?: "Usa senza rete Wi-Fi di casa", fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
+                    Text(DirectSwitchL10n.tr("Hotspot diretto 5GHz", en = "Direct 5GHz Hotspot", fr = "Point d'accès 5 GHz direct"), fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                    Text(hotspotNote ?: DirectSwitchL10n.tr("Usa senza rete Wi-Fi di casa", en = "Use without a home Wi-Fi network", fr = "Utiliser sans Wi-Fi domestique"), fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
                 }
             }
             Switch(
@@ -1771,8 +1808,8 @@ private fun ReceiverPairingWizardView(
                 ) {
                     AppleSettingsIcon(icon = Icons.Filled.Sms, color = DirectSwitchTheme.green)
                     Column {
-                        Text("Salva SMS nell'app Messaggi", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
-                        Text("Tocca per abilitare l'importazione nativa", fontSize = 12.sp, color = DirectSwitchTheme.blue)
+                        Text(DirectSwitchL10n.tr("Salva SMS nell'app Messaggi", en = "Save SMS in Messages app", fr = "Enregistrer les SMS dans Messages"), fontSize = 15.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                        Text(DirectSwitchL10n.tr("Tocca per abilitare l'importazione nativa", en = "Tap to enable native SMS import", fr = "Touchez pour activer l'importation native"), fontSize = 12.sp, color = DirectSwitchTheme.blue)
                     }
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = DirectSwitchTheme.textMuted)
@@ -1814,13 +1851,13 @@ private fun ReceiverPairingWizardView(
                         AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.orange)
                         Column {
                             Text(
-                                "Ricrea posizioni e cartelle originali",
+                                DirectSwitchL10n.tr("Ricrea posizioni e cartelle originali", en = "Restore original folders and locations", fr = "Recréer les dossiers d'origine"),
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = DirectSwitchTheme.textPrimary
                             )
                             Text(
-                                "Autorizza «Accesso a tutti i file» per salvare intere posizioni nelle identiche cartelle di origine",
+                                DirectSwitchL10n.tr("Autorizza «Accesso a tutti i file» per salvare intere posizioni nelle identiche cartelle di origine", en = "Allow 'All files access' to save locations into their exact original folders", fr = "Autorisez « Accès à tous les fichiers » pour conserver la structure des dossiers"),
                                 fontSize = 12.sp,
                                 color = DirectSwitchTheme.blue
                             )
@@ -1833,7 +1870,7 @@ private fun ReceiverPairingWizardView(
     }
 
     DirectSwitchSecondaryButton(
-        text = "Annulla",
+        text = DirectSwitchL10n.tr("Annulla"),
         onClick = onCancel,
         tint = DirectSwitchTheme.textSecondary
     )
@@ -1879,10 +1916,14 @@ private fun SenderConnectWizardView(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text("Passo 1 di 3", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+        Text(DirectSwitchL10n.tr("Passo 1 di 3", en = "Step 1 of 3", fr = "Étape 1 sur 3"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
         InfoCircleButton(
-            title = "Come collegare il nuovo telefono",
-            message = "Sul nuovo iPhone o Android apri DirectSwitch e tocca 'Ricevi'. Selezionalo qui sotto e inserisci il codice a 6 cifre, oppure usa 'Inquadra codice QR'."
+            title = DirectSwitchL10n.tr("Come collegare il nuovo telefono", en = "How to connect the new phone", fr = "Comment connecter le nouveau téléphone"),
+            message = DirectSwitchL10n.tr(
+                "Sul nuovo iPhone o Android apri DirectSwitch e tocca 'Ricevi'. Selezionalo qui sotto e inserisci il codice a 6 cifre, oppure usa 'Inquadra codice QR'.",
+                en = "On the new iPhone or Android open DirectSwitch and tap 'Receive'. Select it below and enter the 6-digit code, or tap 'Scan QR code'.",
+                fr = "Sur le nouveau téléphone ouvrez DirectSwitch et touchez « Recevoir ». Sélectionnez-le ci-dessous et saisissez le code à 6 chiffres ou scannez le QR."
+            )
         )
     }
 
@@ -1891,8 +1932,8 @@ private fun SenderConnectWizardView(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text("Collega il nuovo telefono", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-        Text("Seleziona il telefono rilevato o inquadra il codice QR", fontSize = 14.sp, color = DirectSwitchTheme.textSecondary)
+        Text(DirectSwitchL10n.tr("Collega il nuovo telefono", en = "Connect new phone", fr = "Connecter le nouveau téléphone"), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        Text(DirectSwitchL10n.tr("Seleziona il telefono rilevato o inquadra il codice QR", en = "Select the discovered phone or scan the QR code", fr = "Sélectionnez le téléphone détecté ou scannez le code QR"), fontSize = 14.sp, color = DirectSwitchTheme.textSecondary)
     }
 
     DirectSwitchCard {
@@ -1901,11 +1942,11 @@ private fun SenderConnectWizardView(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("Telefoni vicini", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            Text(DirectSwitchL10n.tr("Telefoni vicini"), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             if (discoveredDevices.isEmpty()) {
                 CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = DirectSwitchTheme.blue)
             } else {
-                val countLabel = if (discoveredDevices.size == 1) "1 trovato" else "${discoveredDevices.size} trovati"
+                val countLabel = if (discoveredDevices.size == 1) DirectSwitchL10n.tr("1 trovato", en = "1 found", fr = "1 trouvé") else DirectSwitchL10n.tr("${discoveredDevices.size} trovati", en = "${discoveredDevices.size} found", fr = "${discoveredDevices.size} trouvés")
                 Text(countLabel, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.green)
             }
         }
@@ -1917,8 +1958,8 @@ private fun SenderConnectWizardView(
             ) {
                 AppleSettingsIcon(icon = Icons.Filled.Wifi, color = DirectSwitchTheme.blue)
                 Column {
-                    Text("Ricerca sulla rete Wi-Fi...", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
-                    Text("Assicurati che 'Ricevi' sia aperto sull'altro telefono", fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
+                    Text(DirectSwitchL10n.tr("Ricerca sulla rete Wi-Fi..."), fontSize = 14.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                    Text(DirectSwitchL10n.tr("Assicurati che 'Ricevi' sia aperto sull'altro telefono", en = "Make sure 'Receive' is open on the other phone", fr = "Assurez-vous que « Recevoir » est ouvert sur l'autre téléphone"), fontSize = 12.sp, color = DirectSwitchTheme.textSecondary)
                 }
             }
         } else {
@@ -1946,7 +1987,7 @@ private fun SenderConnectWizardView(
                             Column {
                                 Text(beacon.receiverName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
                                 Text(
-                                    if (beacon.receiverPlatform == DevicePlatform.IOS) "iPhone pronto a ricevere" else "Android pronto a ricevere",
+                                    if (beacon.receiverPlatform == DevicePlatform.IOS) DirectSwitchL10n.tr("iPhone pronto a ricevere") else DirectSwitchL10n.tr("Android pronto a ricevere"),
                                     fontSize = 12.sp,
                                     color = DirectSwitchTheme.textSecondary
                                 )
@@ -1965,7 +2006,7 @@ private fun SenderConnectWizardView(
         if (selectedBeacon != null) {
             HorizontalDivider(color = DirectSwitchTheme.hairline)
             Text(
-                text = "Inserisci il codice a 6 cifre mostrato su ${selectedBeacon.receiverName}",
+                text = DirectSwitchL10n.tr("Inserisci il codice a 6 cifre mostrato su ${selectedBeacon.receiverName}", en = "Enter the 6-digit code shown on ${selectedBeacon.receiverName}", fr = "Saisissez le code à 6 chiffres affiché sur ${selectedBeacon.receiverName}"),
                 fontSize = 13.sp,
                 color = DirectSwitchTheme.textSecondary,
                 modifier = Modifier.fillMaxWidth(),
@@ -1974,24 +2015,26 @@ private fun SenderConnectWizardView(
             OutlinedTextField(
                 value = pinInput,
                 onValueChange = onPinChange,
-                placeholder = { Text("Codice a 6 cifre") },
+                placeholder = { Text(DirectSwitchL10n.tr("Codice a 6 cifre")) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp)
             )
             DirectSwitchPrimaryButton(
-                text = if (isPinPairingBusy) "Collegamento in corso..." else "Continua",
+                text = DirectSwitchL10n.tr("Continua"),
                 onClick = onConfirmPin,
-                enabled = pinInput.length == 6 && !isPinPairingBusy
+                enabled = pinInput.length == 6,
+                isLoading = isPinPairingBusy,
+                loadingText = DirectSwitchL10n.tr("Collegamento in corso...")
             )
         }
     }
 
     DirectSwitchCard {
-        Text("Oppure usa la fotocamera", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+        Text(DirectSwitchL10n.tr("Oppure usa la fotocamera"), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
         DirectSwitchSecondaryButton(
-            text = if (showCameraScanner) "Chiudi fotocamera" else "Inquadra codice QR",
+            text = if (showCameraScanner) DirectSwitchL10n.tr("Chiudi fotocamera") else DirectSwitchL10n.tr("Inquadra codice QR"),
             onClick = onToggleCamera
         )
         if (showCameraScanner) {
@@ -2002,7 +2045,7 @@ private fun SenderConnectWizardView(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = if (showManualInput) "Nascondi inserimento manuale" else "Incolla codice di collegamento",
+                text = if (showManualInput) DirectSwitchL10n.tr("Nascondi inserimento manuale") else DirectSwitchL10n.tr("Incolla codice di collegamento"),
                 fontSize = 13.sp,
                 color = DirectSwitchTheme.textSecondary
             )
@@ -2011,13 +2054,13 @@ private fun SenderConnectWizardView(
             OutlinedTextField(
                 value = manualQrInput,
                 onValueChange = onManualInputChange,
-                placeholder = { Text("Incolla qui il codice") },
+                placeholder = { Text(DirectSwitchL10n.tr("Incolla qui il codice")) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp)
             )
             if (manualQrInput.isNotBlank()) {
-                DirectSwitchPrimaryButton(text = "Collega", onClick = onApplyManualCode)
+                DirectSwitchPrimaryButton(text = DirectSwitchL10n.tr("Collega"), onClick = onApplyManualCode)
             }
         }
     }
@@ -2088,6 +2131,7 @@ private fun SenderCategoriesWizardView(
     onChangeDevice: () -> Unit,
     activeDeltaBaseline: CompletedMigrationRecord?,
     forceBatteryTriage: Boolean,
+    isLaunchingTransfer: Boolean = false,
     onToggleForceBatteryTriage: (Boolean) -> Unit,
     onClearDeltaBaseline: () -> Unit,
     onStartTransfer: () -> Unit
@@ -2106,9 +2150,9 @@ private fun SenderCategoriesWizardView(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text("Passo 2 di 3", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
+        Text(DirectSwitchL10n.tr("Passo 2 di 3", en = "Step 2 of 3", fr = "Étape 2 sur 3"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
         Text(
-            text = if (allSelected) "Deseleziona tutto" else "Seleziona tutto",
+            text = if (allSelected) DirectSwitchL10n.tr("Deseleziona tutto") else DirectSwitchL10n.tr("Seleziona tutto"),
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             color = DirectSwitchTheme.blue,
@@ -2149,19 +2193,19 @@ private fun SenderCategoriesWizardView(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        "Collegato a ${pairedPayload.receiverName}",
+                        DirectSwitchL10n.tr("Collegato a ${pairedPayload.receiverName}", en = "Connected to ${pairedPayload.receiverName}", fr = "Connecté à ${pairedPayload.receiverName}"),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     InfoCircleButton(
-                        title = "Stato collegamento",
-                        message = "Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati senza resettare il telefono."
+                        title = DirectSwitchL10n.tr("Stato collegamento", en = "Connection status", fr = "État de la connexion"),
+                        message = DirectSwitchL10n.tr("Collegamento diretto attivo e pronto al trasferimento completo dei dati selezionati senza resettare il telefono.", en = "Direct link active and ready to copy all selected data without resetting your phone.", fr = "Connexion directe active et prête à copier toutes les données sans réinitialiser.")
                     )
                 }
             }
             Text(
-                text = "Cambia",
+                text = DirectSwitchL10n.tr("Cambia"),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.blue,
@@ -2171,9 +2215,9 @@ private fun SenderCategoriesWizardView(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text("Cosa inviare", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+        Text(DirectSwitchL10n.tr("Cosa inviare", en = "What to send", fr = "Quoi envoyer"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
         Text(
-            text = "Spunta ogni voce per aprire la configurazione del passaggio al nuovo telefono.",
+            text = DirectSwitchL10n.tr("Spunta ogni voce per aprire la configurazione del passaggio al nuovo telefono.", en = "Check each item to configure what copies to the new phone.", fr = "Cochez chaque élément pour configurer le transfert vers le nouveau téléphone."),
             fontSize = 12.5.sp,
             color = DirectSwitchTheme.textSecondary
         )
@@ -2184,21 +2228,21 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.Contacts,
         iconColor = DirectSwitchTheme.blue,
-        title = "Rubrica contatti",
-        countBadge = if (contactsTotal > 0) "$contactsTotal contatti" else null,
+        title = DirectSwitchL10n.tr("Rubrica contatti"),
+        countBadge = if (contactsTotal > 0) "$contactsTotal ${DirectSwitchL10n.tr("contatti")}" else null,
         checked = categories.contacts,
         onCheckedChange = { onUpdateCategories(categories.copy(contacts = it)) }
     ) {
         ProgressivePreloadDropdownBody(
             hasPermission = ContactsSmartMerger.hasReadPermission(wizardContext),
-            permissionTitle = "Permesso Contatti richiesto per preparare la rubrica.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso Contatti richiesto per preparare la rubrica.", en = "Contacts permission required to prepare your address book.", fr = "Autorisation Contacts requise pour préparer le carnet d'adresses."),
             onRequestPermission = onRequestContactsPermission,
             isLoading = contactsPreload.isLoading,
             loadedCount = contactsLoaded,
             totalCount = contactsTotal,
-            loadingLabel = "Precaricamento rubrica: $contactsLoaded / ${maxOf(contactsLoaded, contactsTotal)} contatti",
-            readyLabel = "$contactsTotal contatti totali preparati",
-            detailLabel = "Include numeri con etichette, foto profilo, email, indirizzi e compleanni con unione duplicati.",
+            loadingLabel = DirectSwitchL10n.tr("Precaricamento rubrica: $contactsLoaded / ${maxOf(contactsLoaded, contactsTotal)} contatti", en = "Loading contacts: $contactsLoaded / ${maxOf(contactsLoaded, contactsTotal)}", fr = "Chargement contacts : $contactsLoaded / ${maxOf(contactsLoaded, contactsTotal)}"),
+            readyLabel = DirectSwitchL10n.tr("$contactsTotal contatti idonei al trasferimento", en = "$contactsTotal contacts ready to transfer", fr = "$contactsTotal contacts prêts à transférer"),
+            detailLabel = DirectSwitchL10n.tr("Include numeri con etichette, foto profilo, email, indirizzi e compleanni con unione duplicati.", en = "Includes phone labels, profile photos, emails, addresses and birthdays with duplicate merge.", fr = "Inclut numéros, photos, e-mails, adresses et anniversaires avec fusion des doublons."),
             accentColor = DirectSwitchTheme.blue,
             onReload = onReloadContacts
         )
@@ -2211,21 +2255,21 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.Image,
         iconColor = DirectSwitchTheme.orange,
-        title = "Foto e Album",
-        countBadge = if (photosTotal > 0) "$photosTotal foto • ${formatMb(photosBytes)}" else null,
+        title = DirectSwitchL10n.tr("Foto e Album"),
+        countBadge = if (photosTotal > 0) "$photosTotal ${DirectSwitchL10n.tr("foto")} • ${formatMb(photosBytes)}" else null,
         checked = categories.photos,
         onCheckedChange = { onUpdateCategories(categories.copy(photos = it)) }
     ) {
         ProgressivePreloadDropdownBody(
             hasPermission = MediaExifScannerAndImporter.hasPhotoPermission(wizardContext),
-            permissionTitle = "Permesso Foto richiesto per preparare immagini e album.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso Foto richiesto per preparare immagini e album.", en = "Photos permission required to prepare images and albums.", fr = "Autorisation Photos requise pour préparer les images et albums."),
             onRequestPermission = onRequestPhotosPermission,
             isLoading = photosPreload.isLoading,
             loadedCount = photosLoaded,
             totalCount = photosTotal,
-            loadingLabel = "Precaricamento immagini: $photosLoaded / ${maxOf(photosLoaded, photosTotal)} foto",
-            readyLabel = "$photosTotal foto totali preparate",
-            detailLabel = "$photosAlbums album rilevati • ${formatMb(photosBytes)} in qualità originale.",
+            loadingLabel = DirectSwitchL10n.tr("Verifica foto idonee: $photosLoaded / ${maxOf(photosLoaded, photosTotal)}", en = "Checking eligible photos: $photosLoaded / ${maxOf(photosLoaded, photosTotal)}", fr = "Vérification des photos : $photosLoaded / ${maxOf(photosLoaded, photosTotal)}"),
+            readyLabel = DirectSwitchL10n.tr("$photosTotal foto idonee al trasferimento", en = "$photosTotal eligible photos ready to transfer", fr = "$photosTotal photos prêtes au transfert"),
+            detailLabel = DirectSwitchL10n.tr("$photosAlbums album rilevati • ${formatMb(photosBytes)} in qualità originale.", en = "$photosAlbums albums found • ${formatMb(photosBytes)} in original quality.", fr = "$photosAlbums albums détectés • ${formatMb(photosBytes)} en qualité d'origine."),
             accentColor = DirectSwitchTheme.orange,
             onReload = onReloadPhotos
         )
@@ -2244,21 +2288,21 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.Videocam,
         iconColor = DirectSwitchTheme.red,
-        title = "Video originali",
-        countBadge = if (videosTotal > 0) "$videosTotal video • ${formatMb(videosBytes)}" else null,
+        title = DirectSwitchL10n.tr("Video originali"),
+        countBadge = if (videosTotal > 0) "$videosTotal ${DirectSwitchL10n.tr("video")} • ${formatMb(videosBytes)}" else null,
         checked = categories.videos,
         onCheckedChange = { onUpdateCategories(categories.copy(videos = it)) }
     ) {
         ProgressivePreloadDropdownBody(
             hasPermission = MediaExifScannerAndImporter.hasVideoPermission(wizardContext),
-            permissionTitle = "Permesso Video richiesto per preparare i filmati originali.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso Video richiesto per preparare i filmati originali.", en = "Videos permission required to prepare original clips.", fr = "Autorisation Vidéos requise pour préparer les vidéos."),
             onRequestPermission = onRequestVideosPermission,
             isLoading = videosPreload.isLoading,
             loadedCount = videosLoaded,
             totalCount = videosTotal,
-            loadingLabel = "Precaricamento video: $videosLoaded / ${maxOf(videosLoaded, videosTotal)} video",
-            readyLabel = "$videosTotal video originali preparati",
-            detailLabel = "Qualità 4K e Slow-Motion preservata • ${formatMb(videosBytes)}.",
+            loadingLabel = DirectSwitchL10n.tr("Verifica video idonei: $videosLoaded / ${maxOf(videosLoaded, videosTotal)}", en = "Checking eligible videos: $videosLoaded / ${maxOf(videosLoaded, videosTotal)}", fr = "Vérification des vidéos : $videosLoaded / ${maxOf(videosLoaded, videosTotal)}"),
+            readyLabel = DirectSwitchL10n.tr("$videosTotal video idonei al trasferimento", en = "$videosTotal eligible videos ready to transfer", fr = "$videosTotal vidéos prêtes au transfert"),
+            detailLabel = DirectSwitchL10n.tr("Qualità 4K e Slow-Motion preservata • ${formatMb(videosBytes)}.", en = "4K & Slow-Motion quality preserved • ${formatMb(videosBytes)}.", fr = "Qualité 4K et Ralenti préservée • ${formatMb(videosBytes)}."),
             accentColor = DirectSwitchTheme.red,
             onReload = onReloadVideos
         )
@@ -2278,14 +2322,14 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.CalendarMonth,
         iconColor = DirectSwitchTheme.indigo,
-        title = "Calendari",
-        countBadge = if (activeCalCount > 0) "$activeCalCount eventi" else null,
+        title = DirectSwitchL10n.tr("Calendari"),
+        countBadge = if (activeCalCount > 0) "$activeCalCount ${DirectSwitchL10n.tr("eventi")}" else null,
         checked = categories.calendars,
         onCheckedChange = { onUpdateCategories(categories.copy(calendars = it)) }
     ) {
         DateSyncDropdownBody(
             hasPermission = CalendarMigrator.hasReadPermission(wizardContext),
-            permissionTitle = "Permesso Calendario richiesto per leggere gli eventi.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso Calendario richiesto per leggere gli eventi.", en = "Calendar permission required to read events.", fr = "Autorisation Calendrier requise pour lire les événements."),
             onRequestPermission = onRequestCalendarsPermission,
             isLoading = calendarsSync.isLoading,
             lastUpdatedEpochMillis = calendarsSync.lastUpdatedEpochMillis,
@@ -2305,14 +2349,14 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.Sms,
         iconColor = DirectSwitchTheme.green,
-        title = "Messaggi SMS",
-        countBadge = if (activeSmsCount > 0) "$activeSmsCount messaggi" else null,
+        title = DirectSwitchL10n.tr("Messaggi SMS"),
+        countBadge = if (activeSmsCount > 0) "$activeSmsCount ${DirectSwitchL10n.tr("messaggi")}" else null,
         checked = categories.sms,
         onCheckedChange = { onUpdateCategories(categories.copy(sms = it)) }
     ) {
         DateSyncDropdownBody(
             hasPermission = SmsSystemScanner.hasReadPermission(wizardContext),
-            permissionTitle = "Permesso SMS richiesto per preparare i messaggi.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso SMS richiesto per preparare i messaggi.", en = "SMS permission required to prepare messages.", fr = "Autorisation SMS requise pour préparer les messages."),
             onRequestPermission = onRequestSmsPermission,
             isLoading = smsSync.isLoading,
             lastUpdatedEpochMillis = smsSync.lastUpdatedEpochMillis,
@@ -2327,24 +2371,24 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.Call,
         iconColor = DirectSwitchTheme.teal,
-        title = "Cronologia Chiamate",
-        countBadge = if (callLogsCount > 0) "$callLogsCount chiamate" else "Registro + archivio",
+        title = DirectSwitchL10n.tr("Cronologia Chiamate"),
+        countBadge = if (callLogsCount > 0) "$callLogsCount ${DirectSwitchL10n.tr("chiamate", en = "calls", fr = "appels")}" else DirectSwitchL10n.tr("Registro + archivio", en = "Log + archive", fr = "Journal + archive"),
         checked = categories.callLogs,
         onCheckedChange = { onUpdateCategories(categories.copy(callLogs = it)) }
     ) {
         ProgressivePreloadDropdownBody(
             hasPermission = CallLogMigrator.hasReadPermission(wizardContext),
-            permissionTitle = "Permesso Registro Chiamate richiesto per esportare la cronologia.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso Registro Chiamate richiesto per esportare la cronologia.", en = "Call Log permission required to export history.", fr = "Autorisation Journal d'appels requise."),
             onRequestPermission = onRequestCallLogsPermission,
             isLoading = isLoadingCallLogs,
             loadedCount = callLogsCount,
             totalCount = callLogsCount,
-            loadingLabel = "Lettura registro chiamate...",
-            readyLabel = "$callLogsCount chiamate pronte",
+            loadingLabel = DirectSwitchL10n.tr("Lettura registro chiamate...", en = "Reading call history...", fr = "Lecture du journal d'appels..."),
+            readyLabel = DirectSwitchL10n.tr("$callLogsCount chiamate pronte", en = "$callLogsCount calls ready", fr = "$callLogsCount appels prêts"),
             detailLabel = if (isCrossOs) {
-                "Salvata su iPhone come archivio HTML/JSON leggibile in Cronologia_Chiamate."
+                DirectSwitchL10n.tr("Salvata su iPhone come archivio HTML/JSON leggibile in Cronologia_Chiamate.", en = "Saved on iPhone as readable HTML/JSON archive in Call_History.", fr = "Enregistré sur iPhone en archive HTML/JSON lisible.")
             } else {
-                "Importata nativamente nel registro chiamate Android + archivio di backup."
+                DirectSwitchL10n.tr("Importata nativamente nel registro chiamate Android + archivio di backup.", en = "Imported natively into Android call log + backup archive.", fr = "Importé nativement dans le journal d'appels Android + archive.")
             },
             accentColor = DirectSwitchTheme.teal,
             onReload = onReloadCallLogs
@@ -2354,21 +2398,21 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.AudioFile,
         iconColor = DirectSwitchTheme.blue,
-        title = "Audio e Memo Vocali",
-        countBadge = if (audioFilesCount > 0) "$audioFilesCount tracce" else "Registrazioni e MP3",
+        title = DirectSwitchL10n.tr("Audio e Memo Vocali"),
+        countBadge = if (audioFilesCount > 0) "$audioFilesCount ${DirectSwitchL10n.tr("tracce", en = "tracks", fr = "pistes")}" else DirectSwitchL10n.tr("Registrazioni e MP3", en = "Recordings & MP3", fr = "Enregistrements et MP3"),
         checked = categories.audio,
         onCheckedChange = { onUpdateCategories(categories.copy(audio = it)) }
     ) {
         ProgressivePreloadDropdownBody(
             hasPermission = AudioAndMemoMigrator.hasReadPermission(wizardContext),
-            permissionTitle = "Permesso Audio richiesto per trovare Memo Vocali e tracce.",
+            permissionTitle = DirectSwitchL10n.tr("Permesso Audio richiesto per trovare Memo Vocali e tracce.", en = "Audio permission required to scan Voice Memos & tracks.", fr = "Autorisation Audio requise pour scanner vos enregistrements."),
             onRequestPermission = onRequestAudioPermission,
             isLoading = isLoadingAudio,
             loadedCount = audioFilesCount,
             totalCount = audioFilesCount,
-            loadingLabel = "Ricerca memo vocali e audio...",
-            readyLabel = "$audioFilesCount file audio/memo pronti",
-            detailLabel = "Copia registrazioni vocali, .m4a, .mp3 e file audio nella cartella Musica / Audio_e_Memo.",
+            loadingLabel = DirectSwitchL10n.tr("Ricerca memo vocali e audio...", en = "Scanning voice memos and audio...", fr = "Recherche des mémos vocaux et audio..."),
+            readyLabel = DirectSwitchL10n.tr("$audioFilesCount file audio/memo pronti", en = "$audioFilesCount audio/memo files ready", fr = "$audioFilesCount fichiers audio prêts"),
+            detailLabel = DirectSwitchL10n.tr("Copia registrazioni vocali, .m4a, .mp3 e file audio nella cartella Musica / Audio_e_Memo.", en = "Copies voice recordings, .m4a, .mp3 and audio files to Music / Audio_e_Memo.", fr = "Copie enregistrements vocaux, .m4a, .mp3 dans Musique / Audio_e_Memo."),
             accentColor = DirectSwitchTheme.blue,
             onReload = onReloadAudio
         )
@@ -2379,13 +2423,13 @@ private fun SenderCategoriesWizardView(
     val hasPickedLocations = !vaultStatusNote.isNullOrBlank() ||
         remember(summary) { DocumentsAndWhatsAppScanner.getPersistedFolderTreeUris(wizardContext).isNotEmpty() }
     val docsBadge = summary?.let {
-        if (it.documentsCount > 0) "${maxOf(1, it.documentFoldersCount)} cartelle • ${it.documentsCount} file"
-        else "Memoria interna, Drive, SD"
+        if (it.documentsCount > 0) "${maxOf(1, it.documentFoldersCount)} ${DirectSwitchL10n.tr("cartelle", en = "folders", fr = "dossiers")} • ${it.documentsCount} ${DirectSwitchL10n.tr("file", en = "files", fr = "fichiers")}"
+        else DirectSwitchL10n.tr("Memoria interna, Drive, SD", en = "Internal storage, Drive, SD", fr = "Stockage interne, Drive, SD")
     }
     CategoryDropdownCard(
         icon = Icons.Filled.Description,
         iconColor = DirectSwitchTheme.teal,
-        title = "Documenti e Posizioni File",
+        title = DirectSwitchL10n.tr("Documenti e Posizioni File"),
         countBadge = docsBadge,
         checked = categories.documents,
         onCheckedChange = { onUpdateCategories(categories.copy(documents = it)) }
@@ -2411,8 +2455,8 @@ private fun SenderCategoriesWizardView(
         CategoryDropdownCard(
             icon = Icons.AutoMirrored.Filled.Chat,
             iconColor = DirectSwitchTheme.green,
-            title = "Chat WhatsApp",
-            countBadge = "Gratuito • Codice QR",
+            title = DirectSwitchL10n.tr("Chat WhatsApp"),
+            countBadge = DirectSwitchL10n.tr("Gratuito • Codice QR"),
             checked = categories.whatsAppVault,
             onCheckedChange = { onUpdateCategories(categories.copy(whatsAppVault = it)) }
         ) {
@@ -2432,8 +2476,8 @@ private fun SenderCategoriesWizardView(
     CategoryDropdownCard(
         icon = Icons.Filled.Apps,
         iconColor = DirectSwitchTheme.blue,
-        title = "App scaricate",
-        countBadge = if (selectedAppsCount > 0) "$selectedAppsCount app pronte" else null,
+        title = DirectSwitchL10n.tr("App scaricate"),
+        countBadge = if (selectedAppsCount > 0) DirectSwitchL10n.tr("$selectedAppsCount app pronte", en = "$selectedAppsCount apps ready", fr = "$selectedAppsCount apps prêtes") else null,
         checked = categories.installedApps,
         onCheckedChange = { onUpdateCategories(categories.copy(installedApps = it)) }
     ) {
@@ -2465,15 +2509,19 @@ private fun SenderCategoriesWizardView(
             ) {
                 AppleSettingsIcon(icon = Icons.Filled.Email, color = DirectSwitchTheme.slate, size = 26.dp)
                 Text(
-                    text = "App, Account Mail e Impostazioni",
+                    text = DirectSwitchL10n.tr("App, Account Mail e Impostazioni", en = "Apps, Mail Accounts & Settings", fr = "Apps, Comptes Mail et Réglages"),
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = DirectSwitchTheme.textPrimary
                 )
             }
             InfoCircleButton(
-                title = "Confronto con Passa a Android / Passa a iOS",
-                message = "• App installate: DirectSwitch trasferisce l'elenco completo delle tue app per riscaricarle con 1 tocco da App Store o Play Store sul telefono ricevente.\n• Account Mail (Gmail, iCloud, Outlook): per sicurezza Apple/Google le password non viaggiano mai in chiaro; a fine copia trovi il pulsante rapido per collegare il tuo account e riavere tutte le email.\n• Impostazioni di sistema: non vengono sovrascritte, così il telefono ricevente non viene né formattato né alterato."
+                title = DirectSwitchL10n.tr("Confronto con Passa a Android / Passa a iOS", en = "How it works vs Switch tools", fr = "Comment ça fonctionne"),
+                message = DirectSwitchL10n.tr(
+                    "• App installate: DirectSwitch trasferisce l'elenco completo delle tue app per riscaricarle con 1 tocco da App Store o Play Store sul telefono ricevente.\n• Account Mail (Gmail, iCloud, Outlook): per sicurezza Apple/Google le password non viaggiano mai in chiaro; a fine copia trovi il pulsante rapido per collegare il tuo account e riavere tutte le email.\n• Impostazioni di sistema: non vengono sovrascritte, così il telefono ricevente non viene né formattato né alterato.",
+                    en = "• Installed apps: DirectSwitch transfers your full app list so you can reinstall with 1 tap from App Store or Play Store.\n• Mail accounts (Gmail, iCloud, Outlook): for security passwords never leave the device; a quick shortcut is shown at the end.\n• System settings: untouched, so your receiving phone is never erased.",
+                    fr = "• Apps installées : DirectSwitch transfère la liste complète pour les réinstaller en 1 geste.\n• Comptes Mail : vos mots de passe ne quittent jamais l'appareil.\n• Réglages système : préservés sans jamais réinitialiser le téléphone."
+                )
             )
         }
     }
@@ -2488,19 +2536,19 @@ private fun SenderCategoriesWizardView(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Modalità Delta attiva (solo novità)",
+                        text = DirectSwitchL10n.tr("Modalità Delta attiva (solo novità)", en = "Delta Mode active (new items only)", fr = "Mode Delta actif (nouveautés)"),
                         fontSize = 13.5.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.teal
                     )
                     Text(
-                        text = "Verranno inviati solo i nuovi elementi creati dopo l'ultima copia verso ${activeDeltaBaseline.peerName}.",
+                        text = DirectSwitchL10n.tr("Verranno inviati solo i nuovi elementi creati dopo l'ultima copia verso ${activeDeltaBaseline.peerName}.", en = "Only new items created since the last transfer to ${activeDeltaBaseline.peerName} will be sent.", fr = "Seuls les nouveaux éléments créés depuis la dernière copie vers ${activeDeltaBaseline.peerName} seront envoyés."),
                         fontSize = 11.5.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
                 }
                 TextButton(onClick = onClearDeltaBaseline) {
-                    Text("Copia tutto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
+                    Text(DirectSwitchL10n.tr("Copia tutto", en = "Copy all", fr = "Tout copier"), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.blue)
                 }
             }
         }
@@ -2519,9 +2567,11 @@ private fun SenderCategoriesWizardView(
         !categories.installedApps
 
     DirectSwitchPrimaryButton(
-        text = if (isOnlyWhatsAppSelected) "Vai al passaggio Chat WhatsApp" else "Copia le voci selezionate",
+        text = if (isOnlyWhatsAppSelected) DirectSwitchL10n.tr("Vai al passaggio Chat WhatsApp") else DirectSwitchL10n.tr("Copia le voci selezionate"),
         onClick = onStartTransfer,
-        enabled = anySelected
+        enabled = anySelected,
+        isLoading = isLaunchingTransfer,
+        loadingText = DirectSwitchL10n.tr("Avvio preparazione...")
     )
 }
 
@@ -2584,13 +2634,13 @@ private fun TransferProgressWizardView(
                 )
             }
             Text(
-                text = "Chat WhatsApp",
+                text = DirectSwitchL10n.tr("Chat WhatsApp"),
                 fontSize = 23.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.textPrimary
             )
             Text(
-                text = "Segui i passaggi qui sotto per caricare le chat dentro WhatsApp (gratuito)",
+                text = DirectSwitchL10n.tr("Segui i passaggi qui sotto per caricare le chat dentro WhatsApp (gratuito)", en = "Follow the steps below to move chats inside WhatsApp (free)", fr = "Suivez les étapes ci-dessous pour transférer vos discussions dans WhatsApp (gratuit)"),
                 fontSize = 14.sp,
                 color = DirectSwitchTheme.textSecondary,
                 textAlign = TextAlign.Center
@@ -2603,7 +2653,7 @@ private fun TransferProgressWizardView(
         )
 
         DirectSwitchPrimaryButton(
-            text = "Fine",
+            text = DirectSwitchL10n.tr("Fine"),
             onClick = onFinish
         )
         return
@@ -2638,9 +2688,9 @@ private fun TransferProgressWizardView(
             ) {
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = DirectSwitchTheme.green, modifier = Modifier.size(40.dp))
             }
-            Text("Trasferimento completato", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
+            Text(DirectSwitchL10n.tr("Trasferimento completato"), fontSize = 23.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
             Text(
-                text = if (isReceiver) "I tuoi dati sono pronti su questo telefono" else "Tutti i dati selezionati sono stati copiati",
+                text = if (isReceiver) DirectSwitchL10n.tr("I tuoi dati sono pronti su questo telefono") else DirectSwitchL10n.tr("Tutti i dati selezionati sono stati copiati"),
                 fontSize = 14.sp,
                 color = DirectSwitchTheme.textSecondary,
                 textAlign = TextAlign.Center
@@ -2648,12 +2698,12 @@ private fun TransferProgressWizardView(
         } else {
             DirectSwitchAppleEmblem(size = 60.dp)
             Text(
-                text = if (isReceiver) "Copia su questo telefono..." else "Copia dei dati in corso...",
+                text = if (isReceiver) DirectSwitchL10n.tr("Copia su questo telefono...") else DirectSwitchL10n.tr("Copia dei dati in corso..."),
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.textPrimary
             )
-            Text("Tieni entrambi i telefoni vicini fino al termine", fontSize = 14.sp, color = DirectSwitchTheme.textSecondary)
+            Text(DirectSwitchL10n.tr("Tieni entrambi i telefoni vicini fino al termine"), fontSize = 14.sp, color = DirectSwitchTheme.textSecondary)
         }
     }
 
@@ -2694,7 +2744,7 @@ private fun TransferProgressWizardView(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = progress.currentFileName.ifEmpty { progress.phaseLabel },
+                text = progress.currentFileName.ifEmpty { DirectSwitchL10n.tr(progress.phaseLabel) },
                 fontSize = 13.sp,
                 color = DirectSwitchTheme.textSecondary,
                 maxLines = 1,
@@ -2727,7 +2777,7 @@ private fun TransferProgressWizardView(
                     modifier = Modifier.size(18.dp)
                 )
                 Text(
-                    text = progress.etaLabel,
+                    text = DirectSwitchL10n.translateEta(progress.etaLabel) ?: progress.etaLabel,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = DirectSwitchTheme.blue
@@ -2751,21 +2801,21 @@ private fun TransferProgressWizardView(
         SummaryItemRow(
             Icons.Filled.Contacts,
             DirectSwitchTheme.blue,
-            "Contatti uniti",
+            DirectSwitchL10n.tr("Contatti uniti"),
             formatImportedWithDuplicates(progress.mergedContacts, progress.contactsAlreadyPresent)
         )
         HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
         SummaryItemRow(
             Icons.Filled.Image,
             DirectSwitchTheme.orange,
-            "Foto, Video e File",
+            DirectSwitchL10n.tr("Foto, Video e File"),
             if (progress.totalItems > 0) "${progress.completedItems} / ${progress.totalItems}" else "${progress.completedItems}"
         )
         HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
         SummaryItemRow(
             Icons.Filled.CalendarMonth,
             DirectSwitchTheme.indigo,
-            "Calendari importati",
+            DirectSwitchL10n.tr("Calendari importati"),
             formatImportedWithDuplicates(progress.importedCalendars, progress.calendarsAlreadyPresent)
         )
         if (progress.activeTransferScope.reminders || progress.importedReminders > 0 || progress.remindersAlreadyPresent > 0) {
@@ -2773,37 +2823,37 @@ private fun TransferProgressWizardView(
             SummaryItemRow(
                 Icons.Filled.Checklist,
                 DirectSwitchTheme.blue,
-                "Promemoria salvati",
+                DirectSwitchL10n.tr("Promemoria salvati"),
                 formatImportedWithDuplicates(progress.importedReminders, progress.remindersAlreadyPresent)
             )
         }
         if (progress.importedSms > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.Sms, DirectSwitchTheme.green, "Messaggi salvati", "${progress.importedSms}")
+            SummaryItemRow(Icons.Filled.Sms, DirectSwitchTheme.green, DirectSwitchL10n.tr("Messaggi salvati"), "${progress.importedSms}")
         }
         if (progress.importedCallLogs > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.Call, DirectSwitchTheme.teal, "Chiamate salvate", "${progress.importedCallLogs}")
+            SummaryItemRow(Icons.Filled.Call, DirectSwitchTheme.teal, DirectSwitchL10n.tr("Chiamate salvate"), "${progress.importedCallLogs}")
         }
         if (progress.healedTimelineCount > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.Schedule, DirectSwitchTheme.blue, "Date EXIF ricostruite", "${progress.healedTimelineCount}")
+            SummaryItemRow(Icons.Filled.Schedule, DirectSwitchTheme.blue, DirectSwitchL10n.tr("Date EXIF ricostruite"), "${progress.healedTimelineCount}")
         }
         if (progress.convertedLiveMotionCount > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.Image, DirectSwitchTheme.teal, "Live / Motion Photo preservate", "${progress.convertedLiveMotionCount}")
+            SummaryItemRow(Icons.Filled.Image, DirectSwitchTheme.teal, DirectSwitchL10n.tr("Live / Motion Photo preservate"), "${progress.convertedLiveMotionCount}")
         }
         if (progress.healedCodecCount > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.AudioFile, DirectSwitchTheme.indigo, "Audio convertiti compatibili iOS", "${progress.healedCodecCount}")
+            SummaryItemRow(Icons.Filled.AudioFile, DirectSwitchTheme.indigo, DirectSwitchL10n.tr("Audio convertiti compatibili iOS"), "${progress.healedCodecCount}")
         }
         if (progress.skippedDuplicates > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.CheckCircle, DirectSwitchTheme.teal, "Doppioni ignorati", "${progress.skippedDuplicates}")
+            SummaryItemRow(Icons.Filled.CheckCircle, DirectSwitchTheme.teal, DirectSwitchL10n.tr("Doppioni ignorati"), "${progress.skippedDuplicates}")
         }
         if (progress.failedItemsCount > 0) {
             HorizontalDivider(modifier = Modifier.padding(start = 56.dp), color = DirectSwitchTheme.hairline)
-            SummaryItemRow(Icons.Filled.Warning, DirectSwitchTheme.orange, "File non disponibili saltati", "${progress.failedItemsCount}")
+            SummaryItemRow(Icons.Filled.Warning, DirectSwitchTheme.orange, DirectSwitchL10n.tr("File non disponibili saltati"), "${progress.failedItemsCount}")
         }
     }
 
@@ -2828,19 +2878,19 @@ private fun TransferProgressWizardView(
                 ) {
                     AppleSettingsIcon(icon = Icons.Filled.Email, color = DirectSwitchTheme.slate)
                     Text(
-                        text = "Account Mail e Cloud",
+                        text = DirectSwitchL10n.tr("Account Mail e Cloud"),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                 }
                 InfoCircleButton(
-                    title = "Sincronizza Email e Account",
-                    message = "Come su Android Switch, per motivi di sicurezza le password delle caselle email non viaggiano tra dispositivi. Accedi qui al tuo account Google, iCloud o Outlook per sincronizzare istantaneamente tutte le email."
+                    title = DirectSwitchL10n.tr("Sincronizza Email e Account", en = "Sync Email & Accounts", fr = "Synchroniser e-mails et comptes"),
+                    message = DirectSwitchL10n.tr("Come su Android Switch, per motivi di sicurezza le password delle caselle email non viaggiano tra dispositivi. Accedi qui al tuo account Google, iCloud o Outlook per sincronizzare istantaneamente tutte le email.", en = "For security, email passwords never leave the old device. Sign in to Google, iCloud or Outlook here to sync your email instantly.", fr = "Pour votre sécurité, les mots de passe ne quittent jamais l'appareil. Connectez-vous ici pour synchroniser vos e-mails.")
                 )
             }
             DirectSwitchSecondaryButton(
-                text = "Aggiungi account Mail / Google",
+                text = DirectSwitchL10n.tr("Aggiungi account Mail / Google", en = "Add Mail / Google account", fr = "Ajouter un compte Mail / Google"),
                 onClick = { InstalledAppsScanner.openAddAccountSettings(context) }
             )
         }
@@ -2863,13 +2913,13 @@ private fun TransferProgressWizardView(
                     AppleSettingsIcon(icon = Icons.Filled.Folder, color = DirectSwitchTheme.teal)
                     Column {
                         Text(
-                            text = "Cartelle ricreate su questo telefono",
+                            text = DirectSwitchL10n.tr("Cartelle ricreate su questo telefono", en = "Folders restored on this phone", fr = "Dossiers recréés sur ce téléphone"),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
-                            text = "$totalReceivedFiles file in ${sortedFolders.size} cartelle originali",
+                            text = DirectSwitchL10n.tr("$totalReceivedFiles file in ${sortedFolders.size} cartelle originali", en = "$totalReceivedFiles files in ${sortedFolders.size} original folders", fr = "$totalReceivedFiles fichiers dans ${sortedFolders.size} dossiers"),
                             fontSize = 12.sp,
                             color = DirectSwitchTheme.textSecondary
                         )
@@ -2890,7 +2940,7 @@ private fun TransferProgressWizardView(
                             modifier = Modifier.weight(1f)
                         )
                         Text(
-                            text = "$count file",
+                            text = "$count ${DirectSwitchL10n.tr("file", en = "files", fr = "fichiers")}",
                             fontSize = 12.sp,
                             color = DirectSwitchTheme.textSecondary
                         )
@@ -2898,7 +2948,7 @@ private fun TransferProgressWizardView(
                 }
                 if (sortedFolders.size > 8) {
                     Text(
-                        text = "e altre ${sortedFolders.size - 8} cartelle salvate nella memoria del telefono.",
+                        text = DirectSwitchL10n.tr("e altre ${sortedFolders.size - 8} cartelle salvate nella memoria del telefono.", en = "and ${sortedFolders.size - 8} more folders saved on device storage.", fr = "et ${sortedFolders.size - 8} autres dossiers enregistrés."),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.teal
@@ -2960,14 +3010,16 @@ private fun TransferProgressWizardView(
     }
 
     if (progress.isCompleted) {
-        val checklistItems = remember(progress.pendingNativeWhatsAppMigration, progress.receivedInstalledApps.size, progress.skippedItems.size, progress.failedItemsCount) {
+        val activeLang = DirectSwitchL10n.activeLanguage
+        val checklistItems = remember(progress.pendingNativeWhatsAppMigration, progress.receivedInstalledApps.size, progress.skippedItems.size, progress.failedItemsCount, activeLang) {
             MigrationReceiptBuilder.defaultChecklist(
                 hasWhatsApp = progress.activeTransferScope.whatsApp || progress.pendingNativeWhatsAppMigration,
                 hasApps = progress.activeTransferScope.apps || progress.receivedInstalledApps.isNotEmpty(),
-                hasSkipped = progress.skippedItems.isNotEmpty() || progress.failedItemsCount > 0
+                hasSkipped = progress.skippedItems.isNotEmpty() || progress.failedItemsCount > 0,
+                lang = activeLang
             )
         }
-        val receiptText = remember(progress) {
+        val receiptText = remember(progress, activeLang) {
             MigrationReceiptBuilder.buildReceiptText(
                 peerName = progress.peerDeviceName,
                 isReceiver = isReceiver,
@@ -2980,7 +3032,8 @@ private fun TransferProgressWizardView(
                 importedSms = progress.importedSms,
                 importedCallLogs = progress.importedCallLogs,
                 appsCount = progress.receivedInstalledApps.size,
-                skippedCount = maxOf(progress.skippedItems.size, progress.failedItemsCount)
+                skippedCount = maxOf(progress.skippedItems.size, progress.failedItemsCount),
+                lang = activeLang
             )
         }
         PostMigrationChecklistCard(
@@ -2991,9 +3044,9 @@ private fun TransferProgressWizardView(
 
     if (isReceiver && stillDefaultSms && (progress.isCompleted || progress.errorMessage != null)) {
         DirectSwitchCard(padding = 14.dp) {
-            Text("Ripristina la tua app Messaggi predefinita", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+            Text(DirectSwitchL10n.tr("Ripristina la tua app Messaggi predefinita", en = "Restore your default Messages app", fr = "Restaurer votre app Messages par défaut"), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
             DirectSwitchSecondaryButton(
-                text = "Ripristina app Messaggi",
+                text = DirectSwitchL10n.tr("Ripristina app Messaggi", en = "Restore Messages app", fr = "Restaurer l'app Messages"),
                 onClick = {
                     runCatching { restoreSmsLauncher.launch(SmsSystemScanner.createRestorePreviousSmsAppIntent(context)) }
                 }
@@ -3003,16 +3056,19 @@ private fun TransferProgressWizardView(
 
     if (progress.isCompleted || progress.errorMessage != null) {
         DirectSwitchPrimaryButton(
-            text = if (progress.isCompleted) "Fine" else "Torna alla Home",
+            text = if (progress.isCompleted) DirectSwitchL10n.tr("Fine") else DirectSwitchL10n.tr("Torna alla Home"),
             onClick = onFinish
         )
     }
 }
 
-private fun formatImportedWithDuplicates(imported: Int, alreadyPresent: Int): String = when {
-    imported == 0 && alreadyPresent > 0 -> "0 ($alreadyPresent già presenti)"
-    alreadyPresent > 0 -> "$imported (+$alreadyPresent già presenti)"
-    else -> "$imported"
+private fun formatImportedWithDuplicates(imported: Int, alreadyPresent: Int): String {
+    val already = DirectSwitchL10n.tr("già presenti", en = "already present", fr = "déjà présents")
+    return when {
+        imported == 0 && alreadyPresent > 0 -> "0 ($alreadyPresent $already)"
+        alreadyPresent > 0 -> "$imported (+$alreadyPresent $already)"
+        else -> "$imported"
+    }
 }
 
 @Composable
@@ -3135,9 +3191,9 @@ private fun ReceiverAppsMirrorCard(
                 Column {
                     Text(
                         text = if (pendingApps.isEmpty()) {
-                            "Tutte le app già installate (${installedApps.size})"
+                            DirectSwitchL10n.tr("Tutte le app già installate (${installedApps.size})", en = "All apps already installed (${installedApps.size})", fr = "Toutes les apps déjà installées (${installedApps.size})")
                         } else {
-                            "App da installare (${pendingApps.size})"
+                            DirectSwitchL10n.tr("App da installare (${pendingApps.size})", en = "Apps to install (${pendingApps.size})", fr = "Apps à installer (${pendingApps.size})")
                         },
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
@@ -3145,9 +3201,9 @@ private fun ReceiverAppsMirrorCard(
                     )
                     Text(
                         text = when {
-                            pendingApps.isEmpty() -> "Nessuna app mancante: hai già tutte le ${apps.size} app sul telefono"
-                            installedApps.isNotEmpty() -> "${installedApps.size} già presenti e nascoste automaticamente • aggiornamento al rientro"
-                            else -> "Tocca un'app per installarla dal Play Store (aggiornamento automatico al rientro)"
+                            pendingApps.isEmpty() -> DirectSwitchL10n.tr("Nessuna app mancante: hai già tutte le ${apps.size} app sul telefono", en = "No missing apps: all ${apps.size} apps are already installed", fr = "Aucune app manquante : les ${apps.size} apps sont déjà installées")
+                            installedApps.isNotEmpty() -> DirectSwitchL10n.tr("${installedApps.size} già presenti e nascoste automaticamente • aggiornamento al rientro", en = "${installedApps.size} already installed and hidden • refreshes on return", fr = "${installedApps.size} déjà installées et masquées • actualisation au retour")
+                            else -> DirectSwitchL10n.tr("Tocca un'app per installarla dal Play Store (aggiornamento automatico al rientro)", en = "Tap an app to install from Play Store (refreshes on return)", fr = "Touchez une app pour l'installer depuis Play Store")
                         },
                         fontSize = 12.sp,
                         color = DirectSwitchTheme.textSecondary
@@ -3166,7 +3222,7 @@ private fun ReceiverAppsMirrorCard(
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Aggiorna stato app",
+                        contentDescription = DirectSwitchL10n.tr("Aggiorna"),
                         tint = DirectSwitchTheme.blue,
                         modifier = Modifier.size(16.dp)
                     )
@@ -3176,7 +3232,7 @@ private fun ReceiverAppsMirrorCard(
 
         pendingApps.firstOrNull()?.let { nextApp ->
             DirectSwitchPrimaryButton(
-                text = "Installa prossima app (1/${pendingApps.size}): ${nextApp.appName}",
+                text = DirectSwitchL10n.tr("Installa prossima app (1/${pendingApps.size}): ${nextApp.appName}", en = "Install next app (1/${pendingApps.size}): ${nextApp.appName}", fr = "Installer l'app suivante (1/${pendingApps.size}) : ${nextApp.appName}"),
                 onClick = { InstalledAppsScanner.openAppOnPlayStore(context, nextApp, peerPlatform) }
             )
         }
@@ -3331,13 +3387,13 @@ private fun ReceiverConnectedWizardView(
             )
         }
         Text(
-            text = "Collegato!",
+            text = DirectSwitchL10n.tr("Collegato!"),
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textPrimary
         )
         Text(
-            text = "Prosegui sull'altro telefono",
+            text = DirectSwitchL10n.tr("Prosegui sull'altro telefono"),
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
             color = DirectSwitchTheme.blue
@@ -3352,13 +3408,17 @@ private fun ReceiverConnectedWizardView(
             AppleSettingsIcon(icon = Icons.AutoMirrored.Filled.ArrowForward, color = DirectSwitchTheme.blue)
             Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.weight(1f)) {
                 Text(
-                    text = peerDeviceName.ifBlank { "Altro telefono collegato" },
+                    text = peerDeviceName.ifBlank { DirectSwitchL10n.tr("Altro telefono collegato", en = "Other phone connected", fr = "Autre téléphone connecté") },
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
                 Text(
-                    text = "Scegli sull'altro telefono le categorie da copiare e tocca «Copia le voci selezionate».",
+                    text = DirectSwitchL10n.tr(
+                        "Scegli sull'altro telefono le categorie da copiare e tocca «Copia le voci selezionate».",
+                        en = "Choose what to copy on the other phone and tap 'Copy selected items'.",
+                        fr = "Choisissez les catégories sur l'autre téléphone puis touchez « Copier les éléments sélectionnés »."
+                    ),
                     fontSize = 13.sp,
                     color = DirectSwitchTheme.textSecondary
                 )
@@ -3377,7 +3437,7 @@ private fun ReceiverConnectedWizardView(
             )
             Spacer(modifier = Modifier.size(10.dp))
             Text(
-                text = "In attesa della conferma sull'altro telefono...",
+                text = DirectSwitchL10n.tr("In attesa della conferma sull'altro telefono...", en = "Waiting for confirmation on the other phone...", fr = "En attente de confirmation sur l'autre téléphone..."),
                 fontSize = 13.sp,
                 color = DirectSwitchTheme.textSecondary
             )
@@ -3385,7 +3445,7 @@ private fun ReceiverConnectedWizardView(
     }
 
     DirectSwitchNeutralOutlinedButton(
-        text = "Annulla",
+        text = DirectSwitchL10n.tr("Annulla"),
         onClick = onCancel
     )
 }
@@ -3439,7 +3499,7 @@ private fun TransferPreparationWizardView(
     ) {
         DirectSwitchAppleEmblem(size = 62.dp)
         Text(
-            text = if (isReceiver) "Sto preparando la ricezione..." else "Sto preparando il trasferimento...",
+            text = if (isReceiver) DirectSwitchL10n.tr("Sto preparando la ricezione…") else DirectSwitchL10n.tr("Sto preparando il trasferimento…"),
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textPrimary,
@@ -3447,9 +3507,13 @@ private fun TransferPreparationWizardView(
         )
         Text(
             text = if (isReceiver) {
-                "L'altro telefono sta preparando e verificando i dati selezionati prima di iniziare da 0%."
+                DirectSwitchL10n.tr(
+                    "L'altro telefono sta preparando e verificando i dati selezionati prima di iniziare da 0%.",
+                    en = "The other phone is preparing and checking selected data before starting at 0%.",
+                    fr = "L'autre téléphone prépare et vérifie les données avant de démarrer à 0%."
+                )
             } else {
-                "Conteggio e verifica rapida dei dati selezionati prima di iniziare entrambi da 0%."
+                DirectSwitchL10n.tr("Preparazione rapida e conteggio delle voci selezionate prima di partire dallo 0%.")
             },
             fontSize = 13.5.sp,
             color = DirectSwitchTheme.textSecondary,
@@ -3469,7 +3533,7 @@ private fun TransferPreparationWizardView(
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = DirectSwitchTheme.blue)
                 Spacer(modifier = Modifier.size(10.dp))
                 Text(
-                    text = "Preparazione in corso...",
+                    text = DirectSwitchL10n.tr("Preparazione in corso..."),
                     fontSize = 14.sp,
                     color = DirectSwitchTheme.textSecondary
                 )
@@ -3490,10 +3554,11 @@ private fun TransferPreparationWizardView(
                 } else {
                     item.isReady && shownCount >= item.targetCount
                 }
+                val locUnit = if (shownCount == 1) DirectSwitchL10n.tr(item.unitSingular) else DirectSwitchL10n.tr(item.unitPlural)
                 val statusLabel = when {
-                    isReceiver && !progress.arePreparationItemsReady && item.targetCount == 0 -> "In preparazione..."
-                    !isReceiver && !item.isReady && shownCount == 0 -> "Analisi..."
-                    else -> item.formattedCount(shownCount)
+                    isReceiver && !progress.arePreparationItemsReady && item.targetCount == 0 -> DirectSwitchL10n.tr("In preparazione...", en = "Preparing...", fr = "Préparation...")
+                    !isReceiver && !item.isReady && shownCount == 0 -> DirectSwitchL10n.tr("Analisi...", en = "Scanning...", fr = "Analyse...")
+                    else -> "$shownCount $locUnit"
                 }
 
                 Row(
@@ -3510,7 +3575,7 @@ private fun TransferPreparationWizardView(
                     ) {
                         AppleSettingsIcon(icon = icon, color = iconColor)
                         Text(
-                            text = item.title,
+                            text = DirectSwitchL10n.tr(item.title),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium,
                             color = DirectSwitchTheme.textPrimary
@@ -3547,7 +3612,7 @@ private fun TransferPreparationWizardView(
     }
 
     DirectSwitchNeutralOutlinedButton(
-        text = "Annulla",
+        text = DirectSwitchL10n.tr("Annulla"),
         onClick = onCancel
     )
 }

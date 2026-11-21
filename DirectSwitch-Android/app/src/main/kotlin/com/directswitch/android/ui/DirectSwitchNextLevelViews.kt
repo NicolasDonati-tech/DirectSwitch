@@ -81,6 +81,7 @@ import com.directswitch.android.protocol.CompletedMigrationRecord
 import com.directswitch.android.protocol.DecommissionAuditReport
 import com.directswitch.android.protocol.DecommissionReadinessEvaluator
 import com.directswitch.android.protocol.DecommissionReadinessLevel
+import com.directswitch.android.protocol.DirectSwitchL10n
 import com.directswitch.android.protocol.DirectSwitchLanguage
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.MediaTransferFilterOptions
@@ -100,7 +101,7 @@ import com.directswitch.android.ui.theme.DirectSwitchPrimaryButton
 import com.directswitch.android.ui.theme.DirectSwitchSecondaryButton
 import com.directswitch.android.ui.theme.DirectSwitchTheme
 
-// MARK: - Selettore Lingua (Sistema / IT / EN / ES / FR / DE)
+// MARK: - Selettore Lingua (Sistema / IT / EN / FR)
 
 @Composable
 fun LanguageSelectorChip(
@@ -123,7 +124,7 @@ fun LanguageSelectorChip(
             ) {
                 Icon(
                     imageVector = Icons.Filled.Language,
-                    contentDescription = "Lingua",
+                    contentDescription = DirectSwitchL10n.tr("Lingua", en = "Language", fr = "Langue"),
                     tint = DirectSwitchTheme.blue,
                     modifier = Modifier.size(14.dp)
                 )
@@ -198,13 +199,21 @@ fun ResumableCheckpointCard(
                 AppleSettingsIcon(icon = Icons.Filled.Refresh, color = DirectSwitchTheme.orange)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Trasferimento interrotto (${checkpoint.completionPercent()}%)",
+                        text = DirectSwitchL10n.tr(
+                            "Trasferimento interrotto (${checkpoint.completionPercent()}%)",
+                            en = "Interrupted transfer (${checkpoint.completionPercent()}%)",
+                            fr = "Transfert interrompu (${checkpoint.completionPercent()}%)"
+                        ),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
-                        text = "Verso ${checkpoint.receiverName} • ${checkpoint.completedItemIds.size}/${maxOf(checkpoint.totalItems, checkpoint.completedItemIds.size)} file già salvati",
+                        text = DirectSwitchL10n.tr(
+                            "Verso ${checkpoint.receiverName} • ${checkpoint.completedItemIds.size}/${maxOf(checkpoint.totalItems, checkpoint.completedItemIds.size)} file già salvati",
+                            en = "To ${checkpoint.receiverName} • ${checkpoint.completedItemIds.size}/${maxOf(checkpoint.totalItems, checkpoint.completedItemIds.size)} files already saved",
+                            fr = "Vers ${checkpoint.receiverName} • ${checkpoint.completedItemIds.size}/${maxOf(checkpoint.totalItems, checkpoint.completedItemIds.size)} fichiers déjà enregistrés"
+                        ),
                         fontSize = 12.5.sp,
                         color = DirectSwitchTheme.textSecondary,
                         maxLines = 2,
@@ -230,7 +239,7 @@ fun ResumableCheckpointCard(
                     ) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.size(4.dp))
-                        Text("Riprendi ora", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(DirectSwitchL10n.tr("Riprendi ora"), fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 }
 
@@ -240,7 +249,7 @@ fun ResumableCheckpointCard(
                     color = DirectSwitchTheme.inputSurface
                 ) {
                     Text(
-                        text = "Ignora",
+                        text = DirectSwitchL10n.tr("Ignora"),
                         fontSize = 13.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.textSecondary,
@@ -272,7 +281,7 @@ fun ConnectionMediumPill(medium: TransferConnectionMedium) {
         ) {
             Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(14.dp))
             Text(
-                text = medium.badgeLabel(),
+                text = DirectSwitchL10n.tr(medium.badgeLabel()),
                 fontSize = 11.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = tint
@@ -293,7 +302,7 @@ fun PhotoFilterChipsBar(
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            text = "Filtri rapidi Foto",
+            text = DirectSwitchL10n.tr("Filtri rapidi Foto"),
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textSecondary
@@ -305,14 +314,14 @@ fun PhotoFilterChipsBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             FilterPillChip(
-                label = "Tutte le foto",
+                label = DirectSwitchL10n.tr("Tutte le foto"),
                 selected = !filters.photosLastYearOnly && filters.selectedPhotoAlbums.isEmpty(),
                 accentColor = DirectSwitchTheme.blue
             ) {
                 onFiltersChange(filters.copy(photosLastYearOnly = false, selectedPhotoAlbums = emptyList()))
             }
             FilterPillChip(
-                label = "Solo ultimo anno",
+                label = DirectSwitchL10n.tr("Solo ultimo anno"),
                 selected = filters.photosLastYearOnly,
                 accentColor = DirectSwitchTheme.blue
             ) {
@@ -321,9 +330,9 @@ fun PhotoFilterChipsBar(
             if (availableAlbums.isNotEmpty()) {
                 FilterPillChip(
                     label = if (filters.selectedPhotoAlbums.isEmpty()) {
-                        "Scegli Album (${availableAlbums.size})"
+                        DirectSwitchL10n.tr("Scegli Album (${availableAlbums.size})", en = "Choose Albums (${availableAlbums.size})", fr = "Choisir albums (${availableAlbums.size})")
                     } else {
-                        "Album: ${filters.selectedPhotoAlbums.size} scelti"
+                        DirectSwitchL10n.tr("Album: ${filters.selectedPhotoAlbums.size} scelti", en = "Albums: ${filters.selectedPhotoAlbums.size} picked", fr = "Albums : ${filters.selectedPhotoAlbums.size} choisis")
                     },
                     selected = filters.selectedPhotoAlbums.isNotEmpty() || showAlbums,
                     accentColor = DirectSwitchTheme.orange
@@ -388,7 +397,7 @@ fun VideoFilterChipsBar(
     val halfGbBytes = 500L * 1024L * 1024L
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            text = "Filtri rapidi Video",
+            text = DirectSwitchL10n.tr("Filtri rapidi Video", en = "Quick Video Filters", fr = "Filtres rapides Vidéo"),
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textSecondary
@@ -400,21 +409,21 @@ fun VideoFilterChipsBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             FilterPillChip(
-                label = "Tutti i video",
+                label = DirectSwitchL10n.tr("Tutti i video"),
                 selected = !filters.videosLastYearOnly && filters.maxVideoBytes == 0L,
                 accentColor = DirectSwitchTheme.red
             ) {
                 onFiltersChange(filters.copy(videosLastYearOnly = false, maxVideoBytes = 0L))
             }
             FilterPillChip(
-                label = "Solo ultimo anno",
+                label = DirectSwitchL10n.tr("Solo ultimo anno"),
                 selected = filters.videosLastYearOnly,
                 accentColor = DirectSwitchTheme.red
             ) {
                 onFiltersChange(filters.copy(videosLastYearOnly = !filters.videosLastYearOnly))
             }
             FilterPillChip(
-                label = "Solo ≤ 500 MB",
+                label = DirectSwitchL10n.tr("Solo ≤ 500 MB"),
                 selected = filters.maxVideoBytes == halfGbBytes,
                 accentColor = DirectSwitchTheme.red
             ) {
@@ -478,23 +487,35 @@ fun GuidedPasswordsCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (stagedCsvCount > 0) {
-                            "Password CSV pronto ($stagedCsvCount file) • Auto-cancellazione sicura"
+                            DirectSwitchL10n.tr(
+                                "Password CSV pronto ($stagedCsvCount file) • Auto-cancellazione sicura",
+                                en = "Password CSV ready ($stagedCsvCount file) • Secure auto-wipe",
+                                fr = "CSV Mots de passe prêt ($stagedCsvCount) • Effacement sécurisé"
+                            )
                         } else {
-                            "Trasferisci Password (Chrome / Gestore Password CSV)"
+                            DirectSwitchL10n.tr(
+                                "Trasferisci Password (Chrome / Gestore Password CSV)",
+                                en = "Transfer Passwords (Chrome / Password Manager CSV)",
+                                fr = "Transférer les mots de passe (CSV Chrome / Gestionnaire)"
+                            )
                         },
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
-                        text = "Esporta il file .csv dal gestore password e allegalo qui: viaggia cifrato AES-256-GCM e la copia temporanea viene sovrascritta a zeri a fine trasferimento.",
+                        text = DirectSwitchL10n.tr(
+                            "Esporta il file .csv dal gestore password e allegalo qui: viaggia cifrato AES-256-GCM e la copia temporanea viene sovrascritta a zeri a fine trasferimento.",
+                            en = "Export your .csv file from your password manager and attach it here: sent with AES-256-GCM encryption and zero-wiped afterwards.",
+                            fr = "Exportez le fichier .csv depuis votre gestionnaire de mots de passe : chiffré AES-256-GCM et effacé à zéro après transfert."
+                        ),
                         fontSize = 11.5.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
                 }
             }
             DirectSwitchSecondaryButton(
-                text = if (stagedCsvCount > 0) "Aggiungi altro file .csv Password" else "Seleziona file .csv Password",
+                text = if (stagedCsvCount > 0) DirectSwitchL10n.tr("Aggiungi altro file .csv Password", en = "Add another Password .csv", fr = "Ajouter un autre CSV") else DirectSwitchL10n.tr("Seleziona file .csv Password", en = "Select Password .csv file", fr = "Sélectionner un fichier .csv"),
                 onClick = onPickPasswordCsv,
                 tint = DirectSwitchTheme.orange
             )
@@ -537,13 +558,13 @@ fun ExtraCuratedAppsBrowser(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Aggiungi altre app dal Catalogo Esteso",
+                text = DirectSwitchL10n.tr("Aggiungi altre app dal Catalogo Esteso", en = "Add more apps from Extended Catalog", fr = "Ajouter des apps du catalogue étendu"),
                 fontSize = 13.5.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.textPrimary
             )
             Text(
-                text = "$totalCatalogCount app",
+                text = DirectSwitchL10n.tr("$totalCatalogCount app", en = "$totalCatalogCount apps", fr = "$totalCatalogCount apps"),
                 fontSize = 11.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.blue
@@ -553,7 +574,7 @@ fun ExtraCuratedAppsBrowser(
         OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
-            placeholder = { Text("Cerca banche, social, streaming, AI, giochi...", fontSize = 12.5.sp) },
+            placeholder = { Text(DirectSwitchL10n.tr("Cerca banche, social, streaming, AI, giochi...", en = "Search banks, social, streaming, AI, games...", fr = "Rechercher banques, social, streaming, jeux..."), fontSize = 12.5.sp) },
             leadingIcon = {
                 Icon(Icons.Filled.Search, contentDescription = null, tint = DirectSwitchTheme.textSecondary, modifier = Modifier.size(18.dp))
             },
@@ -561,7 +582,7 @@ fun ExtraCuratedAppsBrowser(
                 if (searchQuery.isNotEmpty()) {
                     Icon(
                         Icons.Filled.Clear,
-                        contentDescription = "Cancella",
+                        contentDescription = DirectSwitchL10n.tr("Cancella", en = "Clear", fr = "Effacer"),
                         tint = DirectSwitchTheme.textSecondary,
                         modifier = Modifier.size(18.dp).clickable { searchQuery = "" }
                     )
@@ -599,7 +620,7 @@ fun ExtraCuratedAppsBrowser(
                                 color = DirectSwitchTheme.textPrimary
                             )
                             Text(
-                                text = if (chosenInCat > 0) "$chosenInCat aggiunte • ${cat.apps.size} disponibili" else "${cat.apps.size} app pronte da aggiungere",
+                                text = if (chosenInCat > 0) DirectSwitchL10n.tr("$chosenInCat aggiunte • ${cat.apps.size} disponibili", en = "$chosenInCat added • ${cat.apps.size} available", fr = "$chosenInCat ajoutées • ${cat.apps.size} disponibles") else DirectSwitchL10n.tr("${cat.apps.size} app pronte da aggiungere", en = "${cat.apps.size} apps ready to add", fr = "${cat.apps.size} apps prêtes à ajouter"),
                                 fontSize = 11.5.sp,
                                 color = if (chosenInCat > 0) DirectSwitchTheme.green else DirectSwitchTheme.textSecondary
                             )
@@ -688,13 +709,17 @@ fun SpaceReliefAssistantCard(
                 AppleSettingsIcon(icon = Icons.Filled.Storage, color = DirectSwitchTheme.orange)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Assistente Salva-Spazio",
+                        text = DirectSwitchL10n.tr("Assistente Salva-Spazio"),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
-                        text = "Su ${offer.receiverName} mancano circa ${TransferDisplayFormatting.formatBytes(offer.shortfallBytes)} per copiare tutto.",
+                        text = DirectSwitchL10n.tr(
+                            "Su ${offer.receiverName} mancano circa ${TransferDisplayFormatting.formatBytes(offer.shortfallBytes)} per copiare tutto.",
+                            en = "${offer.receiverName} needs about ${TransferDisplayFormatting.formatBytes(offer.shortfallBytes)} more free space to copy everything.",
+                            fr = "Il manque environ ${TransferDisplayFormatting.formatBytes(offer.shortfallBytes)} sur ${offer.receiverName} pour tout copier."
+                        ),
                         fontSize = 12.5.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
@@ -702,7 +727,7 @@ fun SpaceReliefAssistantCard(
             }
 
             Text(
-                text = "Scegli una soluzione rapida con 1 tocco per ripartire subito:",
+                text = DirectSwitchL10n.tr("Scegli una soluzione rapida con 1 tocco per ripartire subito:", en = "Pick a 1-tap quick option to restart right away:", fr = "Choisissez une solution rapide en 1 geste pour repartir :"),
                 fontSize = 12.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.textPrimary
@@ -726,14 +751,14 @@ fun SpaceReliefAssistantCard(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    text = opt.title,
+                                    text = DirectSwitchL10n.tr(opt.title),
                                     fontSize = 13.5.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = DirectSwitchTheme.textPrimary
                                 )
                                 if (opt.fitsAvailableSpace) {
                                     Text(
-                                        text = "Rientra ✓",
+                                        text = DirectSwitchL10n.tr("Rientra ✓", en = "Fits ✓", fr = "Compatible ✓"),
                                         fontSize = 10.5.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = DirectSwitchTheme.green
@@ -741,7 +766,7 @@ fun SpaceReliefAssistantCard(
                                 }
                             }
                             Text(
-                                text = opt.subtitle,
+                                text = DirectSwitchL10n.tr(opt.subtitle),
                                 fontSize = 12.sp,
                                 color = DirectSwitchTheme.textSecondary
                             )
@@ -794,13 +819,13 @@ fun SkippedItemsReportCard(
                     AppleSettingsIcon(icon = Icons.Filled.Warning, color = DirectSwitchTheme.orange)
                     Column {
                         Text(
-                            text = "${items.size} ${if (items.size == 1) "file saltato" else "file saltati"}",
+                            text = if (items.size == 1) DirectSwitchL10n.tr("1 file saltato", en = "1 skipped file", fr = "1 fichier ignoré") else DirectSwitchL10n.tr("${items.size} file saltati", en = "${items.size} skipped files", fr = "${items.size} fichiers ignorés"),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
-                            text = "Tocca per vedere i dettagli e riprovare solo i mancanti",
+                            text = DirectSwitchL10n.tr("Tocca per vedere i dettagli e riprovare solo i mancanti", en = "Tap to inspect details and retry only missing items", fr = "Touchez pour voir les détails et réessayer les manquants"),
                             fontSize = 12.sp,
                             color = DirectSwitchTheme.textSecondary
                         )
@@ -854,7 +879,7 @@ fun SkippedItemsReportCard(
                     }
                     if (items.size > 25) {
                         Text(
-                            text = "…e altri ${items.size - 25} elementi",
+                            text = DirectSwitchL10n.tr("…e altri ${items.size - 25} elementi", en = "…and ${items.size - 25} more items", fr = "…et ${items.size - 25} autres éléments"),
                             fontSize = 11.5.sp,
                             color = DirectSwitchTheme.textSecondary
                         )
@@ -864,7 +889,7 @@ fun SkippedItemsReportCard(
 
             if (canRetry) {
                 DirectSwitchSecondaryButton(
-                    text = "Riprova solo questi ${items.size} file",
+                    text = DirectSwitchL10n.tr("Riprova solo questi ${items.size} file", en = "Retry only these ${items.size} files", fr = "Réessayer ces ${items.size} fichiers"),
                     onClick = onRetrySkippedOnly,
                     tint = DirectSwitchTheme.orange
                 )
@@ -909,13 +934,13 @@ fun PostMigrationChecklistCard(
                     AppleSettingsIcon(icon = Icons.Filled.Description, color = DirectSwitchTheme.green)
                     Column {
                         Text(
-                            text = "Checklist finale prima di chiudere",
+                            text = DirectSwitchL10n.tr("Checklist finale prima di chiudere"),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
-                            text = "${checkedIds.size}/${items.size} passaggi verificati",
+                            text = DirectSwitchL10n.tr("${checkedIds.size}/${items.size} passaggi verificati", en = "${checkedIds.size}/${items.size} steps verified", fr = "${checkedIds.size}/${items.size} étapes vérifiées"),
                             fontSize = 12.sp,
                             color = DirectSwitchTheme.textSecondary
                         )
@@ -973,11 +998,11 @@ fun PostMigrationChecklistCard(
                 onClick = {
                     val shareIntent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, "DirectSwitch — Ricevuta di Migrazione")
+                        putExtra(Intent.EXTRA_SUBJECT, DirectSwitchL10n.tr("DirectSwitch — Ricevuta di Migrazione", en = "DirectSwitch — Migration Receipt", fr = "DirectSwitch — Reçu de migration"))
                         putExtra(Intent.EXTRA_TEXT, receiptText)
                     }
                     runCatching {
-                        context.startActivity(Intent.createChooser(shareIntent, "Condividi ricevuta migrazione"))
+                        context.startActivity(Intent.createChooser(shareIntent, DirectSwitchL10n.tr("Condividi ricevuta migrazione")))
                     }
                 },
                 shape = RoundedCornerShape(12.dp),
@@ -992,7 +1017,7 @@ fun PostMigrationChecklistCard(
                     Icon(Icons.Filled.Share, contentDescription = null, tint = DirectSwitchTheme.blue, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.size(8.dp))
                     Text(
-                        text = "Condividi ricevuta migrazione",
+                        text = DirectSwitchL10n.tr("Condividi ricevuta migrazione"),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.blue
@@ -1011,8 +1036,15 @@ fun DeltaCatchUpCard(
     onStartDeltaSync: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val dateStr = remember(record.completedAtEpochMillis) {
-        SimpleDateFormat("dd/MM HH:mm", Locale.ITALY).format(Date(record.completedAtEpochMillis))
+    val activeLocale = remember(DirectSwitchL10n.activeLanguage) {
+        when (DirectSwitchL10n.effectiveCode()) {
+            "en" -> Locale.ENGLISH
+            "fr" -> Locale.FRENCH
+            else -> Locale.ITALY
+        }
+    }
+    val dateStr = remember(record.completedAtEpochMillis, activeLocale) {
+        SimpleDateFormat("dd/MM HH:mm", activeLocale).format(Date(record.completedAtEpochMillis))
     }
     val daysAgo = record.daysSinceCompleted()
     Surface(
@@ -1032,13 +1064,17 @@ fun DeltaCatchUpCard(
                 AppleSettingsIcon(icon = Icons.Filled.History, color = DirectSwitchTheme.teal)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Recupero Delta — Solo novità dal $dateStr",
+                        text = DirectSwitchL10n.tr("Recupero Delta — Solo novità dal $dateStr", en = "Delta Catch-Up — New items since $dateStr", fr = "Rattrapage Delta — Nouveautés depuis $dateStr"),
                         fontSize = 14.5.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
-                        text = "Già migrato verso ${record.peerName} (${if (daysAgo == 0) "oggi" else "$daysAgo gg fa"}). Copia solo foto, SMS, chiamate e file nuovi.",
+                        text = if (daysAgo == 0) {
+                            DirectSwitchL10n.tr("Già migrato verso ${record.peerName} (oggi). Copia solo foto, SMS, chiamate e file nuovi.", en = "Already migrated to ${record.peerName} (today). Copy only new photos, SMS, calls and files.", fr = "Déjà migré vers ${record.peerName} (aujourd'hui). Copiez uniquement les nouveautés.")
+                        } else {
+                            DirectSwitchL10n.tr("Già migrato verso ${record.peerName} ($daysAgo gg fa). Copia solo foto, SMS, chiamate e file nuovi.", en = "Already migrated to ${record.peerName} (${daysAgo}d ago). Copy only new photos, SMS, calls and files.", fr = "Déjà migré vers ${record.peerName} (il y a $daysAgo j). Copiez uniquement les nouveautés.")
+                        },
                         fontSize = 12.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
@@ -1061,7 +1097,7 @@ fun DeltaCatchUpCard(
                     ) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.size(4.dp))
-                        Text("Copia solo novità", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(DirectSwitchL10n.tr("Copia solo novità"), fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 }
                 Surface(
@@ -1070,7 +1106,7 @@ fun DeltaCatchUpCard(
                     color = DirectSwitchTheme.inputSurface
                 ) {
                     Text(
-                        text = "Chiudi",
+                        text = DirectSwitchL10n.tr("Chiudi"),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.textSecondary,
@@ -1111,16 +1147,20 @@ fun BatteryTriageToggleCard(
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = if (battery.recommendsAutoTriage) {
-                        "Triage Batteria Critica attivo (${battery.percent}%)"
+                        DirectSwitchL10n.tr("Triage Batteria Critica attivo (${battery.percent}%)", en = "Critical Battery Triage active (${battery.percent}%)", fr = "Triage Batterie Critique actif (${battery.percent}%)")
                     } else {
-                        "Modalità Triage Batteria (${battery.percent}%)"
+                        DirectSwitchL10n.tr("Modalità Triage Batteria (${battery.percent}%)", en = "Battery Triage Mode (${battery.percent}%)", fr = "Mode Triage Batterie (${battery.percent}%)")
                     },
                     fontSize = 13.5.sp,
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
                 Text(
-                    text = "Priorità automatica a password CSV, documenti, preferiti e ricordi recenti se il telefono sta per spegnersi.",
+                    text = DirectSwitchL10n.tr(
+                        "Priorità automatica a password CSV, documenti, preferiti e ricordi recenti se il telefono sta per spegnersi.",
+                        en = "Prioritizes password CSVs, documents, favorites and recent photos first if battery is running low.",
+                        fr = "Priorise automatiquement les CSV, documents, favoris et souvenirs récents si la batterie est faible."
+                    ),
                     fontSize = 11.5.sp,
                     color = DirectSwitchTheme.textSecondary
                 )
@@ -1147,7 +1187,7 @@ fun BatteryTriageActivePill() {
         ) {
             Icon(Icons.Filled.BatteryAlert, contentDescription = null, tint = DirectSwitchTheme.orange, modifier = Modifier.size(13.dp))
             Text(
-                text = "Triage Batteria Critica",
+                text = DirectSwitchL10n.tr("Triage Batteria Critica"),
                 fontSize = 11.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.orange
@@ -1169,9 +1209,9 @@ fun DecommissionAuditCard(
 ) {
     val context = LocalContext.current
     val (accent, badgeLabel) = when (report.readinessLevel) {
-        DecommissionReadinessLevel.BLOCKED_RED -> DirectSwitchTheme.red to "NON FORMATTARE ANCORA"
-        DecommissionReadinessLevel.CAUTION_AMBER -> DirectSwitchTheme.orange to "VERIFICA ELEMENTI SECONDARI"
-        DecommissionReadinessLevel.READY_FOR_RESET_GREEN -> DirectSwitchTheme.green to "PRONTO PER RESET / PERMUTA ✓"
+        DecommissionReadinessLevel.BLOCKED_RED -> DirectSwitchTheme.red to DirectSwitchL10n.tr("NON FORMATTARE ANCORA", en = "DO NOT ERASE YET", fr = "NE PAS RÉINITIALISER")
+        DecommissionReadinessLevel.CAUTION_AMBER -> DirectSwitchTheme.orange to DirectSwitchL10n.tr("VERIFICA ELEMENTI SECONDARI", en = "CHECK SECONDARY ITEMS", fr = "VÉRIFIER LES ÉLÉMENTS")
+        DecommissionReadinessLevel.READY_FOR_RESET_GREEN -> DirectSwitchTheme.green to DirectSwitchL10n.tr("PRONTO PER RESET / PERMUTA ✓", en = "READY FOR RESET / TRADE-IN ✓", fr = "PRÊT POUR RÉINITIALISATION ✓")
     }
 
     Surface(
@@ -1204,7 +1244,7 @@ fun DecommissionAuditCard(
                     )
                     Column {
                         Text(
-                            text = "Audit Anti-Lockout & Reset",
+                            text = DirectSwitchL10n.tr("Audit Anti-Lockout & Reset"),
                             fontSize = 15.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
@@ -1227,9 +1267,9 @@ fun DecommissionAuditCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Ricontrolla", tint = DirectSwitchTheme.blue, modifier = Modifier.size(14.dp))
+                        Icon(Icons.Filled.Refresh, contentDescription = DirectSwitchL10n.tr("Ricontrolla"), tint = DirectSwitchTheme.blue, modifier = Modifier.size(14.dp))
                         Text(
-                            text = if (isRefreshing) "..." else "Ricontrolla",
+                            text = if (isRefreshing) "..." else DirectSwitchL10n.tr("Ricontrolla"),
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.blue
@@ -1241,7 +1281,7 @@ fun DecommissionAuditCard(
             if (report.missingCriticalApps.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "${report.missingCriticalApps.size} app critiche (SPID / Banche / 2FA) ancora assenti su ${report.peerName}:",
+                        text = DirectSwitchL10n.tr("${report.missingCriticalApps.size} app critiche (SPID / Banche / 2FA) ancora assenti su ${report.peerName}:", en = "${report.missingCriticalApps.size} critical apps (ID / Banking / 2FA) still missing on ${report.peerName}:", fr = "${report.missingCriticalApps.size} apps critiques (Banques / 2FA) encore absentes sur ${report.peerName} :"),
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.red
@@ -1277,7 +1317,7 @@ fun DecommissionAuditCard(
                                     color = DirectSwitchTheme.textSecondary
                                 )
                                 Text(
-                                    text = "Tocca per confermare di averla già migrata manualmente",
+                                    text = DirectSwitchL10n.tr("Tocca per confermare di averla già migrata manualmente", en = "Tap to confirm you already migrated it manually", fr = "Touchez pour confirmer la migration manuelle"),
                                     fontSize = 10.5.sp,
                                     color = DirectSwitchTheme.blue
                                 )
@@ -1288,8 +1328,9 @@ fun DecommissionAuditCard(
             }
 
             if (report.verifiedCriticalApps.isNotEmpty()) {
+                val names = report.verifiedCriticalApps.take(4).joinToString { it.appName }
                 Text(
-                    text = "✓ ${report.verifiedCriticalApps.size} app critiche già verificate sul nuovo telefono (${report.verifiedCriticalApps.take(4).joinToString { it.appName }})",
+                    text = DirectSwitchL10n.tr("✓ ${report.verifiedCriticalApps.size} app critiche già verificate sul nuovo telefono ($names)", en = "✓ ${report.verifiedCriticalApps.size} critical apps verified on new phone ($names)", fr = "✓ ${report.verifiedCriticalApps.size} apps critiques vérifiées sur le nouveau téléphone ($names)"),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = DirectSwitchTheme.green
@@ -1299,9 +1340,9 @@ fun DecommissionAuditCard(
             if (report.localOnlyContactsCount > 0) {
                 Text(
                     text = if (report.contactsWereMigrated) {
-                        "✓ Rilevati ${report.localOnlyContactsCount} contatti solo-SIM/locali: inclusi nella migrazione."
+                        DirectSwitchL10n.tr("✓ Rilevati ${report.localOnlyContactsCount} contatti solo-SIM/locali: inclusi nella migrazione.", en = "✓ Found ${report.localOnlyContactsCount} SIM/local-only contacts: included in migration.", fr = "✓ ${report.localOnlyContactsCount} contacts locaux/SIM inclus dans la migration.")
                     } else {
-                        "⚠ Rilevati ${report.localOnlyContactsCount} contatti salvati SOLO su SIM/telefono e non migrati!"
+                        DirectSwitchL10n.tr("⚠ Rilevati ${report.localOnlyContactsCount} contatti salvati SOLO su SIM/telefono e non migrati!", en = "⚠ Found ${report.localOnlyContactsCount} SIM/local-only contacts NOT migrated!", fr = "⚠ ${report.localOnlyContactsCount} contacts locaux/SIM NON migrés !")
                     },
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -1318,11 +1359,11 @@ fun DecommissionAuditCard(
                         val certText = DecommissionReadinessEvaluator.buildResetCertificateText(report, senderDeviceName)
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "DirectSwitch — Certificato Pronto per Reset")
+                            putExtra(Intent.EXTRA_SUBJECT, DirectSwitchL10n.tr("DirectSwitch — Certificato Pronto per Reset", en = "DirectSwitch — Ready-for-Reset Certificate", fr = "DirectSwitch — Certificat Prêt pour Réinitialisation"))
                             putExtra(Intent.EXTRA_TEXT, certText)
                         }
                         runCatching {
-                            context.startActivity(Intent.createChooser(shareIntent, "Condividi Certificato Audit"))
+                            context.startActivity(Intent.createChooser(shareIntent, DirectSwitchL10n.tr("Condividi Certificato Audit", en = "Share Audit Certificate", fr = "Partager le certificat d'audit")))
                         }
                     },
                     shape = RoundedCornerShape(11.dp),
@@ -1336,7 +1377,7 @@ fun DecommissionAuditCard(
                     ) {
                         Icon(Icons.Filled.Share, contentDescription = null, tint = accent, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.size(6.dp))
-                        Text("Certificato Reset", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = accent)
+                        Text(DirectSwitchL10n.tr("Certificato Reset", en = "Reset Certificate", fr = "Certificat Reset"), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = accent)
                     }
                 }
 
@@ -1352,7 +1393,7 @@ fun DecommissionAuditCard(
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Icon(Icons.Filled.SettingsBackupRestore, contentDescription = null, tint = DirectSwitchTheme.textPrimary, modifier = Modifier.size(15.dp))
-                            Text("Impostazioni Reset", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                            Text(DirectSwitchL10n.tr("Impostazioni Reset", en = "Reset Settings", fr = "Paramètres Reset"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
                         }
                     }
                 }
@@ -1386,13 +1427,17 @@ fun OverflowBridgeCloudSaveCard(
                 AppleSettingsIcon(icon = Icons.Filled.CloudUpload, color = DirectSwitchTheme.blue)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Ponte Overflow verso CloudSave",
+                        text = DirectSwitchL10n.tr("Ponte Overflow verso CloudSave"),
                         fontSize = 15.5.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
-                        text = "${plan.overflowItems.size} file storici (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) pronti da parcheggiare cifrati AES-256 prima del reset.",
+                        text = DirectSwitchL10n.tr(
+                            "${plan.overflowItems.size} file storici (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) pronti da parcheggiare cifrati AES-256 prima del reset.",
+                            en = "${plan.overflowItems.size} older files (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) ready to park with AES-256 encryption before reset.",
+                            fr = "${plan.overflowItems.size} anciens fichiers (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) prêts à être archivés chiffrés AES-256."
+                        ),
                         fontSize = 12.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
@@ -1407,7 +1452,7 @@ fun OverflowBridgeCloudSaveCard(
                 )
             }
             DirectSwitchPrimaryButton(
-                text = "Salva ${plan.overflowItems.size} file eccedenti su CloudSave",
+                text = DirectSwitchL10n.tr("Salva ${plan.overflowItems.size} file eccedenti su CloudSave", en = "Save ${plan.overflowItems.size} overflow files to CloudSave", fr = "Enregistrer ${plan.overflowItems.size} fichiers sur CloudSave"),
                 onClick = onLaunchCloudSaveOverflow
             )
         }

@@ -1056,4 +1056,78 @@ class DirectSwitchProtocolTest {
                 remMigrator.reminderCalendarDedupKey("Bolletta", dueEpochMillis = null)
         )
     }
+
+    @Test
+    fun livePhotoManifestRoundTripAndSenderReceiverProgressParity() {
+        // 1. Serializzazione e retrocompatibilità di ManifestItem.livePhotoVideoSizeBytes
+        val liveItem = ManifestItem(
+            id = "lp_android_1",
+            category = TransferCategory.PHOTOS,
+            fileName = "IMG_1001.HEIC",
+            relativeAlbumOrFolder = "Recenti",
+            sizeBytes = 3_200_000L,
+            capturedEpochMillis = 1_760_000_000_000L,
+            dedupKey = "lp_dedup",
+            mimeType = "image/heic",
+            isLivePhoto = true,
+            livePhotoVideoSizeBytes = 5_400_000L
+        )
+        val raw = DirectSwitchJson.instance.encodeToString(liveItem)
+        val decoded = DirectSwitchJson.instance.decodeFromString<ManifestItem>(raw)
+        assertEquals(5_400_000L, decoded.livePhotoVideoSizeBytes)
+
+        val legacy = """{"id":"old","category":"PHOTOS","fileName":"a.jpg","sizeBytes":1000,"dedupKey":"k"}"""
+        val legacyDecoded = DirectSwitchJson.instance.decodeFromString<ManifestItem>(legacy)
+        assertEquals(null, legacyDecoded.livePhotoVideoSizeBytes)
+
+        // 2. Parità matematica esatta Mittente <-> Ricevente (byte totali, byte copiati e % identici ad ogni step)
+        val sender = com.directswitch.android.protocol.TransferProgressAccounting(
+            queuedItemsCount = 4,
+            remainingEstimatedBytes = 12_000_000L,
+            remainingEstimatedLiveBytes = 9_000_000L
+        )
+        val receiver = com.directswitch.android.protocol.TransferProgressAccounting(
+            queuedItemsCount = 4,
+            remainingEstimatedBytes = 12_000_000L,
+            remainingEstimatedLiveBytes = 9_000_000L
+        )
+
+        fun assertParity(step: String) {
+            assertEquals("transferredBytes diverged at $step", sender.transferredBytes, receiver.transferredBytes)
+            assertEquals("totalBytesForProgress diverged at $step", sender.totalBytesForProgress, receiver.totalBytesForProgress)
+            assertEquals(
+                "percentage diverged at $step",
+                com.directswitch.android.protocol.TransferDisplayFormatting.percentageInt(sender.progressFraction.toDouble(), false),
+                com.directswitch.android.protocol.TransferDisplayFormatting.percentageInt(receiver.progressFraction.toDouble(), false)
+            )
+        }
+
+        assertParity("start_0pct")
+
+        sender.recordLiveVideoUploaded(estimatedLiveBytes = 5_000_000L, actualBytes = 4_800_000L)
+        receiver.recordLiveVideoUploaded(estimatedLiveBytes = 5_000_000L, actualBytes = 4_800_000L)
+        assertParity("item1_live_mov")
+
+        sender.recordPrimaryItemUploaded(estimatedPrimaryBytes = 3_000_000L, actualBytes = 3_100_000L)
+        receiver.recordPrimaryItemUploaded(estimatedPrimaryBytes = 3_000_000L, actualBytes = 3_100_000L)
+        assertParity("item1_primary")
+
+        sender.recordLiveVideoSkipped(estimatedLiveBytes = 4_000_000L)
+        receiver.recordLiveVideoSkipped(estimatedLiveBytes = 4_000_000L)
+        sender.recordPrimaryItemUploaded(estimatedPrimaryBytes = 3_000_000L, actualBytes = 2_900_000L)
+        receiver.recordPrimaryItemUploaded(estimatedPrimaryBytes = 3_000_000L, actualBytes = 2_900_000L)
+        assertParity("item2_live_skipped")
+
+        sender.recordPrimaryItemUploaded(estimatedPrimaryBytes = 3_000_000L, actualBytes = 3_000_000L)
+        receiver.recordPrimaryItemUploaded(estimatedPrimaryBytes = 3_000_000L, actualBytes = 3_000_000L)
+        assertParity("item3_photo")
+
+        sender.recordItemFailedOrSkipped(estimatedPrimaryBytes = 3_000_000L, estimatedLiveBytes = 0L)
+        receiver.recordItemFailedOrSkipped(estimatedPrimaryBytes = 3_000_000L, estimatedLiveBytes = 0L)
+        assertParity("item4_failed")
+
+        assertEquals(13_800_000L, sender.totalBytesForProgress)
+        assertEquals(13_800_000L, sender.transferredBytes)
+        assertEquals(1.0f, sender.progressFraction, 0.0001f)
+    }
 }

@@ -1725,14 +1725,21 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertTrue(iOSAudioAndCallLogMigrator.isAudioFileName("Memo_Vocale.m4a"))
         XCTAssertFalse(iOSAudioAndCallLogMigrator.isAudioFileName("Contratto.pdf"))
 
-        // 5. Multilingua + Checklist & Ricevuta migrazione
+        // 5. Multilingua (solo Sistema/Auto, IT, EN, FR) + Checklist & Ricevuta migrazione
+        XCTAssertEqual(DirectSwitchLanguage.allCases.map(\.shortCode), ["AUTO", "IT", "EN", "FR"])
         XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "en", fallbackItalian: "Ricevi"), "Receive data")
-        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "es", fallbackItalian: "Ricevi"), "Recibir datos")
         XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "fr", fallbackItalian: "Ricevi"), "Recevoir")
-        XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "de", fallbackItalian: "Ricevi"), "Empfangen")
         XCTAssertEqual(DirectSwitchLocalizationStore.translate("nav_receive", languageCode: "it", fallbackItalian: "Ricevi"), "Ricevi")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translatePhrase("Copia le voci selezionate", languageCode: "en"), "Copy selected items")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translatePhrase("Copia le voci selezionate", languageCode: "fr"), "Copier les éléments sélectionnés")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translateEta("Circa 4 min rimanenti", languageCode: "en"), "About 4 min left")
+        XCTAssertEqual(DirectSwitchLocalizationStore.translateEta("Circa 4 min rimanenti", languageCode: "fr"), "Environ 4 min restantes")
 
-        let checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp: true, hasApps: true, hasSkipped: true)
+        let checklistEn = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp: true, hasApps: true, hasSkipped: true, languageCode: "en")
+        XCTAssertEqual(checklistEn.count, 6)
+        XCTAssertTrue(checklistEn.first?.title.contains("Contacts, Photos") == true)
+
+        let checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp: true, hasApps: true, hasSkipped: true, languageCode: "it")
         XCTAssertEqual(checklist.count, 6)
         let receipt = MigrationReceiptBuilder.buildReceiptText(
             peerName: "Galaxy S25",
@@ -1746,7 +1753,8 @@ final class DirectSwitchTests: XCTestCase {
             importedSms: 50,
             importedCallLogs: 40,
             appsCount: 35,
-            skippedCount: 0
+            skippedCount: 0,
+            languageCode: "it"
         )
         XCTAssertTrue(receipt.contains("Wi-Fi Diretto P2P (AWDL)"))
         XCTAssertTrue(receipt.contains("Chiamate salvate: 40"))
@@ -1930,5 +1938,87 @@ final class DirectSwitchTests: XCTestCase {
         let split = OverflowBridgePlanner.buildSplitPlan(availableFreeBytes: 700_000_000, items: splitItems, nowEpochMillis: nowMs)
         XCTAssertEqual(split.directItems.map(\.id), ["r1"])
         XCTAssertEqual(split.overflowItems.map(\.id), ["o1"])
+    }
+
+    func testLivePhotoSenderReceiverProgressParityAndManifestRoundTrip() throws {
+        // 1. Verifica serializzazione + retrocompatibilità ManifestItem.livePhotoVideoSizeBytes & MediaTransferFilterOptions.includeICloudOnlyMedia
+        let liveItem = ManifestItem(
+            id: "lp_1",
+            category: .PHOTOS,
+            fileName: "IMG_1001.HEIC",
+            relativeAlbumOrFolder: "Recenti",
+            sizeBytes: 3_200_000,
+            capturedEpochMillis: 1_760_000_000_000,
+            dedupKey: "lp_1_dedup",
+            mimeType: "image/heic",
+            isLivePhoto: true,
+            livePhotoVideoSizeBytes: 5_400_000
+        )
+        let encoded = try JSONEncoder().encode(liveItem)
+        let decoded = try JSONDecoder().decode(ManifestItem.self, from: encoded)
+        XCTAssertEqual(decoded.livePhotoVideoSizeBytes, 5_400_000)
+
+        let legacyJson = #"{"id":"old_1","category":"PHOTOS","fileName":"A.JPG","relativeAlbumOrFolder":"Recenti","sizeBytes":1000,"capturedEpochMillis":0,"dedupKey":"k","mimeType":"image/jpeg","isLivePhoto":false}"#
+        let legacyDecoded = try JSONDecoder().decode(ManifestItem.self, from: Data(legacyJson.utf8))
+        XCTAssertNil(legacyDecoded.livePhotoVideoSizeBytes)
+
+        let legacyFilterJson = #"{"photosLastYearOnly":true,"selectedPhotoAlbums":[],"videosLastYearOnly":false,"maxVideoBytes":0,"compactVideo1080pHevc":false}"#
+        let legacyFilter = try JSONDecoder().decode(MediaTransferFilterOptions.self, from: Data(legacyFilterJson.utf8))
+        XCTAssertFalse(legacyFilter.includeICloudOnlyMedia)
+
+        // 2. Simula un trasferimento misto (Live Photo completa + Live Photo senza MOV + Foto + File fallito)
+        // Verifica che Mittente e Ricevente riportino IDENTICI byte trasferiti, byte totali e percentuale ad ogni step.
+        var sender = TransferProgressAccounting(
+            queuedItemsCount: 4,
+            remainingEstimatedPrimaryBytes: 12_000_000,
+            remainingEstimatedLiveBytes: 9_000_000
+        )
+        var receiver = TransferProgressAccounting(
+            queuedItemsCount: 4,
+            remainingEstimatedPrimaryBytes: 12_000_000,
+            remainingEstimatedLiveBytes: 9_000_000
+        )
+
+        func assertParity(_ label: String) {
+            XCTAssertEqual(sender.transferredBytes, receiver.transferredBytes, "transferredBytes diverged at \(label)")
+            XCTAssertEqual(sender.totalBytesForProgress, receiver.totalBytesForProgress, "totalBytesForProgress diverged at \(label)")
+            XCTAssertEqual(
+                TransferDisplayFormatting.percentageInt(fraction: sender.progressFraction, isCompleted: false),
+                TransferDisplayFormatting.percentageInt(fraction: receiver.progressFraction, isCompleted: false),
+                "percentage diverged at \(label)"
+            )
+        }
+
+        assertParity("start_0pct")
+
+        // Item 1: Live Photo con MOV (stima 3M + 5M, reale 3.1M + 4.8M)
+        sender.recordLiveVideoUploaded(estimatedLiveBytes: 5_000_000, actualBytes: 4_800_000)
+        receiver.recordLiveVideoUploaded(estimatedLiveBytes: 5_000_000, actualBytes: 4_800_000)
+        assertParity("item1_live_mov")
+
+        sender.recordPrimaryItemUploaded(estimatedPrimaryBytes: 3_000_000, actualBytes: 3_100_000)
+        receiver.recordPrimaryItemUploaded(estimatedPrimaryBytes: 3_000_000, actualBytes: 3_100_000)
+        assertParity("item1_primary")
+
+        // Item 2: Live Photo il cui MOV viene saltato (stima 3M + 4M)
+        sender.recordLiveVideoSkipped(estimatedLiveBytes: 4_000_000)
+        receiver.recordLiveVideoSkipped(estimatedLiveBytes: 4_000_000)
+        sender.recordPrimaryItemUploaded(estimatedPrimaryBytes: 3_000_000, actualBytes: 2_900_000)
+        receiver.recordPrimaryItemUploaded(estimatedPrimaryBytes: 3_000_000, actualBytes: 2_900_000)
+        assertParity("item2_live_skipped")
+
+        // Item 3: Foto normale (3M -> 3M)
+        sender.recordPrimaryItemUploaded(estimatedPrimaryBytes: 3_000_000, actualBytes: 3_000_000)
+        receiver.recordPrimaryItemUploaded(estimatedPrimaryBytes: 3_000_000, actualBytes: 3_000_000)
+        assertParity("item3_photo")
+
+        // Item 4: File fallito/saltato (3M)
+        sender.recordItemFailedOrSkipped(estimatedPrimaryBytes: 3_000_000, estimatedLiveBytes: 0)
+        receiver.recordItemFailedOrSkipped(estimatedPrimaryBytes: 3_000_000, estimatedLiveBytes: 0)
+        assertParity("item4_failed")
+
+        XCTAssertEqual(sender.totalBytesForProgress, 13_800_000)
+        XCTAssertEqual(sender.transferredBytes, 13_800_000)
+        XCTAssertEqual(sender.progressFraction, 1.0, accuracy: 0.0001)
     }
 }

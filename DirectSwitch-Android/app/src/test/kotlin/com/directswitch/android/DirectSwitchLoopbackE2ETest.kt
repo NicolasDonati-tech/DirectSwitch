@@ -388,13 +388,24 @@ class DirectSwitchLoopbackE2ETest {
 
     @Test
     fun multilingualLocalizationReceiptAndCuratedCatalogUniqueness() {
+        assertEquals(listOf("AUTO", "IT", "EN", "FR"), DirectSwitchLanguage.entries.map { it.shortCode })
         assertEquals("Receive data", DirectSwitchL10n.text("nav_receive", DirectSwitchLanguage.ENGLISH, "Ricevi dati"))
-        assertEquals("Recibir datos", DirectSwitchL10n.text("nav_receive", DirectSwitchLanguage.SPANISH, "Ricevi dati"))
         assertEquals("Recevoir", DirectSwitchL10n.text("nav_receive", DirectSwitchLanguage.FRENCH, "Ricevi dati"))
-        assertEquals("Empfangen", DirectSwitchL10n.text("nav_receive", DirectSwitchLanguage.GERMAN, "Ricevi dati"))
         assertEquals("Ricevi dati", DirectSwitchL10n.text("nav_receive", DirectSwitchLanguage.ITALIAN, "Ricevi dati"))
 
-        val checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp = true, hasApps = true, hasSkipped = true)
+        DirectSwitchL10n.activeLanguage = DirectSwitchLanguage.ENGLISH
+        assertEquals("Copy selected items", DirectSwitchL10n.tr("Copia le voci selezionate"))
+        assertEquals("About 5 min left", DirectSwitchL10n.translateEta("Circa 5 min rimanenti"))
+        DirectSwitchL10n.activeLanguage = DirectSwitchLanguage.FRENCH
+        assertEquals("Copier les éléments sélectionnés", DirectSwitchL10n.tr("Copia le voci selezionate"))
+        assertEquals("Environ 5 min restantes", DirectSwitchL10n.translateEta("Circa 5 min rimanenti"))
+        DirectSwitchL10n.activeLanguage = DirectSwitchLanguage.ITALIAN
+
+        val checklistEn = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp = true, hasApps = true, hasSkipped = true, lang = DirectSwitchLanguage.ENGLISH)
+        assertEquals(6, checklistEn.size)
+        assertTrue(checklistEn.first().title.contains("Contacts, Photos"))
+
+        val checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp = true, hasApps = true, hasSkipped = true, lang = DirectSwitchLanguage.ITALIAN)
         assertEquals(6, checklist.size)
         val receipt = MigrationReceiptBuilder.buildReceiptText(
             peerName = "iPhone di Nicolas",
@@ -408,7 +419,8 @@ class DirectSwitchLoopbackE2ETest {
             importedSms = 88,
             importedCallLogs = 64,
             appsCount = 40,
-            skippedCount = 0
+            skippedCount = 0,
+            lang = DirectSwitchLanguage.ITALIAN
         )
         assertTrue(receipt.contains("Cavo USB-C diretto"))
         assertTrue(receipt.contains("Chiamate salvate: 64"))

@@ -335,7 +335,8 @@ data class ManifestItem(
     val latitude: Double? = null,
     val longitude: Double? = null,
     val isLivePhoto: Boolean? = null,
-    val livePhotoVideoFileName: String? = null
+    val livePhotoVideoFileName: String? = null,
+    val livePhotoVideoSizeBytes: Long? = null
 )
 
 @Serializable
@@ -748,13 +749,14 @@ object DirectSwitchCrypto {
     }
 }
 
-/** Riconcilia byte stimati, file effettivi, riprese (`isResume`) e file saltati per mantenere progressi e totali coerenti. */
+/** Riconcilia byte stimati, clip Live Photo (.MOV), riprese (`isResume`) e file saltati per garantire parità 1:1 tra mittente e ricevente. */
 class TransferProgressAccounting(
     queuedItemsCount: Int,
     remainingEstimatedBytes: Long,
     previouslyCompletedItems: Int = 0,
     previouslySentBytes: Long = 0L,
-    previouslyFailedItems: Int = 0
+    previouslyFailedItems: Int = 0,
+    remainingEstimatedLiveBytes: Long = 0L
 ) {
     private val safePrevCompleted = previouslyCompletedItems.coerceAtLeast(0)
     private val safePrevFailed = previouslyFailedItems.coerceAtLeast(0)
@@ -766,14 +768,19 @@ class TransferProgressAccounting(
         private set
     var transferredBytes: Long = previouslySentBytes.coerceAtLeast(0L)
         private set
-    var remainingEstimatedBytes: Long = remainingEstimatedBytes.coerceAtLeast(0L)
+    var remainingEstimatedPrimaryBytes: Long = remainingEstimatedBytes.coerceAtLeast(0L)
         private set
+    var remainingEstimatedLiveBytes: Long = remainingEstimatedLiveBytes.coerceAtLeast(0L)
+        private set
+
+    val remainingEstimatedBytes: Long
+        get() = remainingEstimatedPrimaryBytes + remainingEstimatedLiveBytes
 
     val processedItemsCount: Int
         get() = succeededItemsCount + failedItemsCount
 
     val totalBytesForProgress: Long
-        get() = maxOf(transferredBytes, transferredBytes + remainingEstimatedBytes)
+        get() = maxOf(transferredBytes, transferredBytes + remainingEstimatedPrimaryBytes + remainingEstimatedLiveBytes)
 
     val progressFraction: Float
         get() {
@@ -789,15 +796,33 @@ class TransferProgressAccounting(
             return 0f
         }
 
-    fun recordUploaded(estimatedBytes: Long, actualBytes: Long) {
-        succeededItemsCount += 1
+    fun recordLiveVideoUploaded(estimatedLiveBytes: Long, actualBytes: Long) {
         transferredBytes += actualBytes.coerceAtLeast(0L)
-        remainingEstimatedBytes = (remainingEstimatedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+        remainingEstimatedLiveBytes = (remainingEstimatedLiveBytes - estimatedLiveBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
     }
 
-    fun recordFailedOrSkipped(estimatedBytes: Long) {
+    fun recordLiveVideoSkipped(estimatedLiveBytes: Long) {
+        remainingEstimatedLiveBytes = (remainingEstimatedLiveBytes - estimatedLiveBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+    }
+
+    fun recordPrimaryItemUploaded(estimatedPrimaryBytes: Long, actualBytes: Long) {
+        succeededItemsCount += 1
+        transferredBytes += actualBytes.coerceAtLeast(0L)
+        remainingEstimatedPrimaryBytes = (remainingEstimatedPrimaryBytes - estimatedPrimaryBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+    }
+
+    fun recordUploaded(estimatedBytes: Long, actualBytes: Long) {
+        recordPrimaryItemUploaded(estimatedBytes, actualBytes)
+    }
+
+    fun recordItemFailedOrSkipped(estimatedPrimaryBytes: Long, estimatedLiveBytes: Long = 0L) {
         failedItemsCount += 1
-        remainingEstimatedBytes = (remainingEstimatedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+        remainingEstimatedPrimaryBytes = (remainingEstimatedPrimaryBytes - estimatedPrimaryBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+        remainingEstimatedLiveBytes = (remainingEstimatedLiveBytes - estimatedLiveBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+    }
+
+    fun recordFailedOrSkipped(estimatedBytes: Long, estimatedLiveBytes: Long = 0L) {
+        recordItemFailedOrSkipped(estimatedBytes, estimatedLiveBytes)
     }
 }
 

@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.directswitch.android.migrators.GoogleSetupBridge
 import com.directswitch.android.protocol.DevicePlatform
+import com.directswitch.android.protocol.DirectSwitchL10n
 import com.directswitch.android.ui.theme.AppleSettingsIcon
 import com.directswitch.android.ui.theme.DirectSwitchCard
 import com.directswitch.android.ui.theme.DirectSwitchPrimaryButton
@@ -64,39 +65,72 @@ fun WhatsAppNativeTransferCard(
     val isThisAndroidToIphone = !isReceiver && peerPlatform == DevicePlatform.IOS
 
     val headerTitle = when {
-        isIphoneToThisAndroid -> "Trasferisci cronologia WhatsApp da iPhone"
-        isThisAndroidToIphone -> "Trasferisci cronologia WhatsApp su iPhone"
-        else -> "Trasferisci cronologia WhatsApp via QR"
+        isIphoneToThisAndroid -> DirectSwitchL10n.tr("Trasferisci cronologia WhatsApp da iPhone", en = "Transfer WhatsApp chat history from iPhone", fr = "Transférer l'historique WhatsApp depuis iPhone")
+        isThisAndroidToIphone -> DirectSwitchL10n.tr("Trasferisci cronologia WhatsApp su iPhone", en = "Transfer WhatsApp chat history to iPhone", fr = "Transférer l'historique WhatsApp vers iPhone")
+        else -> DirectSwitchL10n.tr("Trasferisci cronologia WhatsApp via QR", en = "Transfer WhatsApp chat history via QR", fr = "Transférer l'historique WhatsApp par QR")
     }
 
     val headerSubtitle = when {
-        isIphoneToThisAndroid ->
-            "Gratuito dentro WhatsApp: una sola scansione QR, senza Android Switch"
-        isThisAndroidToIphone ->
-            "Gratuito dentro WhatsApp: trasferimento diretto via QR senza Passa a iOS e senza formattare"
-        else ->
-            "Passaggio gratuito della cronologia WhatsApp via Codice QR sullo stesso numero."
+        isIphoneToThisAndroid -> DirectSwitchL10n.tr(
+            "Gratuito dentro WhatsApp: una sola scansione QR, senza Android Switch",
+            en = "Free inside WhatsApp: single QR scan, no Android Switch required",
+            fr = "Gratuit dans WhatsApp : un seul scan QR, sans Android Switch"
+        )
+        isThisAndroidToIphone -> DirectSwitchL10n.tr(
+            "Gratuito dentro WhatsApp: trasferimento diretto via QR senza Passa a iOS e senza formattare",
+            en = "Free inside WhatsApp: direct QR transfer without Move to iOS or factory reset",
+            fr = "Gratuit dans WhatsApp : transfert QR direct sans réinitialisation"
+        )
+        else -> DirectSwitchL10n.tr(
+            "Passaggio gratuito della cronologia WhatsApp via Codice QR sullo stesso numero.",
+            en = "Free WhatsApp chat transfer via QR Code on the same phone number.",
+            fr = "Transfert gratuit de l'historique WhatsApp par Code QR sur le même numéro."
+        )
     }
 
     val steps: List<Pair<String, String>> = when {
         isIphoneToThisAndroid -> listOf(
-            "1" to "Su questo Android tocca «Apri WhatsApp (Numero + QR)», verifica lo stesso numero e arriva al Codice QR. Prima di inquadrare: se vedi i 3 pallini (⋮) in alto a destra, tocca subito ⋮ → «Mostra QR per iPhone» così eviti pop-up e riavvii del QR.",
-            "2" to "Sul vecchio iPhone apri direttamente WhatsApp (senza usare lo scanner di DirectSwitch) → Impostazioni → Chat → Trasferisci chat su Android → Inizia e inquadra il QR una sola volta."
+            "1" to DirectSwitchL10n.tr(
+                "Su questo Android tocca «Apri WhatsApp (Numero + QR)», verifica lo stesso numero e arriva al Codice QR. Prima di inquadrare: se vedi i 3 pallini (⋮) in alto a destra, tocca subito ⋮ → «Mostra QR per iPhone» così eviti pop-up e riavvii del QR.",
+                en = "On this Android tap 'Open WhatsApp (Number + QR)', verify the same number until the QR Code appears. If you see the ⋮ menu at top right, tap ⋮ → 'Show QR for iPhone'.",
+                fr = "Sur cet Android touchez « Ouvrir WhatsApp », vérifiez le même numéro jusqu'au Code QR (si ⋮ apparaît en haut à droite, choisissez « Afficher QR pour iPhone »)."
+            ),
+            "2" to DirectSwitchL10n.tr(
+                "Sul vecchio iPhone apri direttamente WhatsApp (senza usare lo scanner di DirectSwitch) → Impostazioni → Chat → Trasferisci chat su Android → Inizia e inquadra il QR una sola volta.",
+                en = "On your old iPhone open WhatsApp → Settings → Chats → Move Chats to Android → Start and scan the QR once.",
+                fr = "Sur l'ancien iPhone ouvrez WhatsApp → Réglages → Discussions → Transférer vers Android → Démarrer et scannez le QR."
+            )
         )
         isThisAndroidToIphone -> listOf(
-            "1" to "Sul nuovo iPhone apri WhatsApp e verifica lo stesso numero fino al Codice QR (anche su iPhone già configurato, senza usare Passa a iOS e senza formattare).",
-            "2" to "Su questo Android tocca «Apri WhatsApp» qui sotto → Impostazioni → Chat → Trasferisci chat → Inizia e inquadra il Codice QR sul nuovo iPhone."
+            "1" to DirectSwitchL10n.tr(
+                "Sul nuovo iPhone apri WhatsApp e verifica lo stesso numero fino al Codice QR (anche su iPhone già configurato, senza usare Passa a iOS e senza formattare).",
+                en = "On your new iPhone open WhatsApp and verify the same number until the QR Code appears (no reset needed).",
+                fr = "Sur le nouvel iPhone ouvrez WhatsApp et vérifiez le même numéro jusqu'au Code QR (sans réinitialiser)."
+            ),
+            "2" to DirectSwitchL10n.tr(
+                "Su questo Android tocca «Apri WhatsApp» qui sotto → Impostazioni → Chat → Trasferisci chat → Inizia e inquadra il Codice QR sul nuovo iPhone.",
+                en = "On this Android tap 'Open WhatsApp' below → Settings → Chats → Transfer chats → Start and scan the QR on the new iPhone.",
+                fr = "Sur cet Android touchez « Ouvrir WhatsApp » ci-dessous → Paramètres → Discussions → Transférer → Démarrer et scannez le QR."
+            )
         )
         else -> listOf(
-            "1" to "Sul vecchio Android apri WhatsApp → Impostazioni → Chat → Trasferisci chat → Inizia.",
-            "2" to "Su questo telefono verifica lo stesso numero in WhatsApp fino al Codice QR e inquadralo una sola volta."
+            "1" to DirectSwitchL10n.tr(
+                "Sul vecchio Android apri WhatsApp → Impostazioni → Chat → Trasferisci chat → Inizia.",
+                en = "On the old Android open WhatsApp → Settings → Chats → Transfer chats → Start.",
+                fr = "Sur l'ancien Android ouvrez WhatsApp → Paramètres → Discussions → Transférer → Démarrer."
+            ),
+            "2" to DirectSwitchL10n.tr(
+                "Su questo telefono verifica lo stesso numero in WhatsApp fino al Codice QR e inquadralo una sola volta.",
+                en = "On this phone verify the same number in WhatsApp until the QR Code appears and scan it once.",
+                fr = "Sur ce téléphone vérifiez le même numéro dans WhatsApp jusqu'au Code QR et scannez-le."
+            )
         )
     }
 
     val primaryButtonTitle = when {
-        isIphoneToThisAndroid -> "Apri WhatsApp (Numero + QR)"
-        isThisAndroidToIphone -> "Apri WhatsApp (Trasferisci chat)"
-        else -> "Apri WhatsApp su questo Android"
+        isIphoneToThisAndroid -> DirectSwitchL10n.tr("Apri WhatsApp (Numero + QR)", en = "Open WhatsApp (Number + QR)", fr = "Ouvrir WhatsApp (Numéro + QR)")
+        isThisAndroidToIphone -> DirectSwitchL10n.tr("Apri WhatsApp (Trasferisci chat)", en = "Open WhatsApp (Transfer chats)", fr = "Ouvrir WhatsApp (Transférer)")
+        else -> DirectSwitchL10n.tr("Apri WhatsApp su questo Android", en = "Open WhatsApp on this Android", fr = "Ouvrir WhatsApp sur cet Android")
     }
 
     DirectSwitchCard(

@@ -768,10 +768,12 @@ struct ManifestItem: Codable, Identifiable, Equatable, Sendable {
     var longitude: Double? = nil
     var isLivePhoto: Bool? = nil
     var livePhotoVideoFileName: String? = nil
+    var livePhotoVideoSizeBytes: Int64? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, category, fileName, relativeAlbumOrFolder, sizeBytes, capturedEpochMillis
         case dedupKey, mimeType, isFavorite, latitude, longitude, isLivePhoto, livePhotoVideoFileName
+        case livePhotoVideoSizeBytes
     }
 
     init(
@@ -787,7 +789,8 @@ struct ManifestItem: Codable, Identifiable, Equatable, Sendable {
         latitude: Double? = nil,
         longitude: Double? = nil,
         isLivePhoto: Bool? = nil,
-        livePhotoVideoFileName: String? = nil
+        livePhotoVideoFileName: String? = nil,
+        livePhotoVideoSizeBytes: Int64? = nil
     ) {
         self.id = id
         self.category = category
@@ -802,6 +805,7 @@ struct ManifestItem: Codable, Identifiable, Equatable, Sendable {
         self.longitude = longitude
         self.isLivePhoto = isLivePhoto
         self.livePhotoVideoFileName = livePhotoVideoFileName
+        self.livePhotoVideoSizeBytes = livePhotoVideoSizeBytes
     }
 
     init(from decoder: Decoder) throws {
@@ -819,6 +823,7 @@ struct ManifestItem: Codable, Identifiable, Equatable, Sendable {
         longitude = try c.decodeIfPresent(Double.self, forKey: .longitude)
         isLivePhoto = try c.decodeIfPresent(Bool.self, forKey: .isLivePhoto)
         livePhotoVideoFileName = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoFileName)
+        livePhotoVideoSizeBytes = try c.decodeIfPresent(Int64.self, forKey: .livePhotoVideoSizeBytes)
     }
 }
 

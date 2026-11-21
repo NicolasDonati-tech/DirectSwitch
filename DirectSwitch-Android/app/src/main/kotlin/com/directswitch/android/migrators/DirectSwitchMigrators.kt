@@ -985,7 +985,33 @@ object MediaExifScannerAndImporter {
     fun hasMediaPermissions(context: Context): Boolean =
         hasPhotoPermission(context) || hasVideoPermission(context)
 
-    /** Precaricamento progressivo di immagini + album oppure video fino al totale effettivo sul dispositivo. */
+    private fun buildEligibleMediaSelection(): String {
+        val clauses = mutableListOf("${MediaStore.MediaColumns.SIZE} > 0")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            clauses.add("${MediaStore.MediaColumns.IS_PENDING} = 0")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            clauses.add("${MediaStore.MediaColumns.IS_TRASHED} = 0")
+        }
+        return clauses.joinToString(" AND ")
+    }
+
+    private fun isMediaRowReadable(context: Context, uri: Uri, dataPath: String?, size: Long): Boolean {
+        if (size <= 0L) return false
+        if (!dataPath.isNullOrBlank()) {
+            val file = File(dataPath)
+            if (file.exists() && file.isFile && file.length() > 0L) {
+                return true
+            }
+        }
+        return runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                afd.length != 0L
+            } ?: false
+        }.getOrDefault(false)
+    }
+
+    /** Precaricamento progressivo dei soli file foto/video realmente leggibili e idonei al trasferimento. */
     suspend fun preloadMediaStatsWithProgress(
         context: Context,
         isVideo: Boolean,
@@ -997,27 +1023,35 @@ object MediaExifScannerAndImporter {
             return@withContext Triple(0, 0, 0L)
         }
         val uri = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        @Suppress("DEPRECATION")
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.SIZE,
-            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME
+            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
+            MediaStore.MediaColumns.DATA
         )
         var totalValid = 0
         var totalBytes = 0L
         val albums = HashSet<String>()
         runCatching {
-            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            context.contentResolver.query(uri, projection, buildEligibleMediaSelection(), null, null)?.use { cursor ->
                 val rawCount = cursor.count
+                val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
                 val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
                 val albumIdx = cursor.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                @Suppress("DEPRECATION")
+                val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
                 val step = maxOf(1, rawCount / 24)
                 withContext(Dispatchers.Main) { onProgress(0, rawCount, 0, 0L) }
                 var scanned = 0
                 while (cursor.moveToNext()) {
                     currentCoroutineContext().ensureActive()
                     scanned++
+                    val id = if (idIdx >= 0) cursor.getLong(idIdx) else -1L
                     val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
-                    if (size > 0L) {
+                    val dataPath = if (dataIdx >= 0) cursor.getString(dataIdx) else null
+                    val contentUri = if (id >= 0L) ContentUris.withAppendedId(uri, id) else uri
+                    if (size > 0L && isMediaRowReadable(context, contentUri, dataPath, size)) {
                         totalValid++
                         totalBytes += size
                         val albumName = if (albumIdx >= 0) cursor.getString(albumIdx)?.trim().orEmpty() else ""
@@ -1025,7 +1059,7 @@ object MediaExifScannerAndImporter {
                     }
                     if (scanned % step == 0 || scanned == rawCount) {
                         val l = totalValid
-                        val t = maxOf(totalValid, rawCount)
+                        val t = maxOf(totalValid, rawCount - (scanned - totalValid))
                         val a = albums.size
                         val b = totalBytes
                         withContext(Dispatchers.Main) { onProgress(l, t, a, b) }
@@ -1067,6 +1101,7 @@ object MediaExifScannerAndImporter {
         category: TransferCategory
     ): List<LocalMediaEntry> {
         val out = mutableListOf<LocalMediaEntry>()
+        @Suppress("DEPRECATION")
         val projection = mutableListOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
@@ -1074,7 +1109,8 @@ object MediaExifScannerAndImporter {
             MediaStore.MediaColumns.DATE_TAKEN,
             MediaStore.MediaColumns.DATE_MODIFIED,
             MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
-            MediaStore.MediaColumns.MIME_TYPE
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.DATA
         ).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 add(MediaStore.MediaColumns.IS_FAVORITE)
@@ -1084,7 +1120,7 @@ object MediaExifScannerAndImporter {
             context.contentResolver.query(
                 collectionUri,
                 projection,
-                null,
+                buildEligibleMediaSelection(),
                 null,
                 "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
             )?.use { cursor ->
@@ -1095,6 +1131,8 @@ object MediaExifScannerAndImporter {
                 val modCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
                 val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
                 val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                @Suppress("DEPRECATION")
+                val dataCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
                 val favCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
                 } else -1
@@ -1104,6 +1142,9 @@ object MediaExifScannerAndImporter {
                     val name = cursor.getString(nameCol) ?: "media_$id"
                     val size = cursor.getLong(sizeCol)
                     if (size <= 0L) continue
+                    val contentUri = ContentUris.withAppendedId(collectionUri, id)
+                    val dataPath = if (dataCol >= 0) cursor.getString(dataCol) else null
+                    if (!isMediaRowReadable(context, contentUri, dataPath, size)) continue
                     val rawDateTaken = cursor.getLong(dateCol)
                     val rawDateModifiedSec = cursor.getLong(modCol)
                     val baseTimestamp = resolveEffectiveTimestampMillis(rawDateTaken, rawDateModifiedSec)
@@ -1116,7 +1157,6 @@ object MediaExifScannerAndImporter {
                     val album = cursor.getString(bucketCol) ?: "Camera"
                     val mime = cursor.getString(mimeCol)
                         ?: if (category == TransferCategory.VIDEOS) "video/mp4" else "image/jpeg"
-                    val contentUri = ContentUris.withAppendedId(collectionUri, id)
                     val dedupKey = "${name.lowercase()}_${size}_$dateTaken"
 
                     out.add(

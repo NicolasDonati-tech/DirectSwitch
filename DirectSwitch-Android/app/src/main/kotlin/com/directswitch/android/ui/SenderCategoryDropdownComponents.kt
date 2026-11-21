@@ -93,6 +93,7 @@ import androidx.core.graphics.drawable.toBitmap
 import com.directswitch.android.migrators.DocumentLocationSummary
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.InstalledAppCategoryGroup
+import com.directswitch.android.protocol.DirectSwitchL10n
 import com.directswitch.android.protocol.TransferDisplayFormatting
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.ui.theme.AppleSettingsIcon
@@ -204,13 +205,13 @@ fun ProgressivePreloadDropdownBody(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 DirectSwitchSecondaryButton(
-                    text = "Concedi permesso",
+                    text = DirectSwitchL10n.tr("Concedi permesso", en = "Grant permission", fr = "Autoriser"),
                     onClick = onRequestPermission,
                     tint = DirectSwitchTheme.orange,
                     modifier = Modifier.weight(1f)
                 )
                 DirectSwitchSecondaryButton(
-                    text = "Impostazioni",
+                    text = DirectSwitchL10n.tr("Impostazioni", en = "Settings", fr = "Réglages"),
                     onClick = {
                         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                             data = Uri.fromParts("package", context.packageName, null)
@@ -266,7 +267,7 @@ fun ProgressivePreloadDropdownBody(
         }
         if (!isLoading) {
             Text(
-                text = "Ricarica",
+                text = DirectSwitchL10n.tr("Ricarica"),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.blue,
@@ -324,11 +325,18 @@ fun DateSyncDropdownBody(
         return
     }
 
-    val shortToday = remember {
-        DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.ITALY).format(Date())
+    val activeLocale = remember(DirectSwitchL10n.activeLanguage) {
+        when (DirectSwitchL10n.effectiveCode()) {
+            "en" -> Locale.ENGLISH
+            "fr" -> Locale.FRENCH
+            else -> Locale.ITALY
+        }
     }
-    val formattedUpdated = remember(lastUpdatedEpochMillis) {
-        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.ITALY)
+    val shortToday = remember(activeLocale) {
+        DateFormat.getDateInstance(DateFormat.MEDIUM, activeLocale).format(Date())
+    }
+    val formattedUpdated = remember(lastUpdatedEpochMillis, activeLocale) {
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, activeLocale)
             .format(Date(lastUpdatedEpochMillis ?: System.currentTimeMillis()))
     }
 
@@ -359,16 +367,20 @@ fun DateSyncDropdownBody(
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = if (isLoading) {
-                        "Aggiornamento alla data odierna in corso..."
+                        DirectSwitchL10n.tr("Aggiornamento alla data odierna in corso...", en = "Updating to today's date...", fr = "Mise à jour à la date du jour...")
                     } else {
-                        "Aggiornato al $formattedUpdated"
+                        DirectSwitchL10n.tr("Aggiornato al $formattedUpdated", en = "Updated on $formattedUpdated", fr = "Mis à jour le $formattedUpdated")
                     },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = DirectSwitchTheme.textPrimary
                 )
                 Text(
-                    text = "$activeCount $unitLabel pronti al passaggio",
+                    text = DirectSwitchL10n.tr(
+                        "$activeCount $unitLabel pronti al passaggio",
+                        en = "$activeCount ${DirectSwitchL10n.tr(unitLabel)} ready to copy",
+                        fr = "$activeCount ${DirectSwitchL10n.tr(unitLabel)} prêts à copier"
+                    ),
                     fontSize = 12.sp,
                     color = DirectSwitchTheme.textSecondary
                 )
@@ -376,7 +388,7 @@ fun DateSyncDropdownBody(
         }
         if (!isLoading) {
             Text(
-                text = "Aggiorna",
+                text = DirectSwitchL10n.tr("Aggiorna"),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.blue,
@@ -392,13 +404,21 @@ fun DateSyncDropdownBody(
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
             Text(
-                text = "Trasferisci solo fino ad oggi ($shortToday)",
+                text = DirectSwitchL10n.tr(
+                    "Trasferisci solo fino ad oggi ($shortToday)",
+                    en = "Transfer only up to today ($shortToday)",
+                    fr = "Transférer uniquement jusqu'à aujourd'hui ($shortToday)"
+                ),
                 fontSize = 12.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.textPrimary
             )
             Text(
-                text = "Se spento copia sia lo storico sia eventuali voci future.",
+                text = DirectSwitchL10n.tr(
+                    "Se spento copia sia lo storico sia eventuali voci future.",
+                    en = "When off, copies both past and future items.",
+                    fr = "Si désactivé, copie l'historique et les éléments futurs."
+                ),
                 fontSize = 11.sp,
                 color = DirectSwitchTheme.textSecondary
             )
@@ -441,7 +461,7 @@ fun DocumentsPositionsDropdownBody(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "Aggiungi e spunta le posizioni",
+                text = DirectSwitchL10n.tr("Aggiungi e spunta le posizioni"),
                 fontSize = 13.5.sp,
                 fontWeight = FontWeight.Bold,
                 color = DirectSwitchTheme.textPrimary
@@ -449,9 +469,9 @@ fun DocumentsPositionsDropdownBody(
             val selectedCount = visibleLocations.count { it.isSelected }
             Text(
                 text = if (selectedCount > 0) {
-                    "$selectedCount posizioni selezionate"
+                    DirectSwitchL10n.tr("$selectedCount posizioni selezionate", en = "$selectedCount locations selected", fr = "$selectedCount emplacements sélectionnés")
                 } else {
-                    "Spunta una o più posizioni da copiare"
+                    DirectSwitchL10n.tr("Spunta una o più posizioni da copiare", en = "Check one or more locations to copy", fr = "Cochez un ou plusieurs emplacements à copier")
                 },
                 fontSize = 12.sp,
                 color = DirectSwitchTheme.textSecondary
@@ -464,12 +484,12 @@ fun DocumentsPositionsDropdownBody(
             ) {
                 Icon(
                     imageVector = Icons.Filled.Refresh,
-                    contentDescription = "Ricontrolla",
+                    contentDescription = DirectSwitchL10n.tr("Ricontrolla"),
                     tint = DirectSwitchTheme.blue,
                     modifier = Modifier.size(16.dp)
                 )
                 Text(
-                    text = "Ricontrolla",
+                    text = DirectSwitchL10n.tr("Ricontrolla"),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = DirectSwitchTheme.blue
@@ -499,7 +519,11 @@ fun DocumentsPositionsDropdownBody(
                     modifier = Modifier.size(18.dp)
                 )
                 Text(
-                    text = "Attiva «Accesso a tutti i file» per preparare tutte le cartelle della Memoria interna, Download e Documenti.",
+                    text = DirectSwitchL10n.tr(
+                        "Attiva «Accesso a tutti i file» per preparare tutte le cartelle della Memoria interna, Download e Documenti.",
+                        en = "Enable 'All files access' to prepare all folders in Internal storage, Downloads and Documents.",
+                        fr = "Activez « Accès à tous les fichiers » pour préparer Stockage interne, Téléchargements et Documents."
+                    ),
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
                     color = DirectSwitchTheme.textPrimary,
@@ -522,11 +546,15 @@ fun DocumentsPositionsDropdownBody(
                     loc.locationName.contains("USB", ignoreCase = true) -> Icons.Filled.SdCard
                 else -> Icons.Filled.Folder
             }
-            val cleanTitle = if (loc.locationId == "vol:primary") "Memoria interna" else loc.locationName
+            val cleanTitle = if (loc.locationId == "vol:primary") DirectSwitchL10n.tr("Memoria interna", en = "Internal storage", fr = "Stockage interne") else loc.locationName
             val foldersCount = maxOf(loc.folderCount, if (loc.fileCount > 0) 1 else 0)
-            val foldersLabel = if (foldersCount == 1) "1 cartella preparata" else "$foldersCount cartelle preparate"
+            val foldersLabel = if (foldersCount == 1) {
+                DirectSwitchL10n.tr("1 cartella preparata", en = "1 folder ready", fr = "1 dossier prêt")
+            } else {
+                DirectSwitchL10n.tr("$foldersCount cartelle preparate", en = "$foldersCount folders ready", fr = "$foldersCount dossiers prêts")
+            }
             val subtitleText = if (loc.fileCount > 0) {
-                "$foldersLabel • ${loc.fileCount} file • ${formatBytesHuman(loc.totalBytes)}"
+                "$foldersLabel • ${loc.fileCount} ${DirectSwitchL10n.tr("file", en = "files", fr = "fichiers")} • ${formatBytesHuman(loc.totalBytes)}"
             } else {
                 foldersLabel
             }
@@ -611,7 +639,7 @@ fun DocumentsPositionsDropdownBody(
     }
 
     DirectSwitchSecondaryButton(
-        text = "Aggiungi altra posizione (Drive / SD / USB / Cartella)",
+        text = DirectSwitchL10n.tr("Aggiungi altra posizione (Drive / SD / USB / Cartella)", en = "Add another location (Drive / SD / USB / Folder)", fr = "Ajouter un emplacement (Drive / SD / USB / Dossier)"),
         onClick = onPickFolderTree
     )
 
@@ -621,7 +649,7 @@ fun DocumentsPositionsDropdownBody(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = "Rimuovi posizioni aggiunte",
+                text = DirectSwitchL10n.tr("Rimuovi posizioni aggiunte"),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = DirectSwitchTheme.red
@@ -699,20 +727,20 @@ fun InstalledAppsDropdownBody(
                     }
                     Column {
                         Text(
-                            text = "App verificate su questo telefono ($selectedCount)",
+                            text = DirectSwitchL10n.tr("App verificate su questo telefono ($selectedCount)", en = "Verified apps on this phone ($selectedCount)", fr = "Apps vérifiées sur ce téléphone ($selectedCount)"),
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
-                            text = "${allApps.size} app rilevate con icona e nome pronte al trasferimento",
+                            text = DirectSwitchL10n.tr("${allApps.size} app rilevate con icona e nome pronte al trasferimento", en = "${allApps.size} apps detected with icon and name ready to copy", fr = "${allApps.size} apps détectées prêtes à transférer"),
                             fontSize = 11.5.sp,
                             color = DirectSwitchTheme.textSecondary
                         )
                     }
                 }
                 Text(
-                    text = "Aggiorna",
+                    text = DirectSwitchL10n.tr("Aggiorna"),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = DirectSwitchTheme.blue,
@@ -723,7 +751,7 @@ fun InstalledAppsDropdownBody(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("Cerca tra le app installate...", fontSize = 13.sp) },
+                placeholder = { Text(DirectSwitchL10n.tr("Cerca tra le app installate...", en = "Search installed apps...", fr = "Rechercher dans les apps installées..."), fontSize = 13.sp) },
                 leadingIcon = {
                     Icon(Icons.Filled.Search, contentDescription = null, tint = DirectSwitchTheme.textSecondary, modifier = Modifier.size(18.dp))
                 },
@@ -731,7 +759,7 @@ fun InstalledAppsDropdownBody(
                     if (searchQuery.isNotEmpty()) {
                         Icon(
                             Icons.Filled.Clear,
-                            contentDescription = "Cancella",
+                            contentDescription = DirectSwitchL10n.tr("Cancella", en = "Clear", fr = "Effacer"),
                             tint = DirectSwitchTheme.textSecondary,
                             modifier = Modifier.size(18.dp).clickable { searchQuery = "" }
                         )
@@ -753,7 +781,7 @@ fun InstalledAppsDropdownBody(
                     modifier = Modifier.clickable { showAllDetectedGrid = !showAllDetectedGrid }
                 ) {
                     Text(
-                        text = if (queryTrimmed.isNotEmpty()) "Risultati (${filteredApps.size})" else "Tutte le app (${allApps.size})",
+                        text = if (queryTrimmed.isNotEmpty()) DirectSwitchL10n.tr("Risultati (${filteredApps.size})", en = "Results (${filteredApps.size})", fr = "Résultats (${filteredApps.size})") else DirectSwitchL10n.tr("Tutte le app (${allApps.size})", en = "All apps (${allApps.size})", fr = "Toutes les apps (${allApps.size})"),
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = DirectSwitchTheme.textPrimary
@@ -774,7 +802,7 @@ fun InstalledAppsDropdownBody(
                         border = BorderStroke(0.8.dp, DirectSwitchTheme.cardBorder)
                     ) {
                         Text(
-                            text = if (allSelected) "Deseleziona" else "Seleziona tutte",
+                            text = if (allSelected) DirectSwitchL10n.tr("Deseleziona", en = "Deselect", fr = "Désélectionner") else DirectSwitchL10n.tr("Seleziona tutte", en = "Select all", fr = "Tout sélectionner"),
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = if (allSelected) DirectSwitchTheme.orange else DirectSwitchTheme.textPrimary,
@@ -787,7 +815,7 @@ fun InstalledAppsDropdownBody(
             if (showAllDetectedGrid || queryTrimmed.isNotEmpty()) {
                 if (filteredApps.isEmpty()) {
                     Text(
-                        text = if (isLoadingApps) "Caricamento elenco app in corso..." else "Nessuna app corrispondente alla ricerca.",
+                        text = if (isLoadingApps) DirectSwitchL10n.tr("Caricamento elenco app in corso...", en = "Loading app list...", fr = "Chargement des apps...") else DirectSwitchL10n.tr("Nessuna app corrispondente alla ricerca.", en = "No matching apps found.", fr = "Aucune app correspondante."),
                         fontSize = 12.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
@@ -805,7 +833,7 @@ fun InstalledAppsDropdownBody(
     // Blocco 2: Categorie estese in stile iPhone (icona + nome per ogni app, zero "+" blu)
     if (queryTrimmed.isEmpty() && groupedCategories.isNotEmpty()) {
         Text(
-            text = "Categorie estese stile iPhone",
+            text = DirectSwitchL10n.tr("Categorie estese stile iPhone", en = "Extended App Categories", fr = "Catégories d'apps étendues"),
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textPrimary
@@ -861,9 +889,9 @@ fun InstalledAppsDropdownBody(
                                     )
                                     Text(
                                         text = if (catSelectedCount > 0) {
-                                            "$catSelectedCount di ${category.apps.size} selezionate"
+                                            DirectSwitchL10n.tr("$catSelectedCount di ${category.apps.size} selezionate", en = "$catSelectedCount of ${category.apps.size} selected", fr = "$catSelectedCount sur ${category.apps.size} sélectionnées")
                                         } else {
-                                            "${category.apps.size} app disponibili"
+                                            DirectSwitchL10n.tr("${category.apps.size} app disponibili", en = "${category.apps.size} apps available", fr = "${category.apps.size} apps disponibles")
                                         },
                                         fontSize = 11.5.sp,
                                         color = if (catSelectedCount > 0) DirectSwitchTheme.green else DirectSwitchTheme.textSecondary
@@ -887,7 +915,7 @@ fun InstalledAppsDropdownBody(
                                 )
                             ) {
                                 Text(
-                                    text = if (catAllSelected) "Togli" else "Tutte",
+                                    text = if (catAllSelected) DirectSwitchL10n.tr("Togli", en = "Clear", fr = "Retirer") else DirectSwitchL10n.tr("Tutte", en = "All", fr = "Toutes"),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = if (catAllSelected) DirectSwitchTheme.orange else DirectSwitchTheme.textPrimary,
@@ -1076,7 +1104,7 @@ fun WhatsAppDropdownBody(isCrossOs: Boolean) {
             modifier = Modifier.size(18.dp)
         )
         Text(
-            text = "Passaggio guidato gratuito tramite Codice QR",
+            text = DirectSwitchL10n.tr("Passaggio guidato gratuito tramite Codice QR", en = "Free guided transfer via QR Code", fr = "Transfert guidé gratuit par Code QR"),
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             color = DirectSwitchTheme.textPrimary
@@ -1084,9 +1112,9 @@ fun WhatsAppDropdownBody(isCrossOs: Boolean) {
     }
     Text(
         text = if (isCrossOs) {
-            "Trasferisce cronologia chat, foto, video e messaggi vocali direttamente dentro WhatsApp verso iPhone senza formattare."
+            DirectSwitchL10n.tr("Trasferisce cronologia chat, foto, video e messaggi vocali direttamente dentro WhatsApp verso iPhone senza formattare.", en = "Transfers chat history, photos, videos and voice notes inside WhatsApp to iPhone without resetting.", fr = "Transfère l'historique des chats, photos, vidéos et vocaux dans WhatsApp vers iPhone sans réinitialiser.")
         } else {
-            "Trasferisce tutta la cronologia chat, allegati e vocali direttamente tra due Android dentro WhatsApp tramite Codice QR."
+            DirectSwitchL10n.tr("Trasferisce tutta la cronologia chat, allegati e vocali direttamente tra due Android dentro WhatsApp tramite Codice QR.", en = "Transfers full chat history, attachments and voice notes directly between Android phones inside WhatsApp via QR Code.", fr = "Transfère tout l'historique des chats, pièces jointes et vocaux entre Android dans WhatsApp par Code QR.")
         },
         fontSize = 12.sp,
         color = DirectSwitchTheme.textSecondary
