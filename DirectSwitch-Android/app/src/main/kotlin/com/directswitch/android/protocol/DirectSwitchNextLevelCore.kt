@@ -16,8 +16,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import java.io.File
 import java.io.RandomAccessFile
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 /** Tipo di canale di trasporto locale attivo (Cavo USB-C > Wi-Fi Diretto P2P > Wi-Fi Locale). */
@@ -128,7 +126,6 @@ object TransferCheckpointStore {
 }
 
 enum class SpaceReliefActionKind {
-    OVERFLOW_OLDER_TO_CLOUDSAVE,
     EXCLUDE_HEAVY_VIDEOS_300MB,
     LAST_YEAR_MEDIA_ONLY,
     EXCLUDE_ALL_VIDEOS
@@ -183,31 +180,6 @@ object SpaceReliefPlanner {
             .sumOf { it.sizeBytes.coerceAtLeast(0L) }
 
         val options = buildList {
-            if (olderMediaBytes > 0L) {
-                val finalBytes = (totalNeeded - olderMediaBytes).coerceAtLeast(0L)
-                add(
-                    SpaceReliefOption(
-                        kind = SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE,
-                        title = "Ultimo anno sul nuovo telefono + resto cifrato su CloudSave",
-                        subtitle = "Copia ${TransferDisplayFormatting.formatBytes(finalBytes)} ora e parcheggia ${TransferDisplayFormatting.formatBytes(olderMediaBytes)} su CloudSave (zero perdite)",
-                        estimatedSavingsBytes = olderMediaBytes,
-                        estimatedFinalBytes = finalBytes,
-                        fitsAvailableSpace = finalBytes <= usableFree
-                    )
-                )
-            } else if (heavyVideoBytes > 0L) {
-                val finalBytes = (totalNeeded - heavyVideoBytes).coerceAtLeast(0L)
-                add(
-                    SpaceReliefOption(
-                        kind = SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE,
-                        title = "Copia tutto tranne video > 300 MB + parcheggiali su CloudSave",
-                        subtitle = "Copia ${TransferDisplayFormatting.formatBytes(finalBytes)} ora e salva ${TransferDisplayFormatting.formatBytes(heavyVideoBytes)} cifrati su CloudSave",
-                        estimatedSavingsBytes = heavyVideoBytes,
-                        estimatedFinalBytes = finalBytes,
-                        fitsAvailableSpace = finalBytes <= usableFree
-                    )
-                )
-            }
             if (heavyVideoBytes > 0L) {
                 val finalBytes = (totalNeeded - heavyVideoBytes).coerceAtLeast(0L)
                 add(
@@ -381,9 +353,9 @@ object DirectSwitchL10n {
         // Home
         "Invia" to ("Send" to "Envoyer"),
         "Ricevi" to ("Receive" to "Recevoir"),
-        "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud." to (
-            "Copy your data without resetting: transfers contacts, photos, 4K videos, calendars, SMS, call logs, audio, documents and WhatsApp chats directly between two already set up phones via Wi-Fi P2P or USB-C cable without the cloud." to
-                "Copiez vos données sans réinitialiser : transfère contacts, photos, vidéos 4K, calendriers, SMS, appels, audio, documents et discussions WhatsApp directement entre deux téléphones déjà configurés via Wi-Fi P2P ou câble USB-C sans cloud."
+        "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi locale o Hotspot 5GHz senza passare dal cloud." to (
+            "Copy your data without resetting: transfers contacts, photos, 4K videos, calendars, SMS, call logs, audio, documents and WhatsApp chats directly between two already set up phones via local Wi-Fi or 5GHz Hotspot without the cloud." to
+                "Copiez vos données sans réinitialiser : transfère contacts, photos, vidéos 4K, calendriers, SMS, appels, audio, documents et discussions WhatsApp directement entre deux téléphones déjà configurés via Wi-Fi local ou partage 5 GHz sans cloud."
         ),
         "Invia i dati da questo telefono direttamente senza cavo all'altro telefono (Android o iPhone) dove hai aperto 'Ricevi'." to (
             "Send data wirelessly from this phone directly to the other phone (Android or iPhone) where you opened 'Receive'." to
@@ -516,15 +488,52 @@ object DirectSwitchL10n {
         "Scegli una soluzione rapida con 1 tocco per ripartire subito:" to ("Pick a 1-tap quick fix to resume immediately:" to "Choisissez une solution rapide en 1 geste pour repartir :"),
         "Rientra ✓" to ("Fits ✓" to "Compatible ✓"),
         "Tocca per vedere i dettagli e riprovare solo i mancanti" to ("Tap to view details and retry missing items only" to "Touchez pour voir les détails et réessayer les manquants"),
-        "Checklist finale prima di chiudere" to ("Final checklist before finishing" to "Liste finale avant de fermer"),
-        "Condividi ricevuta migrazione" to ("Share migration receipt" to "Partager le reçu de migration"),
-        "Audit Anti-Lockout & Reset" to ("Anti-Lockout & Reset Audit" to "Audit Anti-Verrouillage & Reset"),
-        "NON FORMATTARE ANCORA" to ("DO NOT RESET YET" to "NE PAS RÉINITIALISER"),
-        "VERIFICA ELEMENTI SECONDARI" to ("CHECK SECONDARY ITEMS" to "VÉRIFIER LES ÉLÉMENTS SECONDAIRES"),
-        "PRONTO PER RESET / PERMUTA ✓" to ("READY FOR RESET / TRADE-IN ✓" to "PRÊT POUR RESET / REPRISE ✓"),
-        "Condividi Certificato Pronto per Reset" to ("Share Ready-for-Reset Certificate" to "Partager le certificat Prêt pour Reset"),
-        "Ponte Overflow verso CloudSave" to ("CloudSave Overflow Bridge" to "Pont Overflow vers CloudSave"),
-        "Triage Batteria Critica" to ("Critical Battery Triage" to "Mode Batterie Critique")
+        "Triage Batteria Critica" to ("Critical Battery Triage" to "Mode Batterie Critique"),
+
+        // Practical Pro (#1–#5): Guardia Termica, Smart Clean, HEIC, Riconciliazione, AP Isolation
+        "Raffreddamento termico (45s)" to ("Thermal cooldown (45s)" to "Refroidissement thermique (45s)"),
+        "Limite termico (1 flusso)" to ("Thermal limit (1 stream)" to "Limite thermique (1 flux)"),
+        "Raffreddamento termico in corso (pausa automatica 45s)..." to (
+            "Thermal cooldown in progress (automatic 45s pause)..." to
+            "Refroidissement thermique en cours (pause automatique 45s)..."
+        ),
+        "Temperatura elevata — 1 flusso alla volta" to (
+            "High temperature — 1 stream at a time" to
+            "Température élevée — 1 flux à la fois"
+        ),
+        "Ho attivato l'Hotspot • Riprova collegamento" to (
+            "Hotspot enabled • Retry connection" to
+            "Partage de connexion activé • Réessayer"
+        ),
+        "Smart Clean & Compatibilità Pro" to ("Smart Clean & Pro Compatibility" to "Smart Clean & Compatibilité Pro"),
+        "Unisci contatti duplicati (+39)" to ("Merge duplicate contacts (+39)" to "Fusionner les contacts en double (+39)"),
+        "Fonde numeri e note in memoria senza toccare il vecchio telefono" to (
+            "Merges phone numbers and notes in memory without modifying the old phone" to
+            "Fusionne numéros et notes en mémoire sans modifier l'ancien téléphone"
+        ),
+        "Salta foto duplicate esatte (SHA-256)" to ("Skip exact duplicate photos (SHA-256)" to "Ignorer les photos identiques (SHA-256)"),
+        "Evita di copiare file identici pixel-per-pixel" to (
+            "Avoids copying identical pixel-for-pixel files" to
+            "Évite de copier des fichiers identiques pixel par pixel"
+        ),
+        "Escludi vecchi screenshot (> 12 mesi)" to ("Exclude old screenshots (> 12 months)" to "Exclure les anciennes captures (> 12 mois)"),
+        "Libera spazio evitando schermate datate" to (
+            "Saves storage by skipping outdated screenshots" to
+            "Libère de l'espace en évitant les captures anciennes"
+        ),
+        "Massima compatibilità HEIC → JPEG" to ("Maximum compatibility HEIC → JPEG" to "Compatibilité maximale HEIC → JPEG"),
+        "Converte foto iPhone in JPEG preservando data scatto, rotazione e GPS" to (
+            "Converts iPhone photos to JPEG while preserving capture date, rotation, and GPS" to
+            "Convertit les photos iPhone en JPEG en préservant date, rotation et GPS"
+        ),
+        "Converte foto HEIC mantenendo data scatto, rotazione e GPS" to (
+            "Converts HEIC photos while preserving capture date, rotation, and GPS" to
+            "Convertit les photos HEIC en préservant date, rotation et GPS"
+        ),
+        "Verifica SHA-256 Post-Migrazione: 100% Integro" to (
+            "Post-Migration SHA-256 Verification: 100% Verified" to
+            "Vérification SHA-256 Post-Migration : 100 % Intègre"
+        )
     )
 
     fun text(key: String, lang: DirectSwitchLanguage, fallbackItalian: String): String {
@@ -563,202 +572,5 @@ object DirectSwitchL10n {
             return if (iso == "en") "About $mins min left" else "Environ $mins min restantes"
         }
         return rawEta
-    }
-}
-
-data class PostMigrationChecklistItem(
-    val id: String,
-    val title: String,
-    val subtitle: String
-)
-
-object MigrationReceiptBuilder {
-    fun defaultChecklist(
-        hasWhatsApp: Boolean,
-        hasApps: Boolean,
-        hasSkipped: Boolean,
-        lang: DirectSwitchLanguage = DirectSwitchL10n.activeLanguage
-    ): List<PostMigrationChecklistItem> {
-        fun p(it: String, en: String, fr: String) = DirectSwitchL10n.tr(it, en, fr, lang)
-        return buildList {
-            add(
-                PostMigrationChecklistItem(
-                    id = "verify_media_contacts",
-                    title = p(
-                        "Verifica Rubrica, Foto e Video sul nuovo telefono",
-                        "Verify Contacts, Photos & Videos on the new phone",
-                        "Vérifiez Contacts, Photos et Vidéos sur le nouveau téléphone"
-                    ),
-                    subtitle = p(
-                        "Apri Contatti e Galleria prima di resettare il vecchio telefono.",
-                        "Open Contacts and Gallery before resetting your old phone.",
-                        "Ouvrez Contacts et Galerie avant de réinitialiser l'ancien téléphone."
-                    )
-                )
-            )
-            add(
-                PostMigrationChecklistItem(
-                    id = "banking_spid_2fa",
-                    title = p(
-                        "Attiva App Bancarie, SPID e Authenticator",
-                        "Activate Banking Apps, Digital ID & Authenticator",
-                        "Activez les apps bancaires, l'identité numérique et Authenticator"
-                    ),
-                    subtitle = p(
-                        "Configura i codici 2FA finché hai ancora il vecchio dispositivo acceso.",
-                        "Set up 2FA codes while you still have your old device powered on.",
-                        "Configurez les codes 2FA tant que l'ancien appareil est allumé."
-                    )
-                )
-            )
-            add(
-                PostMigrationChecklistItem(
-                    id = "mail_accounts",
-                    title = p(
-                        "Collega gli account Mail / Google / iCloud",
-                        "Sign in to Mail / Google / iCloud accounts",
-                        "Connectez vos comptes Mail / Google / iCloud"
-                    ),
-                    subtitle = p(
-                        "Accedi alle caselle email nelle Impostazioni del nuovo telefono.",
-                        "Sign in to your email accounts in the new phone's Settings.",
-                        "Connectez vos boîtes e-mail dans les Paramètres du nouveau téléphone."
-                    )
-                )
-            )
-            if (hasApps) {
-                add(
-                    PostMigrationChecklistItem(
-                        id = "apps_download",
-                        title = p(
-                            "Completa il download delle app selezionate",
-                            "Finish downloading selected apps",
-                            "Terminez le téléchargement des apps sélectionnées"
-                        ),
-                        subtitle = p(
-                            "Controlla che tutte le app principali siano state installate dallo Store.",
-                            "Make sure all your essential apps have been installed from the Store.",
-                            "Vérifiez que toutes vos apps principales sont installées depuis le Store."
-                        )
-                    )
-                )
-            }
-            if (hasWhatsApp) {
-                add(
-                    PostMigrationChecklistItem(
-                        id = "whatsapp_qr",
-                        title = p(
-                            "Trasferisci le chat WhatsApp via Codice QR",
-                            "Transfer WhatsApp chats via QR Code",
-                            "Transférez les discussions WhatsApp via Code QR"
-                        ),
-                        subtitle = p(
-                            "Verifica che la cronologia chat sia comparsa correttamente.",
-                            "Verify that your chat history appeared properly.",
-                            "Vérifiez que votre historique de discussions s'affiche correctement."
-                        )
-                    )
-                )
-            }
-            if (hasSkipped) {
-                add(
-                    PostMigrationChecklistItem(
-                        id = "skipped_review",
-                        title = p(
-                            "Controlla gli elementi saltati",
-                            "Review skipped items",
-                            "Vérifiez les éléments ignorés"
-                        ),
-                        subtitle = p(
-                            "Usa «Riprova solo i mancanti» per recuperare eventuali file non copiati.",
-                            "Use 'Retry missing only' to recover any skipped files.",
-                            "Utilisez « Réessayer les manquants » pour récupérer les fichiers ignorés."
-                        )
-                    )
-                )
-            }
-        }
-    }
-
-    fun buildReceiptText(
-        peerName: String,
-        isReceiver: Boolean,
-        connectionMedium: TransferConnectionMedium,
-        completedFiles: Int,
-        totalBytes: Long,
-        mergedContacts: Int,
-        importedCalendars: Int,
-        importedReminders: Int,
-        importedSms: Int,
-        importedCallLogs: Int,
-        appsCount: Int,
-        skippedCount: Int,
-        lang: DirectSwitchLanguage = DirectSwitchL10n.activeLanguage
-    ): String {
-        val iso = lang.effectiveIsoCode()
-        val loc = when (iso) {
-            "en" -> Locale.US
-            "fr" -> Locale.FRANCE
-            else -> Locale.ITALY
-        }
-        val df = SimpleDateFormat("dd/MM/yyyy HH:mm", loc)
-        if (iso == "en") {
-            val role = if (isReceiver) "Received from" else "Sent to"
-            return buildString {
-                appendLine("DirectSwitch — Migration Receipt")
-                appendLine("Date: ${df.format(Date())}")
-                appendLine("$role: ${peerName.ifBlank { "Connected device" }}")
-                appendLine("Connection: ${DirectSwitchL10n.tr(connectionMedium.badgeLabel(), lang)}")
-                appendLine("----------------------------------------")
-                appendLine("Files transferred: $completedFiles (${TransferDisplayFormatting.formatBytes(totalBytes)})")
-                appendLine("Contacts merged: $mergedContacts")
-                appendLine("Calendars imported: $importedCalendars")
-                appendLine("Reminders saved: $importedReminders")
-                appendLine("SMS saved: $importedSms")
-                appendLine("Call logs saved: $importedCallLogs")
-                appendLine("Apps in list: $appsCount")
-                appendLine("Skipped items: $skippedCount")
-                appendLine("----------------------------------------")
-                append("Local AES-256-GCM encrypted transfer completed without cloud.")
-            }
-        }
-        if (iso == "fr") {
-            val role = if (isReceiver) "Reçu de" else "Envoyé vers"
-            return buildString {
-                appendLine("DirectSwitch — Reçu de Migration")
-                appendLine("Date : ${df.format(Date())}")
-                appendLine("$role : ${peerName.ifBlank { "Appareil connecté" }}")
-                appendLine("Connexion : ${DirectSwitchL10n.tr(connectionMedium.badgeLabel(), lang)}")
-                appendLine("----------------------------------------")
-                appendLine("Fichiers transférés : $completedFiles (${TransferDisplayFormatting.formatBytes(totalBytes)})")
-                appendLine("Contacts fusionnés : $mergedContacts")
-                appendLine("Calendriers importés : $importedCalendars")
-                appendLine("Rappels enregistrés : $importedReminders")
-                appendLine("SMS enregistrés : $importedSms")
-                appendLine("Appels enregistrés : $importedCallLogs")
-                appendLine("Apps dans la liste : $appsCount")
-                appendLine("Éléments ignorés : $skippedCount")
-                appendLine("----------------------------------------")
-                append("Transfert local chiffré AES-256-GCM terminé sans cloud.")
-            }
-        }
-        val role = if (isReceiver) "Ricevuto da" else "Inviato a"
-        return buildString {
-            appendLine("DirectSwitch — Ricevuta di Migrazione")
-            appendLine("Data: ${df.format(Date())}")
-            appendLine("$role: ${peerName.ifBlank { "Dispositivo collegato" }}")
-            appendLine("Connessione: ${connectionMedium.badgeLabel()}")
-            appendLine("----------------------------------------")
-            appendLine("File trasferiti: $completedFiles (${TransferDisplayFormatting.formatBytes(totalBytes)})")
-            appendLine("Contatti uniti: $mergedContacts")
-            appendLine("Calendari importati: $importedCalendars")
-            appendLine("Promemoria salvati: $importedReminders")
-            appendLine("SMS salvati: $importedSms")
-            appendLine("Chiamate salvate: $importedCallLogs")
-            appendLine("App in elenco: $appsCount")
-            appendLine("Elementi saltati: $skippedCount")
-            appendLine("----------------------------------------")
-            append("Trasferimento locale cifrato AES-256-GCM completato senza cloud.")
-        }
     }
 }

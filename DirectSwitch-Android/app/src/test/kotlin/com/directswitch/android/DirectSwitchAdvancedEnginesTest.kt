@@ -14,14 +14,10 @@ import com.directswitch.android.protocol.CallLogTransferRecord
 import com.directswitch.android.protocol.CompletedMigrationRecord
 import com.directswitch.android.protocol.CompletedMigrationStore
 import com.directswitch.android.protocol.CrossOsCodecCompatibilityHelper
-import com.directswitch.android.protocol.DecommissionReadinessEvaluator
-import com.directswitch.android.protocol.DecommissionReadinessLevel
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchMotionPhotoCodec
-import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.MediaTimelineHealer
-import com.directswitch.android.protocol.OverflowBridgePlanner
 import com.directswitch.android.protocol.SmsTransferRecord
 import com.directswitch.android.protocol.SpaceReliefActionKind
 import com.directswitch.android.protocol.SpaceReliefPlanner
@@ -195,50 +191,21 @@ class DirectSwitchAdvancedEnginesTest {
     }
 
     @Test
-    fun decommissionAudit_matchesCrossOsAppsAndGeneratesResetCertificate() {
-        val senderApps = listOf(
-            InstalledAppRecord("posteitaliane.posteapp.appposteid", "PosteID"),
-            InstalledAppRecord("com.google.android.apps.authenticator2", "Google Authenticator"),
-            InstalledAppRecord("com.latuabancaperandroid", "Intesa Sanpaolo Mobile")
-        )
-        // Sul nuovo iPhone è presente solo PosteID (bundle iOS it.poste.postebuy2) -> 2 app critiche ancora mancanti!
-        val redReport = DecommissionReadinessEvaluator.evaluate(
-            sessionId = "ds_audit_1",
-            peerName = "iPhone 16",
-            peerPlatform = DevicePlatform.IOS,
-            senderInstalledApps = senderApps,
-            receiverInstalledAppIds = listOf("it.poste.postebuy2"),
-            localOnlyContactsCount = 4,
-            contactsWereMigrated = true,
-            completedFilesCount = 850,
-            transferredBytes = 4_200_000_000L
-        )
-        assertEquals(DecommissionReadinessLevel.BLOCKED_RED, redReport.readinessLevel)
-        assertEquals(1, redReport.verifiedCriticalApps.size)
-        assertEquals(2, redReport.missingCriticalApps.size)
+    fun motionPhotoZeroWriteProbe_detectsHeaderAndSamsungTailMarkers() {
+        val plainJpegHead = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) +
+            "JFIF normal static photo".toByteArray(Charsets.US_ASCII)
+        assertFalse(DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoHeaderBytes(plainJpegHead))
+        assertFalse(DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoTailBytes(plainJpegHead))
 
-        // Quando l'utente installa Authenticator e Intesa (o li conferma) diventa GREEN!
-        val greenReport = DecommissionReadinessEvaluator.evaluate(
-            sessionId = "ds_audit_1",
-            peerName = "iPhone 16",
-            peerPlatform = DevicePlatform.IOS,
-            senderInstalledApps = senderApps,
-            receiverInstalledAppIds = listOf("it.poste.postebuy2", "com.google.Authenticator"),
-            localOnlyContactsCount = 4,
-            contactsWereMigrated = true,
-            acknowledgedAppIds = setOf("intesa"),
-            completedFilesCount = 850,
-            transferredBytes = 4_200_000_000L
-        )
-        assertEquals(DecommissionReadinessLevel.READY_FOR_RESET_GREEN, greenReport.readinessLevel)
-        assertTrue(greenReport.missingCriticalApps.isEmpty())
-        val cert = DecommissionReadinessEvaluator.buildResetCertificateText(greenReport, "Pixel 9")
-        assertTrue(cert.contains("PRONTO PER RESET"))
-        assertTrue(cert.contains(greenReport.certificateSha256.take(12).uppercase()))
+        val xmpHead = "http://ns.adobe.com/xap/1.0/ <Camera:MotionPhoto>1</Camera:MotionPhoto>".toByteArray(Charsets.US_ASCII)
+        assertTrue(DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoHeaderBytes(xmpHead))
+
+        val samsungTail = "padding...MotionPhoto_Data...SEFT".toByteArray(Charsets.US_ASCII)
+        assertTrue(DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoTailBytes(samsungTail))
     }
 
     @Test
-    fun overflowBridgePlanner_proposesCloudSaveOptionAndSplitsCleanly() {
+    fun spaceReliefPlanner_proposesOnlyLocalPhoneToPhoneOptions() {
         val now = 1_795_000_000_000L
         val oldMs = now - 500L * 86_400_000L
         val recentMs = now - 30L * 86_400_000L
@@ -246,14 +213,11 @@ class DirectSwitchAdvancedEnginesTest {
             ManifestItem("recent_1", TransferCategory.PHOTOS, "r1.jpg", "Camera", 400_000_000L, recentMs, "r1"),
             ManifestItem("old_1", TransferCategory.VIDEOS, "o1.mp4", "Camera", 900_000_000L, oldMs, "o1")
         )
-        val freeBytes = 800_000_000L // ~800 MB liberi: 1.3 GB totali non entrano, ma 400 MB recenti sì!
+        val freeBytes = 800_000_000L
         val offer = SpaceReliefPlanner.evaluate("iPhone 16", freeBytes, items, now)
         assertNotNull(offer)
-        assertTrue(offer!!.options.any { it.kind == SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE && it.fitsAvailableSpace })
-
-        val split = OverflowBridgePlanner.buildSplitPlan(freeBytes, items, now)
-        assertEquals(listOf("recent_1"), split.directItems.map { it.id })
-        assertEquals(listOf("old_1"), split.overflowItems.map { it.id })
-        assertTrue(split.fitsAvailableSpace)
+        assertTrue(offer!!.options.any { it.kind == SpaceReliefActionKind.LAST_YEAR_MEDIA_ONLY && it.fitsAvailableSpace })
+        assertTrue(offer.options.any { it.kind == SpaceReliefActionKind.EXCLUDE_HEAVY_VIDEOS_300MB && it.fitsAvailableSpace })
+        assertFalse(offer.options.any { it.title.contains("CloudSave", ignoreCase = true) })
     }
 }

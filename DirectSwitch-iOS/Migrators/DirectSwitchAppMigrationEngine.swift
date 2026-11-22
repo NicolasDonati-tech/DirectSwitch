@@ -112,7 +112,7 @@ struct AppQuickCategory: Identifiable, Sendable {
 }
 
 /// Scanner deterministico delle app installate sull'iPhone mittente:
-/// 1) 48 schemi verificati (`knownProbes` + WhatsApp + CloudSave = limite massimo 50 consentito da iOS)
+/// 1) 48 schemi verificati (`knownProbes` + WhatsApp, entro il limite massimo di 50 schemi consentito da iOS)
 /// 2) Rilevamento automatico gratuito da Album Foto e metadati media (`iOSPhotoMetadataAppDetector`)
 /// 3) Catalogo curato per categorie italiane a 1 tocco e ricerca ufficiale App Store
 enum iOSInstalledAppsScanner {
@@ -135,7 +135,7 @@ enum iOSInstalledAppsScanner {
         androidPreinstalledGoogleBundleIds.contains(app.packageName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
     }
 
-    /// Tutti gli schemi univoci dichiarati in `Info.plist` (`<= 50` incluso `whatsapp` e `com.cloudsave.ios`).
+    /// Tutti gli schemi univoci dichiarati in `Info.plist` (`<= 50` incluso `whatsapp`).
     /// Gli slot precedentemente usati dalle app Google già preinstallate su Android (YouTube, Gmail, Maps, Chrome, Drive, Foto, Google)
     /// sono ora dedicati a CieID, Booking.com, Temu, SHEIN, Trenitalia, Telepass e Strava.
     static let knownProbes: [iOSKnownAppProbe] = [
@@ -779,7 +779,7 @@ enum iOSInstalledAppsScanner {
         return false
     }
 
-    private static let whitelistedSchemes: Set<String> = Set(knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"])
+    private static let whitelistedSchemes: Set<String> = Set(knownProbes.map(\.urlScheme) + ["whatsapp"])
 
     @MainActor
     static func canOpenScheme(_ rawScheme: String) -> Bool {

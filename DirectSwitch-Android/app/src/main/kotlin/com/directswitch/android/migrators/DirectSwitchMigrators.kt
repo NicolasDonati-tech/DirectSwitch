@@ -160,44 +160,6 @@ object StorageCapacityChecker {
     }
 }
 
-/** Gestisce lo stato locale del Pass Cross-OS Pro e il rilevamento informativo di CloudSave. */
-object CloudSaveEntitlementDetector {
-    private const val PREFS_NAME = "directswitch_license_prefs"
-    private const val KEY_PRO_UNLOCKED = "cross_os_pro_unlocked"
-
-    fun isLocalProUnlocked(context: Context): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_PRO_UNLOCKED, true)
-    }
-
-    fun setLocalProUnlocked(context: Context, unlocked: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_PRO_UNLOCKED, unlocked)
-            .apply()
-    }
-
-    /**
-     * Solo per il cross-sell nell'interfaccia: l'installazione di CloudSave NON equivale
-     * a un abbonamento CloudSave Pro e quindi NON sblocca il Pass Cross-OS.
-     */
-    fun isCloudSaveInstalled(context: Context): Boolean {
-        return try {
-            context.packageManager.getPackageInfo("com.cloudsave.android", 0)
-            true
-        } catch (_: PackageManager.NameNotFoundException) {
-            false
-        }
-    }
-
-    /**
-     * Abbonamento CloudSave Pro verificato. Finché non esiste una verifica firmata lato server
-     * restituisce sempre `false`, per non concedere lo sblocco senza ricevuta verificata.
-     */
-    @Suppress("UNUSED_PARAMETER")
-    fun hasVerifiedCloudSaveProEntitlement(context: Context): Boolean = false
-}
-
 /**
  * Ricrea esattamente la gerarchia di cartelle originale sul nuovo Android:
  * - Se è attivo l'accesso completo ai file (Android 11+ `MANAGE_EXTERNAL_STORAGE`) o Android 8–9,

@@ -603,102 +603,6 @@ struct SkippedItemsReportCard: View {
     }
 }
 
-// MARK: - Checklist Guidata Post-Migrazione + Ricevuta Condivisibile
-
-struct PostMigrationChecklistCard: View {
-    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
-    let items: [PostMigrationChecklistItem]
-    let receiptText: String
-
-    @State private var checkedIds: Set<String> = []
-    @State private var isExpanded: Bool = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    AppleSettingsIcon(systemName: "checklist.checked", color: AppleTheme.green)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(l10n.tr("Checklist finale prima di chiudere"))
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                        Text(l10n.tr("\(checkedIds.count)/\(items.count) passaggi verificati", en: "\(checkedIds.count)/\(items.count) steps verified", fr: "\(checkedIds.count)/\(items.count) étapes vérifiées"))
-                            .font(.system(size: 12))
-                            .foregroundColor(AppleTheme.textSecondary)
-                    }
-                    Spacer()
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(AppleTheme.textTertiary)
-                }
-            }
-            .buttonStyle(.plain)
-
-            if isExpanded {
-                VStack(spacing: 8) {
-                    ForEach(items) { item in
-                        let checked = checkedIds.contains(item.id)
-                        Button {
-                            if checked {
-                                checkedIds.remove(item.id)
-                            } else {
-                                checkedIds.insert(item.id)
-                            }
-                        } label: {
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: checked ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 19, weight: .semibold))
-                                    .foregroundColor(checked ? AppleTheme.green : AppleTheme.textTertiary)
-                                    .padding(.top, 1)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.title)
-                                        .font(.system(size: 13.5, weight: .semibold))
-                                        .foregroundColor(checked ? AppleTheme.textSecondary : AppleTheme.textPrimary)
-                                        .strikethrough(checked, color: AppleTheme.textSecondary)
-                                    Text(item.subtitle)
-                                        .font(.system(size: 11.5))
-                                        .foregroundColor(AppleTheme.textSecondary)
-                                }
-                                Spacer()
-                            }
-                            .padding(10)
-                            .background(AppleTheme.inputSurface.opacity(checked ? 0.45 : 0.85))
-                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            ShareLink(item: receiptText) {
-                HStack(spacing: 8) {
-                    Image(systemName: "doc.text.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(l10n.tr("Condividi ricevuta migrazione"))
-                        .font(.system(size: 14, weight: .semibold))
-                }
-                .foregroundColor(AppleTheme.blue)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(AppleTheme.blue.opacity(0.11))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-        }
-        .padding(14)
-        .background(AppleTheme.cardSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(AppleTheme.cardBorder, lineWidth: 0.9)
-        )
-    }
-}
-
 // MARK: - Recupero Delta 14–30 Giorni ("Copia solo le novità")
 
 struct DeltaCatchUpCard: View {
@@ -789,189 +693,276 @@ struct BatteryTriageActivePill: View {
     }
 }
 
-// MARK: - Audit Anti-Lockout Dinamico + Certificato Pronto per Reset
+// MARK: - 11. Componenti Practical Pro (#1–#5): Termica, Smart Clean, HEIC, Riconciliazione, AP Isolation
 
-struct DecommissionAuditCard: View {
+struct ThermalGuardBannerPill: View {
     @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
-    let report: DecommissionAuditReport
-    let senderDeviceName: String
-    let acknowledgedAppIds: Set<String>
-    let isRefreshing: Bool
-    var onToggleAcknowledge: (String) -> Void
-    var onRefreshLiveAudit: () -> Void
-
-    private var accent: Color {
-        switch report.readinessLevel {
-        case .blockedRed: return AppleTheme.red
-        case .cautionAmber: return AppleTheme.orange
-        case .readyForResetGreen: return AppleTheme.green
-        }
-    }
-
-    private var statusBadge: String {
-        switch report.readinessLevel {
-        case .blockedRed: return l10n.tr("NON FORMATTARE ANCORA", en: "DO NOT ERASE YET", fr: "NE PAS RÉINITIALISER")
-        case .cautionAmber: return l10n.tr("VERIFICA ELEMENTI SECONDARI", en: "CHECK SECONDARY ITEMS", fr: "VÉRIFIER LES ÉLÉMENTS")
-        case .readyForResetGreen: return l10n.tr("PRONTO PER RESET / PERMUTA ✓", en: "READY FOR RESET / TRADE-IN ✓", fr: "PRÊT POUR RÉINITIALISATION ✓")
-        }
-    }
+    let state: ThermalGuardState
+    let bannerText: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 10) {
-                AppleSettingsIcon(
-                    systemName: report.readinessLevel == .readyForResetGreen ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
-                    color: accent
-                )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(l10n.tr("Audit Anti-Lockout & Reset"))
-                        .font(.system(size: 15.5, weight: .bold))
-                        .foregroundColor(AppleTheme.textPrimary)
-                    Text(statusBadge)
-                        .font(.system(size: 11.5, weight: .heavy))
-                        .foregroundColor(accent)
-                }
-                Spacer()
-                Button(action: { if !isRefreshing { onRefreshLiveAudit() } }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 11, weight: .bold))
-                        Text(isRefreshing ? "..." : l10n.tr("Ricontrolla"))
-                            .font(.system(size: 11.5, weight: .bold))
-                    }
-                    .foregroundColor(AppleTheme.blue)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(AppleTheme.blue.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            if !report.missingCriticalApps.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(l10n.tr("\(report.missingCriticalApps.count) app critiche (SPID / Banche / 2FA) ancora assenti su \(report.peerName):", en: "\(report.missingCriticalApps.count) critical apps (ID / Banking / 2FA) still missing on \(report.peerName):", fr: "\(report.missingCriticalApps.count) apps critiques (Banques / 2FA) encore absentes sur \(report.peerName) :"))
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundColor(AppleTheme.red)
-
-                    ForEach(report.missingCriticalApps) { app in
-                        let ack = acknowledgedAppIds.contains(app.canonicalId)
-                        Button {
-                            onToggleAcknowledge(app.canonicalId)
-                        } label: {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: ack ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                    .foregroundColor(ack ? AppleTheme.green : AppleTheme.red)
-                                    .font(.system(size: 16))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(app.appName) • \(app.riskKind.rawValue)")
-                                        .font(.system(size: 12.5, weight: .bold))
-                                        .foregroundColor(AppleTheme.textPrimary)
-                                    Text(app.guidance)
-                                        .font(.system(size: 11.5))
-                                        .foregroundColor(AppleTheme.textSecondary)
-                                    Text(l10n.tr("Tocca per confermare di averla già migrata manualmente", en: "Tap to confirm you already migrated it manually", fr: "Touchez pour confirmer la migration manuelle"))
-                                        .font(.system(size: 10.5))
-                                        .foregroundColor(AppleTheme.blue)
-                                }
-                                Spacer()
-                            }
-                            .padding(9)
-                            .background(AppleTheme.inputSurface)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if !report.verifiedCriticalApps.isEmpty {
-                let previewNames = report.verifiedCriticalApps.prefix(4).map(\.appName).joined(separator: ", ")
-                Text(l10n.tr("✓ \(report.verifiedCriticalApps.count) app critiche già verificate sul nuovo telefono (\(previewNames))", en: "✓ \(report.verifiedCriticalApps.count) critical apps verified on new phone (\(previewNames))", fr: "✓ \(report.verifiedCriticalApps.count) apps critiques vérifiées sur le nouveau téléphone (\(previewNames))"))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(AppleTheme.green)
-            }
-
-            if report.localOnlyContactsCount > 0 {
-                Text(report.contactsWereMigrated
-                     ? l10n.tr("✓ Rilevati \(report.localOnlyContactsCount) contatti solo su iPhone: inclusi nella migrazione.", en: "✓ Found \(report.localOnlyContactsCount) local-only contacts: included in migration.", fr: "✓ \(report.localOnlyContactsCount) contacts locaux détectés : inclus dans la migration.")
-                     : l10n.tr("⚠ Rilevati \(report.localOnlyContactsCount) contatti salvati SOLO su iPhone e non migrati!", en: "⚠ Found \(report.localOnlyContactsCount) local-only contacts NOT migrated!", fr: "⚠ \(report.localOnlyContactsCount) contacts locaux NON migrés !"))
+        if state != .normal {
+            let isCritical = (state == .criticalCooldown)
+            let accent = isCritical ? AppleTheme.red : AppleTheme.orange
+            let rawLabel = (bannerText?.isEmpty == false)
+                ? (bannerText ?? "")
+                : (isCritical ? "Raffreddamento termico (45s)" : "Limite termico (1 flusso)")
+            let label = l10n.tr(rawLabel)
+            HStack(spacing: 6) {
+                Image(systemName: "flame.fill")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(report.contactsWereMigrated ? AppleTheme.green : AppleTheme.orange)
+                Text(label)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .lineLimit(1)
             }
-
-            if report.icloudPhantomMediaCount > 0 {
-                Text(l10n.tr("⚠ \(report.icloudPhantomMediaCount) foto/video rimasti solo su iCloud (non scaricati offline).", en: "⚠ \(report.icloudPhantomMediaCount) photos/videos remain iCloud-only (not downloaded offline).", fr: "⚠ \(report.icloudPhantomMediaCount) photos/vidéos restent uniquement sur iCloud."))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(AppleTheme.orange)
-            }
-
-            ShareLink(item: DecommissionReadinessEvaluator.buildResetCertificateText(report: report, senderDeviceName: senderDeviceName)) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 13.5, weight: .semibold))
-                    Text(l10n.tr("Condividi Certificato Pronto per Reset"))
-                        .font(.system(size: 13.5, weight: .bold))
-                }
-                .foregroundColor(accent)
-                .frame(maxWidth: .infinity)
-                .frame(height: 42)
-                .background(accent.opacity(0.14))
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-            }
+            .foregroundColor(accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(accent.opacity(0.14))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule().stroke(accent.opacity(0.45), lineWidth: 1)
+            )
         }
-        .padding(14)
-        .background(AppleTheme.cardSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(accent.opacity(0.55), lineWidth: 1.2)
-        )
     }
 }
 
-// MARK: - Ponte Overflow DirectSwitch -> CloudSave
-
-struct OverflowBridgeCloudSaveCard: View {
+struct NetworkIsolationHotspotCard: View {
     @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
-    let plan: OverflowSplitPlan
-    let statusNotice: String?
-    var onLaunchCloudSaveOverflow: () -> Void
+    let verdict: NetworkDiagnosticVerdict
+    var onRetry: () -> Void
 
     var body: some View {
+        let accent = verdict.likelyApClientIsolation ? AppleTheme.orange : AppleTheme.blue
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                AppleSettingsIcon(systemName: "icloud.and.arrow.up.fill", color: AppleTheme.blue)
+                AppleSettingsIcon(systemName: "antenna.radiowaves.left.and.right", color: accent)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(l10n.tr("Ponte Overflow verso CloudSave"))
-                        .font(.system(size: 15.5, weight: .bold))
+                    Text(verdict.title)
+                        .font(.system(size: 14.5, weight: .bold))
                         .foregroundColor(AppleTheme.textPrimary)
-                    Text(l10n.tr("\(plan.overflowItems.count) file storici (\(TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes))) pronti da parcheggiare cifrati AES-256 prima del reset.", en: "\(plan.overflowItems.count) older files (\(TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes))) ready to park with AES-256 encryption before reset.", fr: "\(plan.overflowItems.count) anciens fichiers (\(TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes))) prêts à être archivés chiffrés AES-256."))
+                    Text(verdict.description)
                         .font(.system(size: 12))
                         .foregroundColor(AppleTheme.textSecondary)
                 }
                 Spacer()
             }
 
-            if let notice = statusNotice, !notice.isEmpty {
-                Text(notice)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(AppleTheme.teal)
+            ForEach(verdict.guidanceSteps, id: \.self) { step in
+                Text(step)
+                    .font(.system(size: 12))
+                    .foregroundColor(AppleTheme.textPrimary)
+                    .padding(.leading, 4)
             }
 
-            ApplePrimaryButton(
-                title: l10n.tr("Salva \(plan.overflowItems.count) file eccedenti su CloudSave", en: "Save \(plan.overflowItems.count) overflow files to CloudSave", fr: "Enregistrer \(plan.overflowItems.count) fichiers sur CloudSave"),
-                icon: "lock.icloud.fill",
-                color: AppleTheme.blue,
-                action: onLaunchCloudSaveOverflow
+            AppleSecondaryButton(
+                title: l10n.tr("Ho attivato l'Hotspot • Riprova collegamento"),
+                icon: "arrow.clockwise",
+                tint: accent,
+                action: onRetry
             )
         }
         .padding(14)
-        .background(AppleTheme.cardSurface)
+        .background(accent.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(AppleTheme.blue.opacity(0.55), lineWidth: 1.2)
+                .stroke(accent.opacity(0.45), lineWidth: 1.2)
+        )
+    }
+}
+
+struct SmartCleanAndCompatCard: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
+    @Binding var smartClean: SmartCleanOptions
+    @Binding var convertHeicToJpeg: Bool
+    let showHeicOption: Bool
+    @State private var expanded: Bool = false
+
+    private var activeCount: Int {
+        var count = 0
+        if smartClean.mergeDuplicateContacts { count += 1 }
+        if smartClean.skipExactDuplicatePhotosSha256 { count += 1 }
+        if smartClean.skipOldScreenshotsOlderThanMonths > 0 { count += 1 }
+        if showHeicOption && convertHeicToJpeg { count += 1 }
+        return count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    expanded.toggle()
+                }
+            }) {
+                HStack(spacing: 12) {
+                    AppleSettingsIcon(systemName: "sparkles", color: AppleTheme.teal)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l10n.tr("Smart Clean & Compatibilità Pro"))
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .foregroundColor(AppleTheme.textPrimary)
+                        Text(l10n.tr(
+                            "\(activeCount) protezioni attive prima dell'invio",
+                            en: "\(activeCount) active protections before sending",
+                            fr: "\(activeCount) protections actives avant l'envoi"
+                        ))
+                            .font(.system(size: 12))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                Toggle(isOn: $smartClean.mergeDuplicateContacts) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(l10n.tr("Unisci contatti duplicati (+39)"))
+                            .font(.system(size: 13, weight: .medium))
+                        Text(l10n.tr("Fonde numeri e note in memoria senza toccare il vecchio telefono"))
+                            .font(.system(size: 11))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                }
+                .tint(AppleTheme.teal)
+
+                Toggle(isOn: $smartClean.skipExactDuplicatePhotosSha256) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(l10n.tr("Salta foto duplicate esatte (SHA-256)"))
+                            .font(.system(size: 13, weight: .medium))
+                        Text(l10n.tr("Evita di copiare file identici pixel-per-pixel"))
+                            .font(.system(size: 11))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                }
+                .tint(AppleTheme.teal)
+
+                Toggle(isOn: Binding(
+                    get: { smartClean.skipOldScreenshotsOlderThanMonths > 0 },
+                    set: { smartClean.skipOldScreenshotsOlderThanMonths = $0 ? 12 : 0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(l10n.tr("Escludi vecchi screenshot (> 12 mesi)"))
+                            .font(.system(size: 13, weight: .medium))
+                        Text(l10n.tr("Libera spazio evitando schermate datate"))
+                            .font(.system(size: 11))
+                            .foregroundColor(AppleTheme.textSecondary)
+                    }
+                }
+                .tint(AppleTheme.teal)
+
+                if showHeicOption {
+                    Toggle(isOn: $convertHeicToJpeg) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(l10n.tr("Massima compatibilità HEIC → JPEG"))
+                                .font(.system(size: 13, weight: .medium))
+                            Text(l10n.tr("Converte foto iPhone in JPEG preservando data scatto, rotazione e GPS"))
+                                .font(.system(size: 11))
+                                .foregroundColor(AppleTheme.textSecondary)
+                        }
+                    }
+                    .tint(AppleTheme.teal)
+                }
+            }
+        }
+        .appleCard()
+    }
+}
+
+struct PostTransferReconciliationCard: View {
+    @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
+    let verifiedCount: Int
+    let missingIds: [String]
+    var failedCount: Int = 0
+    let heicConvertedCount: Int
+    let smartCleanMergedContacts: Int
+    let smartCleanSkippedDuplicates: Int
+    let smartCleanSkippedScreenshots: Int
+    var onRepairMissing: ([String]) -> Void
+
+    var body: some View {
+        let allClean = missingIds.isEmpty
+        let accent = allClean ? AppleTheme.green : AppleTheme.orange
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                AppleSettingsIcon(
+                    systemName: allClean ? "checkmark.shield.fill" : "exclamationmark.triangle.fill",
+                    color: accent
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(allClean
+                         ? (failedCount == 0
+                            ? l10n.tr("Verifica SHA-256 Post-Migrazione: 100% Integro")
+                            : l10n.tr(
+                                "Verifica SHA-256: \(verifiedCount) file ricevuti integri",
+                                en: "SHA-256 Check: \(verifiedCount) received files verified",
+                                fr: "Vérification SHA-256 : \(verifiedCount) fichiers reçus intègres"
+                            ))
+                         : l10n.tr(
+                            "Rilevati \(missingIds.count) file mancanti o alterati",
+                            en: "\(missingIds.count) missing or altered files detected",
+                            fr: "\(missingIds.count) fichiers manquants ou altérés détectés"
+                         ))
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundColor(AppleTheme.textPrimary)
+                    Text(l10n.tr(
+                        "\(verifiedCount) file verificati con impronta crittografica end-to-end.",
+                        en: "\(verifiedCount) files verified with end-to-end cryptographic hash.",
+                        fr: "\(verifiedCount) fichiers vérifiés par empreinte cryptographique de bout en bout."
+                    ))
+                        .font(.system(size: 12))
+                        .foregroundColor(AppleTheme.textSecondary)
+                }
+                Spacer()
+            }
+
+            if smartCleanMergedContacts > 0 || smartCleanSkippedDuplicates > 0 || smartCleanSkippedScreenshots > 0 || heicConvertedCount > 0 {
+                let parts = [
+                    smartCleanMergedContacts > 0 ? l10n.tr(
+                        "\(smartCleanMergedContacts) contatti uniti",
+                        en: "\(smartCleanMergedContacts) contacts merged",
+                        fr: "\(smartCleanMergedContacts) contacts fusionnés"
+                    ) : nil,
+                    smartCleanSkippedDuplicates > 0 ? l10n.tr(
+                        "\(smartCleanSkippedDuplicates) foto duplicate saltate",
+                        en: "\(smartCleanSkippedDuplicates) duplicate photos skipped",
+                        fr: "\(smartCleanSkippedDuplicates) photos en double ignorées"
+                    ) : nil,
+                    smartCleanSkippedScreenshots > 0 ? l10n.tr(
+                        "\(smartCleanSkippedScreenshots) screenshot esclusi",
+                        en: "\(smartCleanSkippedScreenshots) old screenshots excluded",
+                        fr: "\(smartCleanSkippedScreenshots) anciennes captures exclues"
+                    ) : nil,
+                    heicConvertedCount > 0 ? "\(heicConvertedCount) HEIC→JPEG" : nil
+                ].compactMap { $0 }
+                Text("Smart Clean: \(parts.joined(separator: " • "))")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(AppleTheme.teal)
+            }
+
+            if !missingIds.isEmpty {
+                ApplePrimaryButton(
+                    title: l10n.tr(
+                        "Ripara \(missingIds.count) file mancanti (1 tocco)",
+                        en: "Repair \(missingIds.count) missing files (1 tap)",
+                        fr: "Réparer \(missingIds.count) fichiers manquants (1 geste)"
+                    ),
+                    icon: "arrow.clockwise",
+                    color: AppleTheme.orange
+                ) {
+                    onRepairMissing(missingIds)
+                }
+            }
+        }
+        .padding(14)
+        .background(accent.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(accent.opacity(0.45), lineWidth: 1.2)
         )
     }
 }

@@ -42,11 +42,13 @@ struct SendConnectStepView: View {
     let isLocalNetworkDenied: Bool
     let needsLocalNetworkRedirect: Bool
     let errorNote: String?
+    var networkDiagnostic: NetworkDiagnosticVerdict? = nil
 
     var onConfirmPin: () -> Void
     var onScannedQrCode: (String) -> Void
     var onApplyManualCode: () -> Void
     var onOpenAppSettings: () -> Void
+    var onRetryNetwork: (() -> Void)? = nil
 
     @State private var showManualField: Bool = false
     @State private var showWifiQrSheet: Bool = false
@@ -236,17 +238,11 @@ struct SendConnectStepView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: l10n.tr("Collegamento tramite codice QR", en: "QR Code pairing", fr: "Liaison par code QR"),
-                            message: targetDestination == .newAndroid
-                                ? l10n.tr(
-                                    "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo Android (funziona anche in Hotspot 5GHz senza rete Wi-Fi di casa).",
-                                    en: "Scan the QR code shown on the new Android's 'Receive' screen (also works via 5GHz Hotspot without home Wi-Fi).",
-                                    fr: "Scannez le code QR affiché sur l'écran « Recevoir » du nouvel Android (fonctionne aussi en point d'accès 5 GHz)."
-                                )
-                                : l10n.tr(
-                                    "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo iPhone.",
-                                    en: "Scan the QR code shown on the new iPhone's 'Receive' screen.",
-                                    fr: "Scannez le code QR affiché sur l'écran « Recevoir » du nouvel iPhone."
-                                )
+                            message: l10n.tr(
+                                "Inquadra il codice QR mostrato nella schermata 'Ricevi' del nuovo dispositivo (iPhone o Android; funziona anche via Hotspot 5GHz senza rete Wi-Fi di casa).",
+                                en: "Scan the QR code shown on the new device's 'Receive' screen (iPhone or Android; also works via 5GHz Hotspot without home Wi-Fi).",
+                                fr: "Scannez le code QR affiché sur l'écran « Recevoir » du nouvel appareil (iPhone ou Android ; fonctionne aussi via point d'accès 5 GHz sans Wi-Fi domestique)."
+                            )
                         )
                         Spacer()
                     }
@@ -346,6 +342,12 @@ struct SendConnectStepView: View {
                         Spacer()
                     }
                     .appleCard(padding: 14)
+                }
+
+                if let diag = networkDiagnostic {
+                    NetworkIsolationHotspotCard(verdict: diag) {
+                        onRetryNetwork?()
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -509,6 +511,8 @@ struct SendCategoriesStepView: View {
     @Binding var mediaFilters: MediaTransferFilterOptions
     var activeDeltaBaseline: CompletedMigrationRecord? = nil
     @Binding var forceBatteryTriage: Bool
+    @Binding var smartCleanOptions: SmartCleanOptions
+    @Binding var convertHeicToJpeg: Bool
 
     var onPreloadContacts: () -> Void
     var onPreloadPhotos: () -> Void
@@ -843,23 +847,32 @@ struct SendCategoriesStepView: View {
                     .appleCard()
                 }
 
-                // Triage Batteria Critica (auto ≤ 15% o attivabile manualmente)
-                HStack(spacing: 12) {
-                    AppleSettingsIcon(systemName: "battery.25", color: AppleTheme.orange)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(l10n.tr("Triage Batteria Critica"))
-                            .font(.system(size: 14.5, weight: .semibold))
-                            .foregroundColor(AppleTheme.textPrimary)
-                        Text(l10n.tr("Salva prima Password, Documenti, Audio e Foto Preferite (auto ≤ 15%)."))
-                            .font(.system(size: 12))
-                            .foregroundColor(AppleTheme.textSecondary)
+                // Triage Batteria Critica: visibile solo se batteria scarica (<= 25%, non in carica), auto-triage consigliato o già attivo
+                let batterySnap = BatteryTriagePlanner.readCurrentBatterySnapshot()
+                if batterySnap.recommendsAutoTriage || (!batterySnap.isCharging && batterySnap.percent <= 25) || forceBatteryTriage {
+                    HStack(spacing: 12) {
+                        AppleSettingsIcon(systemName: "battery.25", color: AppleTheme.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(l10n.tr("Triage Batteria Critica"))
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundColor(AppleTheme.textPrimary)
+                            Text(l10n.tr("Salva prima Password, Documenti, Audio e Foto Preferite (auto ≤ 15%)."))
+                                .font(.system(size: 12))
+                                .foregroundColor(AppleTheme.textSecondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $forceBatteryTriage)
+                            .labelsHidden()
+                            .tint(AppleTheme.orange)
                     }
-                    Spacer()
-                    Toggle("", isOn: $forceBatteryTriage)
-                        .labelsHidden()
-                        .tint(AppleTheme.orange)
+                    .appleCard()
                 }
-                .appleCard()
+
+                SmartCleanAndCompatCard(
+                    smartClean: $smartCleanOptions,
+                    convertHeicToJpeg: $convertHeicToJpeg,
+                    showHeicOption: includePhotos
+                )
 
                 ApplePrimaryButton(
                     title: isOnlyWhatsAppSelected

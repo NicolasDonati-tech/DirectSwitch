@@ -1192,10 +1192,10 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertTrue(loaded.isEmpty)
         XCTAssertNil(UserDefaults.standard.object(forKey: "directswitch_verified_sender_apps_v2"))
 
-        // Verifica i 48 schemi noti (+ whatsapp + com.cloudsave.ios = max 50 su iOS)
+        // Verifica i 48 schemi noti (+ whatsapp = max 50 su iOS)
         XCTAssertTrue(iOSInstalledAppsScanner.knownProbes.contains { $0.bundleId == "com.getdropbox.Dropbox" && $0.urlScheme == "dbapi-2" })
         XCTAssertTrue(iOSInstalledAppsScanner.knownProbes.contains { $0.bundleId == "com.tinyspeck.chatlyio" && $0.urlScheme == "slack" })
-        XCTAssertLessThanOrEqual(Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"]).count, 50)
+        XCTAssertLessThanOrEqual(Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp"]).count, 50)
     }
 
     func testOptimizedProbesPhotoMetadataDetectorAndCuratedCategories() async throws {
@@ -1232,7 +1232,7 @@ final class DirectSwitchTests: XCTestCase {
         }
         XCTAssertEqual(iOSInstalledAppsScanner.knownProbes.count, 48)
         XCTAssertLessThanOrEqual(
-            Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp", "com.cloudsave.ios"]).count,
+            Set(iOSInstalledAppsScanner.knownProbes.map(\.urlScheme) + ["whatsapp"]).count,
             50
         )
 
@@ -1735,30 +1735,7 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(DirectSwitchLocalizationStore.translateEta("Circa 4 min rimanenti", languageCode: "en"), "About 4 min left")
         XCTAssertEqual(DirectSwitchLocalizationStore.translateEta("Circa 4 min rimanenti", languageCode: "fr"), "Environ 4 min restantes")
 
-        let checklistEn = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp: true, hasApps: true, hasSkipped: true, languageCode: "en")
-        XCTAssertEqual(checklistEn.count, 6)
-        XCTAssertTrue(checklistEn.first?.title.contains("Contacts, Photos") == true)
 
-        let checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp: true, hasApps: true, hasSkipped: true, languageCode: "it")
-        XCTAssertEqual(checklist.count, 6)
-        let receipt = MigrationReceiptBuilder.buildReceiptText(
-            peerName: "Galaxy S25",
-            isReceiver: false,
-            connectionMedium: .peerToPeerWifi,
-            completedFiles: 88,
-            totalBytes: 2_400_000_000,
-            mergedContacts: 210,
-            importedCalendars: 30,
-            importedReminders: 12,
-            importedSms: 50,
-            importedCallLogs: 40,
-            appsCount: 35,
-            skippedCount: 0,
-            languageCode: "it"
-        )
-        XCTAssertTrue(receipt.contains("Wi-Fi Diretto P2P (AWDL)"))
-        XCTAssertTrue(receipt.contains("Chiamate salvate: 40"))
-        XCTAssertTrue(receipt.contains("AES-256-GCM"))
     }
 
     func testLoopbackEndToEndEncryptedCryptoAudioAndCallLogsProtocolRoundTrip() throws {
@@ -1908,25 +1885,7 @@ final class DirectSwitchTests: XCTestCase {
         ]
         XCTAssertEqual(CompletedMigrationStore.filterDeltaEntries(deltaCandidates, record: loaded!) { $0 }.map(\.id), ["new"])
 
-        // 4. Decommission Audit Cross-OS
-        let senderApps = [
-            InstalledAppRecord(packageName: "it.poste.postebuy2", appName: "PosteID"),
-            InstalledAppRecord(packageName: "com.google.Authenticator", appName: "Google Authenticator")
-        ]
-        let redAudit = DecommissionReadinessEvaluator.evaluate(
-            sessionId: "ds_audit",
-            peerName: "Pixel 9",
-            peerPlatform: .ANDROID,
-            senderInstalledApps: senderApps,
-            receiverInstalledAppIds: ["posteitaliane.posteapp.appposteid"],
-            localOnlyContactsCount: 2,
-            contactsWereMigrated: true
-        )
-        XCTAssertEqual(redAudit.readinessLevel, .blockedRed)
-        XCTAssertEqual(redAudit.verifiedCriticalApps.count, 1)
-        XCTAssertEqual(redAudit.missingCriticalApps.count, 1)
-
-        // 5. Overflow Bridge
+        // 4. Space Relief locale (nessun CloudSave o Audit negozio)
         let oldMs = nowMs - 500 * 86_400_000
         let recentMs = nowMs - 20 * 86_400_000
         let splitItems: [ManifestItem] = [
@@ -1934,10 +1893,12 @@ final class DirectSwitchTests: XCTestCase {
             ManifestItem(id: "o1", category: .VIDEOS, fileName: "o1.mov", relativeAlbumOrFolder: "", sizeBytes: 900_000_000, capturedEpochMillis: oldMs, dedupKey: "o1", mimeType: "video/quicktime")
         ]
         let offer = SpaceReliefPlanner.evaluate(receiverName: "Pixel 9", availableFreeBytes: 700_000_000, items: splitItems, nowEpochMillis: nowMs)
-        XCTAssertTrue(offer?.options.contains(where: { $0.kind == .overflowOlderToCloudSave && $0.fitsAvailableSpace }) == true)
-        let split = OverflowBridgePlanner.buildSplitPlan(availableFreeBytes: 700_000_000, items: splitItems, nowEpochMillis: nowMs)
-        XCTAssertEqual(split.directItems.map(\.id), ["r1"])
-        XCTAssertEqual(split.overflowItems.map(\.id), ["o1"])
+        let kinds = offer?.options.map(\.kind) ?? []
+        XCTAssertTrue(kinds.contains(.compactVideosHevc1080p))
+        XCTAssertTrue(kinds.contains(.excludeHeavyVideos300Mb))
+        XCTAssertTrue(kinds.contains(.lastYearMediaOnly))
+        XCTAssertTrue(offer?.options.first(where: { $0.kind == .lastYearMediaOnly })?.fitsAvailableSpace == true)
+        XCTAssertFalse(offer?.options.contains(where: { $0.title.localizedCaseInsensitiveContains("CloudSave") }) ?? true)
     }
 
     func testLivePhotoSenderReceiverProgressParityAndManifestRoundTrip() throws {
@@ -2020,5 +1981,125 @@ final class DirectSwitchTests: XCTestCase {
         XCTAssertEqual(sender.totalBytesForProgress, 13_800_000)
         XCTAssertEqual(sender.transferredBytes, 13_800_000)
         XCTAssertEqual(sender.progressFraction, 1.0, accuracy: 0.0001)
+    }
+
+    func testPracticalProFeatures1To5() throws {
+        // 1. Guardia Termica
+        XCTAssertEqual(iOSThermalGuardMonitor.evaluate(state: .nominal), .normal)
+        XCTAssertEqual(iOSThermalGuardMonitor.evaluate(state: .fair), .normal)
+        XCTAssertEqual(iOSThermalGuardMonitor.evaluate(state: .serious), .warmThrottle)
+        XCTAssertEqual(iOSThermalGuardMonitor.evaluate(state: .critical), .criticalCooldown)
+
+        // 2. Smart Clean Contatti E.164 + Dedup Foto SHA-256 + Filtro Screenshot datati
+        let c1 = ContactTransferRecord(id: "1", displayName: "Mario", phones: ["333 123 4567"], emails: ["m@ex.com"])
+        let c2 = ContactTransferRecord(id: "2", displayName: "Mario Rossi", phones: ["+393331234567", "+39025550199"], organization: "Acme", birthdayYear: 1990)
+        let c3 = ContactTransferRecord(id: "3", displayName: "Luca", phones: ["+393409998877"])
+        let (mergedContacts, dupContactsCount) = SmartCleanPreTransferEngine.mergeDuplicateContacts([c1, c2, c3])
+        XCTAssertEqual(dupContactsCount, 1)
+        XCTAssertEqual(mergedContacts.count, 2)
+        let mario = mergedContacts.first(where: { $0.displayName == "Mario Rossi" })
+        XCTAssertEqual(mario?.phones.count, 2)
+        XCTAssertEqual(mario?.organization, "Acme")
+
+        let nowMs: Int64 = 1_800_000_000_000
+        let twoYearsAgoMs = nowMs - (2 * 365 * 86_400_000)
+        let items = [
+            ManifestItem(id: "p1", category: .PHOTOS, fileName: "IMG_001.jpg", relativeAlbumOrFolder: "Camera", sizeBytes: 1_000_000, capturedEpochMillis: nowMs - 10_000, dedupKey: "k1"),
+            ManifestItem(id: "p2", category: .PHOTOS, fileName: "IMG_001_dup.jpg", relativeAlbumOrFolder: "Downloads", sizeBytes: 1_000_000, capturedEpochMillis: nowMs - 5_000, dedupKey: "k2"),
+            ManifestItem(id: "s1", category: .PHOTOS, fileName: "Screenshot_2024.png", relativeAlbumOrFolder: "Screenshots", sizeBytes: 500_000, capturedEpochMillis: twoYearsAgoMs, dedupKey: "k3")
+        ]
+        let hashes = ["p1": "aaa111", "p2": "aaa111", "s1": "bbb222"]
+        let filtered = SmartCleanPreTransferEngine.filterMediaSmartClean(
+            entries: items,
+            options: SmartCleanOptions(mergeDuplicateContacts: true, skipExactDuplicatePhotosSha256: true, skipOldScreenshotsOlderThanMonths: 12),
+            nowMillis: nowMs,
+            itemOf: { $0 },
+            sha256Of: { hashes[$0.id] }
+        )
+        XCTAssertEqual(filtered.kept.map(\.id), ["p1"])
+        XCTAssertEqual(filtered.skippedDuplicatesCount, 1)
+        XCTAssertEqual(filtered.skippedOldScreenshotsCount, 1)
+
+        // 3. Diff Riconciliazione SHA-256
+        let rec = ReconciliationDiffCore.evaluate(
+            sentItemIds: ["ok1", "missing1", "bad1"],
+            expectedSha256ById: ["ok1": "h1", "missing1": "h2", "bad1": "h3"],
+            committedHashesById: ["ok1": "h1", "bad1": "h3_corrupt"]
+        )
+        XCTAssertEqual(rec.committedIds, ["ok1"])
+        XCTAssertEqual(rec.missingIds, ["missing1"])
+        XCTAssertEqual(rec.hashMismatchIds, ["bad1"])
+        XCTAssertEqual(rec.totalVerified, 1)
+
+        // 4. Rilevamento AP Client Isolation + Subnet mismatch
+        let apVerdict = NetworkIsolationDiagnostics.analyzePairingFailure(
+            localIp: "192.168.1.40",
+            targetIps: ["192.168.1.99"],
+            isWifiConnected: true,
+            errorMessage: "Connection timeout"
+        )
+        XCTAssertTrue(apVerdict.likelyApClientIsolation)
+        XCTAssertFalse(apVerdict.subnetMismatch)
+
+        let subVerdict = NetworkIsolationDiagnostics.analyzePairingFailure(
+            localIp: "192.168.1.40",
+            targetIps: ["10.0.0.15"],
+            isWifiConnected: true,
+            errorMessage: "Timeout"
+        )
+        XCTAssertFalse(subVerdict.likelyApClientIsolation)
+        XCTAssertTrue(subVerdict.subnetMismatch)
+
+        // 5. Compatibilità HEIC detector
+        XCTAssertTrue(iOSHeicCompatibilityConverter.isHeicPhoto(fileName: "IMG_999.HEIC", mimeType: "image/jpeg"))
+        XCTAssertTrue(iOSHeicCompatibilityConverter.isHeicPhoto(fileName: "photo", mimeType: "image/heif"))
+        XCTAssertFalse(iOSHeicCompatibilityConverter.isHeicPhoto(fileName: "IMG_999.jpg", mimeType: "image/jpeg"))
+
+        // 6. Smart Clean pre-filtro sizeBytes (nessun hash su dimensioni univoche) + traduzioni EN/FR
+        let perfItems = [
+            ManifestItem(id: "u1", category: .PHOTOS, fileName: "U1.jpg", relativeAlbumOrFolder: "Camera", sizeBytes: 1_111_111, capturedEpochMillis: nowMs, dedupKey: "du1"),
+            ManifestItem(id: "u2", category: .PHOTOS, fileName: "U2.jpg", relativeAlbumOrFolder: "Camera", sizeBytes: 2_222_222, capturedEpochMillis: nowMs, dedupKey: "du2"),
+            ManifestItem(id: "c1", category: .PHOTOS, fileName: "C1.jpg", relativeAlbumOrFolder: "Camera", sizeBytes: 3_333_333, capturedEpochMillis: nowMs, dedupKey: "dc1"),
+            ManifestItem(id: "c2", category: .PHOTOS, fileName: "C2.jpg", relativeAlbumOrFolder: "Camera", sizeBytes: 3_333_333, capturedEpochMillis: nowMs, dedupKey: "dc2")
+        ]
+        var hashedIds: [String] = []
+        let perfRes = SmartCleanPreTransferEngine.filterMediaSmartClean(
+            entries: perfItems,
+            options: SmartCleanOptions(mergeDuplicateContacts: false, skipExactDuplicatePhotosSha256: true, skipOldScreenshotsOlderThanMonths: 0),
+            nowMillis: nowMs,
+            itemOf: { $0 },
+            sha256Of: { item in
+                hashedIds.append(item.id)
+                return item.id.hasPrefix("c") ? "same_hash" : "uniq_\(item.id)"
+            }
+        )
+        XCTAssertEqual(hashedIds, ["c1", "c2"])
+        XCTAssertEqual(perfRes.kept.map(\.id), ["u1", "u2", "c1"])
+        XCTAssertEqual(perfRes.skippedDuplicatesCount, 1)
+
+        XCTAssertEqual(
+            DirectSwitchLocalizationStore.translatePhrase("Smart Clean & Compatibilità Pro", languageCode: "en"),
+            "Smart Clean & Pro Compatibility"
+        )
+        XCTAssertEqual(
+            DirectSwitchLocalizationStore.translatePhrase("Verifica SHA-256 Post-Migrazione: 100% Integro", languageCode: "fr"),
+            "Vérification SHA-256 Post-Migration : 100 % Intègre"
+        )
+        let enDiag = NetworkIsolationDiagnostics.analyzePairingFailure(
+            localIp: "192.168.1.40",
+            targetIps: ["192.168.1.99"],
+            isWifiConnected: true,
+            errorMessage: "Connection timeout",
+            languageCode: "en"
+        )
+        XCTAssertTrue(enDiag.title.contains("AP Client Isolation"))
+        let frDiag = NetworkIsolationDiagnostics.analyzePairingFailure(
+            localIp: "192.168.1.40",
+            targetIps: ["10.0.0.15"],
+            isWifiConnected: true,
+            errorMessage: "Timeout",
+            languageCode: "fr"
+        )
+        XCTAssertTrue(frDiag.title.contains("réseaux Wi-Fi différents"))
     }
 }

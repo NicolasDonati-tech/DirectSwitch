@@ -8,11 +8,9 @@
 
 package com.directswitch.android.migrators
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -24,21 +22,14 @@ import android.media.MediaMuxer
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
-import android.provider.ContactsContract
-import android.provider.Settings
-import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.protocol.CrossOsCodecCompatibilityHelper
-import com.directswitch.android.protocol.DirectSwitchJson
 import com.directswitch.android.protocol.DirectSwitchMotionPhotoCodec
-import com.directswitch.android.protocol.DirectSwitchOverflowHandoffManifest
-import com.directswitch.android.protocol.DirectSwitchOverflowItemRecord
 import com.directswitch.android.protocol.MediaTimelineHealer
-import com.directswitch.android.protocol.OverflowSplitPlan
-import kotlinx.serialization.encodeToString
+import com.directswitch.android.protocol.SharedBitmapDecodeGate
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.Locale
@@ -190,11 +181,13 @@ object AndroidAudioCodecHealer {
                 setInteger(MediaFormat.KEY_BIT_RATE, if (channelCount > 1) 128_000 else 96_000)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16 * 1024)
             }
-            encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-            encoder.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            encoder.start()
+            val aacEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            encoder = aacEncoder
+            aacEncoder.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            aacEncoder.start()
 
-            muxer = MediaMuxer(destM4a.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val mp4Muxer = MediaMuxer(destM4a.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = mp4Muxer
             var muxTrackIdx = -1
 
             val decInfo = MediaCodec.BufferInfo()
@@ -203,6 +196,39 @@ object AndroidAudioCodecHealer {
             var decoderDone = false
             var encoderDone = false
             val deadlineMs = System.currentTimeMillis() + 30_000L
+
+            fun drainEncoderOutput(initialTimeoutUs: Long) {
+                var timeoutUs = initialTimeoutUs
+                while (!encoderDone && System.currentTimeMillis() < deadlineMs) {
+                    val encOutIdx = aacEncoder.dequeueOutputBuffer(encInfo, timeoutUs)
+                    timeoutUs = 0L
+                    when {
+                        encOutIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                        encOutIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            if (!muxerStarted) {
+                                muxTrackIdx = mp4Muxer.addTrack(aacEncoder.outputFormat)
+                                mp4Muxer.start()
+                                muxerStarted = true
+                            }
+                        }
+                        encOutIdx >= 0 -> {
+                            val encoded = aacEncoder.getOutputBuffer(encOutIdx)
+                            if (encoded != null && encInfo.size > 0 && muxerStarted &&
+                                (encInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                            ) {
+                                encoded.position(encInfo.offset)
+                                encoded.limit(encInfo.offset + encInfo.size)
+                                mp4Muxer.writeSampleData(muxTrackIdx, encoded, encInfo)
+                            }
+                            aacEncoder.releaseOutputBuffer(encOutIdx, false)
+                            if ((encInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                encoderDone = true
+                                break
+                            }
+                        }
+                    }
+                }
+            }
 
             while (!encoderDone && System.currentTimeMillis() < deadlineMs) {
                 if (!extractorDone) {
@@ -233,53 +259,44 @@ object AndroidAudioCodecHealer {
                             val pcmCopy = ByteArray(decInfo.size)
                             pcmBuf.get(pcmCopy)
                             var offset = 0
-                            while (offset < pcmCopy.size) {
-                                val encInIdx = encoder.dequeueInputBuffer(TIMEOUT_US)
+                            while (offset < pcmCopy.size && !encoderDone && System.currentTimeMillis() < deadlineMs) {
+                                val encInIdx = aacEncoder.dequeueInputBuffer(TIMEOUT_US)
                                 if (encInIdx >= 0) {
-                                    val encBuf = encoder.getInputBuffer(encInIdx) ?: break
+                                    val encBuf = aacEncoder.getInputBuffer(encInIdx) ?: break
                                     encBuf.clear()
                                     val toWrite = minOf(encBuf.remaining(), pcmCopy.size - offset)
                                     encBuf.put(pcmCopy, offset, toWrite)
-                                    encoder.queueInputBuffer(encInIdx, 0, toWrite, decInfo.presentationTimeUs, 0)
+                                    aacEncoder.queueInputBuffer(encInIdx, 0, toWrite, decInfo.presentationTimeUs, 0)
                                     offset += toWrite
                                 }
+                                // Drena sempre l'output dell'encoder per evitare deadlock quando il buffer AAC si riempie
+                                drainEncoderOutput(0L)
                             }
                         }
                         decoder.releaseOutputBuffer(decOutIdx, false)
                         if (isEos) {
                             decoderDone = true
-                            val encInIdx = encoder.dequeueInputBuffer(TIMEOUT_US * 5)
-                            if (encInIdx >= 0) {
-                                encoder.queueInputBuffer(encInIdx, 0, 0, decInfo.presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            var eosQueued = false
+                            while (!eosQueued && !encoderDone && System.currentTimeMillis() < deadlineMs) {
+                                val encInIdx = aacEncoder.dequeueInputBuffer(TIMEOUT_US)
+                                if (encInIdx >= 0) {
+                                    aacEncoder.queueInputBuffer(
+                                        encInIdx,
+                                        0,
+                                        0,
+                                        decInfo.presentationTimeUs,
+                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                    )
+                                    eosQueued = true
+                                } else {
+                                    drainEncoderOutput(TIMEOUT_US)
+                                }
                             }
                         }
                     }
                 }
 
-                val encOutIdx = encoder.dequeueOutputBuffer(encInfo, TIMEOUT_US)
-                when {
-                    encOutIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        if (!muxerStarted) {
-                            muxTrackIdx = muxer.addTrack(encoder.outputFormat)
-                            muxer.start()
-                            muxerStarted = true
-                        }
-                    }
-                    encOutIdx >= 0 -> {
-                        val encoded = encoder.getOutputBuffer(encOutIdx)
-                        if (encoded != null && encInfo.size > 0 && muxerStarted &&
-                            (encInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
-                        ) {
-                            encoded.position(encInfo.offset)
-                            encoded.limit(encInfo.offset + encInfo.size)
-                            muxer.writeSampleData(muxTrackIdx, encoded, encInfo)
-                        }
-                        encoder.releaseOutputBuffer(encOutIdx, false)
-                        if ((encInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                            encoderDone = true
-                        }
-                    }
-                }
+                drainEncoderOutput(TIMEOUT_US)
             }
             return muxerStarted && encoderDone
         } finally {
@@ -295,7 +312,8 @@ object AndroidAudioCodecHealer {
  * Ponte Android per Live Photo (iOS) <-> Motion Photo (Android) su DirectSwitch:
  * - Ricevendo still + clip `.mov` da iOS: converte lo still in JPEG se HEIC, rimuxa `.mov` -> `.mp4`
  *   e assembla una Motion Photo JPEG nativa Google Foto / Samsung Galleria.
- * - Inviando una Motion Photo Android verso iOS: separa still + MP4 così iOS li ricompone in Apple Live Photo nativa.
+ * - Inviando una Motion Photo Android verso iOS: esegue prima un probe a zero scritture su disco
+ *   (header 256 KB + coda 64 KB via FileChannel) e copia in cache solo le vere Motion Photo.
  */
 object AndroidLiveMotionBridge {
     data class ExtractedAndroidMotionPhoto(
@@ -303,6 +321,67 @@ object AndroidLiveMotionBridge {
         val videoMp4File: File,
         val stillExtension: String
     )
+
+    private fun isLikelyMotionPhotoUri(context: Context, sourceUri: Uri, reportedSizeBytes: Long): Boolean {
+        val pfdResult = runCatching {
+            context.contentResolver.openFileDescriptor(sourceUri, "r")?.use { pfd ->
+                FileInputStream(pfd.fileDescriptor).use { fis ->
+                    val channel = fis.channel
+                    val fileSize = runCatching { channel.size() }.getOrDefault(reportedSizeBytes)
+                    if (fileSize < 4096L || fileSize > 120L * 1024L * 1024L) return@use false
+
+                    val headLen = minOf(fileSize, 256L * 1024L).toInt()
+                    val headBuf = ByteBuffer.allocate(headLen)
+                    var headRead = 0
+                    while (headRead < headLen) {
+                        val n = channel.read(headBuf)
+                        if (n <= 0) break
+                        headRead += n
+                    }
+                    val headBytes = headBuf.array()
+                    if (DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoHeaderBytes(headBytes, headRead)) {
+                        return@use true
+                    }
+
+                    // Samsung Motion Photo salva il trailer SEFT/MotionPhoto_Data negli ultimi 64 KB del JPEG
+                    val isJpeg = headRead >= 2 && headBytes[0] == 0xFF.toByte() && headBytes[1] == 0xD8.toByte()
+                    if (isJpeg && fileSize > headLen.toLong()) {
+                        val tailLen = minOf(fileSize, 64L * 1024L).toInt()
+                        val tailStart = (fileSize - tailLen.toLong()).coerceAtLeast(0L)
+                        val tailBuf = ByteBuffer.allocate(tailLen)
+                        var tailRead = 0
+                        var pos = tailStart
+                        while (tailRead < tailLen) {
+                            val n = channel.read(tailBuf, pos)
+                            if (n <= 0) break
+                            tailRead += n
+                            pos += n.toLong()
+                        }
+                        if (DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoTailBytes(tailBuf.array(), tailRead)) {
+                            return@use true
+                        }
+                    }
+                    false
+                }
+            }
+        }.getOrNull()
+
+        if (pfdResult != null) return pfdResult
+
+        // Fallback streaming senza FileDescriptor seekable: legge solo i primi 256 KB
+        return runCatching {
+            context.contentResolver.openInputStream(sourceUri)?.use { inp ->
+                val head = ByteArray(256 * 1024)
+                var total = 0
+                while (total < head.size) {
+                    val n = inp.read(head, total, head.size - total)
+                    if (n <= 0) break
+                    total += n
+                }
+                DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoHeaderBytes(head, total)
+            } ?: false
+        }.getOrDefault(false)
+    }
 
     fun tryExtractAndroidMotionPhoto(
         context: Context,
@@ -313,6 +392,9 @@ object AndroidLiveMotionBridge {
         val ext = File(fileName).extension.lowercase(Locale.ROOT)
         if (ext !in setOf("jpg", "jpeg", "heic", "heif")) return null
         if (sizeBytes < 4096L || sizeBytes > 120L * 1024L * 1024L) return null
+
+        // Probe leggero a ZERO scritture su flash: evita di copiare ogni foto statica in cacheDir!
+        if (!isLikelyMotionPhotoUri(context, sourceUri, sizeBytes)) return null
 
         val tempSrc = File(context.cacheDir, "mp_probe_${System.nanoTime()}.$ext")
         val outStill = File(context.cacheDir, "mp_still_${System.nanoTime()}.$ext")
@@ -388,16 +470,27 @@ object AndroidLiveMotionBridge {
     }.getOrDefault(false)
 
     private fun convertImageToJpegWithExif(src: File, dstJpeg: File): Boolean {
-        val bmp: Bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching { ImageDecoder.decodeBitmap(ImageDecoder.createSource(src)) }.getOrNull()
-        } else {
-            null
-        } ?: BitmapFactory.decodeFile(src.absolutePath) ?: return false
+        val compressedOk = synchronized(SharedBitmapDecodeGate.lock) {
+            val bmp: Bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                runCatching {
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(src)) { decoder, _, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    }
+                }.getOrNull()
+            } else {
+                null
+            } ?: BitmapFactory.decodeFile(src.absolutePath) ?: return false
 
-        FileOutputStream(dstJpeg).use { fos ->
-            if (!bmp.compress(Bitmap.CompressFormat.JPEG, 94, fos)) return false
+            try {
+                FileOutputStream(dstJpeg).use { fos ->
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 94, fos)
+                }
+            } finally {
+                bmp.recycle()
+            }
         }
-        bmp.recycle()
+        if (!compressedOk) return false
+
         runCatching {
             val srcExif = ExifInterface(src.absolutePath)
             val dstExif = ExifInterface(dstJpeg.absolutePath)
@@ -413,6 +506,9 @@ object AndroidLiveMotionBridge {
                 ExifInterface.TAG_GPS_LONGITUDE_REF
             ).forEach { tag ->
                 srcExif.getAttribute(tag)?.let { dstExif.setAttribute(tag, it) }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                dstExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
             }
             dstExif.saveAttributes()
         }
@@ -478,172 +574,5 @@ object AndroidLiveMotionBridge {
             runCatching { if (started) muxer?.stop() }
             runCatching { muxer?.release() }
         }
-    }
-}
-
-object AndroidDecommissionScanner {
-    fun countLocalOrSimOnlyContacts(context: Context): Int {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            return 0
-        }
-        var count = 0
-        val projection = arrayOf(
-            ContactsContract.RawContacts._ID,
-            ContactsContract.RawContacts.ACCOUNT_TYPE,
-            ContactsContract.RawContacts.DELETED
-        )
-        runCatching {
-            context.contentResolver.query(
-                ContactsContract.RawContacts.CONTENT_URI,
-                projection,
-                "${ContactsContract.RawContacts.DELETED} = 0",
-                null,
-                null
-            )?.use { cursor ->
-                val typeIdx = cursor.getColumnIndex(ContactsContract.RawContacts.ACCOUNT_TYPE)
-                while (cursor.moveToNext()) {
-                    val accType = if (typeIdx >= 0) cursor.getString(typeIdx)?.trim().orEmpty().lowercase(Locale.ROOT) else ""
-                    val isLocalOrSim = accType.isEmpty() ||
-                        accType.contains("sim") ||
-                        accType.contains("phone") ||
-                        accType.contains("local") ||
-                        accType.contains("device") ||
-                        accType.contains("tablet")
-                    if (isLocalOrSim) count++
-                }
-            }
-        }
-        return count
-    }
-
-    fun openDeviceResetSettings(context: Context) {
-        val candidates = listOf(
-            Intent("android.settings.PRIVACY_SETTINGS"),
-            Intent(Settings.ACTION_SETTINGS)
-        )
-        for (intent in candidates) {
-            val ok = runCatching {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                true
-            }.getOrDefault(false)
-            if (ok) return
-        }
-    }
-}
-
-object AndroidCloudSaveOverflowBridge {
-    private const val CLOUDSAVE_PACKAGE = "com.cloudsave.android"
-
-    fun isCloudSaveInstalled(context: Context): Boolean {
-        return runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.packageManager.getPackageInfo(CLOUDSAVE_PACKAGE, PackageManager.PackageInfoFlags.of(0))
-            } else {
-                @Suppress("DEPRECATION")
-                context.packageManager.getPackageInfo(CLOUDSAVE_PACKAGE, 0)
-            }
-            true
-        }.getOrDefault(false)
-    }
-
-    data class LaunchOutcome(
-        val launchedCloudSave: Boolean,
-        val manifestFile: File,
-        val overflowCount: Int,
-        val overflowBytes: Long,
-        val message: String
-    )
-
-    fun stageAndLaunchOverflowToCloudSave(
-        context: Context,
-        targetDeviceName: String,
-        allEntries: List<LocalMediaEntry>,
-        plan: OverflowSplitPlan
-    ): LaunchOutcome {
-        val overflowIds = plan.overflowItems.map { it.id }.toHashSet()
-        val overflowEntries = allEntries.filter { it.manifestItem.id in overflowIds }
-        val records = overflowEntries.map { e ->
-            DirectSwitchOverflowItemRecord(
-                id = e.manifestItem.id,
-                category = e.manifestItem.category,
-                fileName = e.manifestItem.fileName,
-                album = e.manifestItem.relativeAlbumOrFolder,
-                sizeBytes = e.manifestItem.sizeBytes,
-                capturedEpochMillis = e.manifestItem.capturedEpochMillis,
-                contentUri = e.contentUri.toString()
-            )
-        }
-        val manifest = DirectSwitchOverflowHandoffManifest(
-            version = 1,
-            createdAtEpochMillis = System.currentTimeMillis(),
-            sourceDeviceName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
-            targetDeviceName = targetDeviceName,
-            cutoffEpochMillis = plan.cutoffEpochMillis,
-            maxVideoBytes = plan.maxVideoBytes,
-            totalOverflowCount = records.size,
-            totalOverflowBytes = plan.overflowTotalBytes,
-            items = records
-        )
-
-        val dir = File(context.cacheDir, "overflow_bridge").apply { mkdirs() }
-        val manifestFile = File(dir, "directswitch_overflow_handoff.json")
-        manifestFile.writeText(DirectSwitchJson.instance.encodeToString(manifest), Charsets.UTF_8)
-
-        if (!isCloudSaveInstalled(context)) {
-            return LaunchOutcome(
-                launchedCloudSave = false,
-                manifestFile = manifestFile,
-                overflowCount = records.size,
-                overflowBytes = plan.overflowTotalBytes,
-                message = "Installa CloudSave per parcheggiare cifrati i ${records.size} file eccedenti."
-            )
-        }
-
-        val contentUri = runCatching {
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", manifestFile)
-        }.getOrNull()
-
-        if (contentUri != null) {
-            runCatching {
-                context.grantUriPermission(CLOUDSAVE_PACKAGE, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-        }
-
-        val deepLink = Uri.Builder()
-            .scheme("com.cloudsave.android")
-            .authority("overflow-bridge")
-            .appendQueryParameter("count", records.size.toString())
-            .appendQueryParameter("bytes", plan.overflowTotalBytes.toString())
-            .appendQueryParameter("cutoffMs", plan.cutoffEpochMillis.toString())
-            .appendQueryParameter("maxVideoBytes", plan.maxVideoBytes.toString())
-            .appendQueryParameter("receiver", targetDeviceName)
-            .apply {
-                if (contentUri != null) {
-                    appendQueryParameter("manifestUri", contentUri.toString())
-                }
-            }
-            .build()
-
-        val launched = runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, deepLink).apply {
-                setPackage(CLOUDSAVE_PACKAGE)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(intent)
-            true
-        }.getOrDefault(false)
-
-        return LaunchOutcome(
-            launchedCloudSave = launched,
-            manifestFile = manifestFile,
-            overflowCount = records.size,
-            overflowBytes = plan.overflowTotalBytes,
-            message = if (launched) {
-                "CloudSave aperto con ${records.size} file pronti per l'archiviazione cifrata!"
-            } else {
-                "Manifest Overflow pronto (${records.size} file): apri CloudSave per completarne il salvataggio."
-            }
-        )
     }
 }

@@ -208,21 +208,23 @@ data class HandshakeResponse(
     val hasEnoughSpace: Boolean,
     val statusMessage: String,
     val supportsCrossOsLiveMotion: Boolean = false,
-    val receiverInstalledAppIds: List<String>? = null
+    val receiverInstalledAppIds: List<String>? = null,
+    val supportsReconcile: Boolean = false
 )
 
 @Serializable
-data class DecommissionAuditRequest(
-    val sessionId: String
+data class ReconcileManifestRequest(
+    val sessionId: String,
+    val sentItemIds: List<String>,
+    val expectedSha256ById: Map<String, String> = emptyMap()
 )
 
 @Serializable
-data class DecommissionAuditResponse(
-    val receiverName: String,
-    val receiverPlatform: DevicePlatform,
-    val installedAppIds: List<String> = emptyList(),
-    val installedAppNames: List<String> = emptyList(),
-    val freeStorageBytes: Long = 0L
+data class ReconcileManifestResponse(
+    val committedIds: List<String> = emptyList(),
+    val missingIds: List<String> = emptyList(),
+    val hashMismatchIds: List<String> = emptyList(),
+    val totalVerified: Int = 0
 )
 
 @Serializable

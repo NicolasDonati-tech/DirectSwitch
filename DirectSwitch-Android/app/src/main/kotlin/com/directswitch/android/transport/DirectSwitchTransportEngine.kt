@@ -24,8 +24,6 @@ import android.os.Looper
 import com.directswitch.android.DirectSwitchLog
 import com.directswitch.android.migrators.AndroidAudioCodecHealer
 import com.directswitch.android.migrators.AndroidBatteryTriageMonitor
-import com.directswitch.android.migrators.AndroidCloudSaveOverflowBridge
-import com.directswitch.android.migrators.AndroidDecommissionScanner
 import com.directswitch.android.migrators.AndroidLiveMotionBridge
 import com.directswitch.android.migrators.AndroidMediaFilterHelper
 import com.directswitch.android.migrators.AndroidRemindersMigrator
@@ -33,7 +31,6 @@ import com.directswitch.android.migrators.AndroidTimelineExifInjector
 import com.directswitch.android.migrators.AudioAndMemoMigrator
 import com.directswitch.android.migrators.CalendarMigrator
 import com.directswitch.android.migrators.CallLogMigrator
-import com.directswitch.android.migrators.CloudSaveEntitlementDetector
 import com.directswitch.android.migrators.ContactsSmartMerger
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
 import com.directswitch.android.migrators.InstalledAppsScanner
@@ -44,15 +41,12 @@ import com.directswitch.android.migrators.SmsSystemScanner
 import com.directswitch.android.migrators.StorageCapacityChecker
 import com.directswitch.android.migrators.WhatsAppVaultReader
 import com.directswitch.android.protocol.ActiveTransferScope
+import com.directswitch.android.protocol.AndroidHeicCompatibilityConverter
+import com.directswitch.android.protocol.AndroidThermalMonitor
 import com.directswitch.android.protocol.BatteryTriagePlanner
 import com.directswitch.android.protocol.CompletedMigrationRecord
 import com.directswitch.android.protocol.CompletedMigrationStore
-import com.directswitch.android.protocol.ContactTransferRecord
 import com.directswitch.android.protocol.CrossOsCodecCompatibilityHelper
-import com.directswitch.android.protocol.DecommissionAuditReport
-import com.directswitch.android.protocol.DecommissionAuditRequest
-import com.directswitch.android.protocol.DecommissionAuditResponse
-import com.directswitch.android.protocol.DecommissionReadinessEvaluator
 import com.directswitch.android.protocol.DevicePlatform
 import com.directswitch.android.protocol.DirectSwitchCrypto
 import com.directswitch.android.protocol.DirectSwitchJson
@@ -66,18 +60,26 @@ import com.directswitch.android.protocol.ManifestResponse
 import com.directswitch.android.protocol.MediaFallbackNaming
 import com.directswitch.android.protocol.MediaTimelineHealer
 import com.directswitch.android.protocol.MediaTransferFilterOptions
-import com.directswitch.android.protocol.OverflowBridgePlanner
-import com.directswitch.android.protocol.OverflowSplitPlan
+import com.directswitch.android.protocol.NetworkDiagnosticVerdict
+import com.directswitch.android.protocol.NetworkIsolationDiagnostics
 import com.directswitch.android.protocol.PairAckRequest
 import com.directswitch.android.protocol.PinPairingRequest
 import com.directswitch.android.protocol.QrPairingPayload
+import com.directswitch.android.protocol.ReconcileManifestRequest
+import com.directswitch.android.protocol.ReconcileManifestResponse
+import com.directswitch.android.protocol.ReconciliationDiffCore
 import com.directswitch.android.protocol.SecureTempFileShredder
 import com.directswitch.android.protocol.SessionLicenseTier
 import com.directswitch.android.protocol.SkippedTransferItemRecord
 import com.directswitch.android.protocol.SlidingTransferSpeedMeter
+import com.directswitch.android.protocol.SmartCleanMediaResult
+import com.directswitch.android.protocol.SmartCleanOptions
+import com.directswitch.android.protocol.SmartCleanPreTransferEngine
 import com.directswitch.android.protocol.SpaceReliefOffer
 import com.directswitch.android.protocol.SpaceReliefPlanner
 import com.directswitch.android.protocol.TenPercentSteppedEtaTracker
+import com.directswitch.android.protocol.ThermalGuardCore
+import com.directswitch.android.protocol.ThermalGuardState
 import com.directswitch.android.protocol.TransferCategory
 import com.directswitch.android.protocol.TransferCheckpointRecord
 import com.directswitch.android.protocol.TransferCheckpointStore
@@ -92,9 +94,11 @@ import com.directswitch.android.protocol.TransferSessionStage
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -169,9 +173,14 @@ data class LiveTransferProgress(
     val convertedLiveMotionCount: Int = 0,
     val batteryTriageActive: Boolean = false,
     val deltaSyncModeActive: Boolean = false,
-    val decommissionAuditReport: DecommissionAuditReport? = null,
-    val overflowBridgePlan: OverflowSplitPlan? = null,
-    val overflowBridgeStagedNotice: String? = null,
+    val heicConvertedCount: Int = 0,
+    val thermalGuardState: ThermalGuardState = ThermalGuardState.NORMAL,
+    val thermalBanner: String? = null,
+    val smartCleanMergedContactsCount: Int = 0,
+    val smartCleanSkippedDuplicatesCount: Int = 0,
+    val smartCleanSkippedScreenshotsCount: Int = 0,
+    val reconciliationMissingIds: List<String> = emptyList(),
+    val reconciliationVerifiedCount: Int = 0,
     val errorMessage: String? = null
 )
 
@@ -324,13 +333,11 @@ class LocalOnlyHotspotController(private val context: Context) {
 }
 
 /**
- * Server TCP/HTTP1.1 locale ad alte prestazioni:
- * - Tutti gli endpoint di trasferimento (`/v1/handshake`, `/v1/manifest`, `/v1/item/{id}`, `/v1/complete`)
+ * Server TCP/HTTP1.1 locale ad alte prestazioni (telefono ↔ telefono):
+ * - Tutti gli endpoint di trasferimento (`/v1/handshake`, `/v1/manifest`, `/v1/item/{id}`, `/v1/reconcile-manifest`, `/v1/complete`)
  *   sono cifrati e autenticati tramite `CSGCM1` AES-256-GCM.
  * - L'accoppiamento da Auto-Discovery (`/v1/pair-pin`) richiede il PIN a 6 cifre mostrato sul ricevente,
  *   è monouso e si blocca dopo 3 tentativi errati.
- * - Il portale di installazione guidata (`/start`, `/download/directswitch.apk`, `/download/contacts.vcf`)
- *   è disabilitato per default e si attiva SOLO su richiesta esplicita protetto da token segreto a 128 bit.
  */
 class DirectSwitchTransferServer(
     private val context: Context,
@@ -353,7 +360,6 @@ class DirectSwitchTransferServer(
     private var activeSessionId: String = ""
     private var activeQrPayloadSnapshot: QrPairingPayload? = null
     private var sessionAesKey: ByteArray = ByteArray(32)
-    private var bootstrapSecretToken: String? = null
     private var activeTier: SessionLicenseTier = SessionLicenseTier.INTRA_OS_FREE
     private val handshakeCompleted = AtomicBoolean(false)
     private val activeRunIsResume = AtomicBoolean(false)
@@ -363,6 +369,7 @@ class DirectSwitchTransferServer(
     private val manifestMap = ConcurrentHashMap<String, ManifestItem>()
     private val pendingLiveVideoTempFiles = ConcurrentHashMap<String, File>()
     private val completedIds = ConcurrentHashMap.newKeySet<String>()
+    private val committedItemHashes = ConcurrentHashMap<String, String>()
     private val skippedIds = ConcurrentHashMap.newKeySet<String>()
     private val liveVideoAccountedIds = ConcurrentHashMap.newKeySet<String>()
     private val transferredBytesCounter = AtomicLong(0L)
@@ -381,7 +388,6 @@ class DirectSwitchTransferServer(
         wifiPass: String? = null
     ): QrPairingPayload {
         stop()
-        bootstrapSecretToken = null
         val sessionId = "ds_${DirectSwitchCrypto.toHexLower(DirectSwitchCrypto.randomBytes(8))}"
         val sessionKeyHex = DirectSwitchCrypto.generateSessionKeyHex()
         val pin = DirectSwitchCrypto.generatePairingPin()
@@ -412,8 +418,6 @@ class DirectSwitchTransferServer(
         val boundPort = bindAndAcceptLoop()
         DirectSwitchKeepAliveService.start(context, "Ricezione dati attiva sulla rete locale")
         val candidateIps = LocalNetworkAddresses.listPrivateIpv4Addresses().ifEmpty { listOf("192.168.43.1") }
-        val receiverHasPro = CloudSaveEntitlementDetector.isLocalProUnlocked(context) ||
-            CloudSaveEntitlementDetector.hasVerifiedCloudSaveProEntitlement(context)
         val modelName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}".trim()
 
         _progress.value = LiveTransferProgress(
@@ -429,29 +433,10 @@ class DirectSwitchTransferServer(
             sessionKeyHex = sessionKeyHex,
             wifiSsid = wifiSsid,
             wifiPass = wifiPass,
-            receiverHasPro = receiverHasPro
+            receiverHasPro = true
         )
         activeQrPayloadSnapshot = payload
         return payload
-    }
-
-    /**
-     * Avvia esclusivamente il portale di installazione guidata sul Vecchio Telefono protetto da token a 128 bit,
-     * restituendo l'URL completo da codificare nel QR di Bootstrap.
-     */
-    fun startBootstrapPortalSession(): String {
-        stop()
-        val token = DirectSwitchCrypto.toHexLower(DirectSwitchCrypto.randomBytes(16))
-        bootstrapSecretToken = token
-        activeSessionId = ""
-        _activePairingPin.value = ""
-        activeQrPayloadSnapshot = null
-        handshakeCompleted.set(false)
-
-        val boundPort = bindAndAcceptLoop()
-        DirectSwitchKeepAliveService.start(context, "Portale di installazione guidata attivo")
-        val ip = LocalNetworkAddresses.listPrivateIpv4Addresses().firstOrNull() ?: "192.168.43.1"
-        return "http://$ip:$boundPort/start?token=$token"
     }
 
     private fun bindAndAcceptLoop(): Int {
@@ -493,7 +478,6 @@ class DirectSwitchTransferServer(
 
     fun stop() {
         running.set(false)
-        bootstrapSecretToken = null
         _activePairingPin.value = ""
         activeQrPayloadSnapshot = null
         cleanupPendingLiveVideoFiles()
@@ -505,14 +489,6 @@ class DirectSwitchTransferServer(
         } finally {
             serverSocket = null
         }
-    }
-
-    private fun isValidBootstrapRequest(rawPathAndQuery: String): Boolean {
-        val expected = bootstrapSecretToken ?: return false
-        val provided = runCatching {
-            Uri.parse("http://localhost$rawPathAndQuery").getQueryParameter("token")
-        }.getOrNull() ?: return false
-        return DirectSwitchCrypto.constantTimeEquals(expected, provided)
     }
 
     private fun handleClientSocket(socket: Socket) {
@@ -553,51 +529,6 @@ class DirectSwitchTransferServer(
             when {
                 method == "GET" && pathOnly == "/v1/ping" -> {
                     writeJsonResponse(output, 200, """{"ok":true,"proto":"DSWITCH_V1"}""")
-                }
-
-                method == "GET" && pathOnly == "/start" -> {
-                    if (!isValidBootstrapRequest(fullTarget)) {
-                        writeJsonResponse(output, 403, """{"error":"Token portale mancante o non valido"}""")
-                        return
-                    }
-                    val token = bootstrapSecretToken.orEmpty()
-                    val deviceTitle = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}".trim()
-                    val contactsCount = ContactsSmartMerger.readAllContacts(context).size
-                    val html = buildBootstrapPortalHtml(deviceTitle, contactsCount, token)
-                    writeCustomBytesResponse(output, "text/html; charset=utf-8", null, html.toByteArray(Charsets.UTF_8))
-                }
-
-                method == "GET" && pathOnly == "/download/directswitch.apk" -> {
-                    if (!isValidBootstrapRequest(fullTarget)) {
-                        writeJsonResponse(output, 403, """{"error":"Token download mancante o non valido"}""")
-                        return
-                    }
-                    val apkFile = File(context.applicationInfo.sourceDir)
-                    if (!apkFile.exists()) {
-                        writeJsonResponse(output, 404, """{"error":"APK sorgente non disponibile"}""")
-                        return
-                    }
-                    writeFileStreamResponse(
-                        output = output,
-                        contentType = "application/vnd.android.package-archive",
-                        attachmentName = "DirectSwitch.apk",
-                        file = apkFile
-                    )
-                }
-
-                method == "GET" && pathOnly == "/download/contacts.vcf" -> {
-                    if (!isValidBootstrapRequest(fullTarget)) {
-                        writeJsonResponse(output, 403, """{"error":"Token rubrica mancante o non valido"}""")
-                        return
-                    }
-                    val contacts = ContactsSmartMerger.readAllContacts(context)
-                    val vcf = buildVcardBundle(contacts)
-                    writeCustomBytesResponse(
-                        output = output,
-                        contentType = "text/vcard; charset=utf-8",
-                        attachmentName = "Rubrica_DirectSwitch.vcf",
-                        bodyBytes = vcf.toByteArray(Charsets.UTF_8)
-                    )
                 }
 
                 method == "POST" && pathOnly == "/v1/pair-pin" -> {
@@ -772,17 +703,15 @@ class DirectSwitchTransferServer(
                         return
                     }
 
-                    val receiverHasPro = CloudSaveEntitlementDetector.isLocalProUnlocked(context)
-                    val receiverHasCloudSavePro = CloudSaveEntitlementDetector.hasVerifiedCloudSaveProEntitlement(context)
                     val (freeBytes, _) = StorageCapacityChecker.getFreeAndTotalBytes(context)
 
                     activeTier = LicensePolicyEvaluator.resolveTier(
                         senderPlatform = req.senderPlatform,
                         receiverPlatform = DevicePlatform.ANDROID,
-                        senderHasPro = req.senderHasPro,
-                        receiverHasPro = receiverHasPro,
-                        senderHasCloudSavePro = req.senderHasCloudSavePro,
-                        receiverHasCloudSavePro = receiverHasCloudSavePro
+                        senderHasPro = true,
+                        receiverHasPro = true,
+                        senderHasCloudSavePro = false,
+                        receiverHasCloudSavePro = false
                     )
                     val isResume = req.isResume == true
                     activeRunIsResume.set(isResume)
@@ -792,6 +721,7 @@ class DirectSwitchTransferServer(
                     if (!isResume) {
                         manifestMap.clear()
                         completedIds.clear()
+                        committedItemHashes.clear()
                         skippedIds.clear()
                         liveVideoAccountedIds.clear()
                         docFolderCounts.clear()
@@ -886,35 +816,10 @@ class DirectSwitchTransferServer(
                         hasEnoughSpace = enoughSpace || allowProceedToManifest,
                         statusMessage = if (allowProceedToManifest) "Pronto al trasferimento diretto" else "Spazio su disco insufficiente",
                         supportsCrossOsLiveMotion = true,
+                        supportsReconcile = true,
                         receiverInstalledAppIds = receiverApps
                     )
                     writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(resp))
-                }
-
-                method == "POST" && pathOnly == "/v1/decommission-audit" -> {
-                    if (activeSessionId.isBlank() || !handshakeCompleted.get()) {
-                        writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
-                        return
-                    }
-                    if (contentLength > 0L && contentLength <= 256 * 1024) {
-                        val encBody = readFixedBytes(input, contentLength.toInt())
-                        val plain = runCatching { DirectSwitchCrypto.openJsonEnvelope(encBody, sessionAesKey) }.getOrNull()
-                        val auditReq = plain?.let { runCatching { DirectSwitchJson.instance.decodeFromString<DecommissionAuditRequest>(it) }.getOrNull() }
-                        if (auditReq == null || auditReq.sessionId != activeSessionId) {
-                            writeJsonResponse(output, 401, """{"error":"Audit non autenticato"}""")
-                            return
-                        }
-                    }
-                    val installed = runCatching { InstalledAppsScanner.scanUserInstalledApps(context) }.getOrDefault(emptyList())
-                    val (freeNow, _) = StorageCapacityChecker.getFreeAndTotalBytes(context)
-                    val auditResp = DecommissionAuditResponse(
-                        receiverName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
-                        receiverPlatform = DevicePlatform.ANDROID,
-                        installedAppIds = installed.map { it.packageName },
-                        installedAppNames = installed.map { it.appName },
-                        freeStorageBytes = freeNow
-                    )
-                    writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(auditResp))
                 }
 
                 method == "POST" && pathOnly == "/v1/manifest" -> {
@@ -1379,6 +1284,7 @@ class DirectSwitchTransferServer(
                             return
                         }
 
+                        committedItemHashes[itemId] = actualSha256
                         if (completedIds.add(itemId)) {
                             if (safeItem.category != TransferCategory.PHOTOS && safeItem.category != TransferCategory.VIDEOS) {
                                 docFolderCounts[subFolder] = (docFolderCounts[subFolder] ?: 0) + 1
@@ -1485,6 +1391,27 @@ class DirectSwitchTransferServer(
                         )
                     }
                     writeEncryptedJsonResponse(output, 200, """{"ok":true}""")
+                }
+
+                method == "POST" && pathOnly == "/v1/reconcile-manifest" -> {
+                    if (!handshakeCompleted.get()) {
+                        writeJsonResponse(output, 401, """{"error":"Sessione non autorizzata"}""")
+                        return
+                    }
+                    val encryptedBody = readFixedBytes(input, contentLength.toInt())
+                    val plainJson = try {
+                        DirectSwitchCrypto.openJsonEnvelope(encryptedBody, sessionAesKey)
+                    } catch (_: Throwable) {
+                        writeJsonResponse(output, 401, """{"error":"Riconciliazione non autenticata"}""")
+                        return
+                    }
+                    val req = DirectSwitchJson.instance.decodeFromString<ReconcileManifestRequest>(plainJson)
+                    val diffResp = ReconciliationDiffCore.evaluate(
+                        sentItemIds = req.sentItemIds,
+                        expectedHashesById = req.expectedSha256ById,
+                        committedHashesById = committedItemHashes.toMap()
+                    )
+                    writeEncryptedJsonResponse(output, 200, DirectSwitchJson.instance.encodeToString(diffResp))
                 }
 
                 method == "POST" && pathOnly == "/v1/complete" -> {
@@ -1596,109 +1523,6 @@ class DirectSwitchTransferServer(
         val encryptedBytes = DirectSwitchCrypto.sealJsonEnvelope(plainJson, sessionAesKey)
         writeRawEncryptedResponse(output, statusCode, encryptedBytes)
     }
-
-    private fun writeCustomBytesResponse(
-        output: OutputStream,
-        contentType: String,
-        attachmentName: String?,
-        bodyBytes: ByteArray
-    ) {
-        val header = buildString {
-            append("HTTP/1.1 200 OK\r\n")
-            append("Content-Type: $contentType\r\n")
-            if (!attachmentName.isNullOrBlank()) {
-                append("Content-Disposition: attachment; filename=\"$attachmentName\"\r\n")
-            }
-            append("Content-Length: ${bodyBytes.size}\r\n")
-            append("Connection: close\r\n\r\n")
-        }
-        output.write(header.toByteArray(Charsets.US_ASCII))
-        output.write(bodyBytes)
-        output.flush()
-    }
-
-    private fun writeFileStreamResponse(
-        output: OutputStream,
-        contentType: String,
-        attachmentName: String,
-        file: File
-    ) {
-        val header = buildString {
-            append("HTTP/1.1 200 OK\r\n")
-            append("Content-Type: $contentType\r\n")
-            append("Content-Disposition: attachment; filename=\"$attachmentName\"\r\n")
-            append("Content-Length: ${file.length()}\r\n")
-            append("Connection: close\r\n\r\n")
-        }
-        output.write(header.toByteArray(Charsets.US_ASCII))
-        file.inputStream().use { fileIn ->
-            fileIn.copyTo(output, bufferSize = 256 * 1024)
-        }
-        output.flush()
-    }
-
-    private fun buildVcardBundle(contacts: List<ContactTransferRecord>): String {
-        val sb = StringBuilder()
-        for (c in contacts) {
-            sb.append("BEGIN:VCARD\r\nVERSION:3.0\r\n")
-            val safeName = c.displayName.replace("\r", " ").replace("\n", " ")
-            sb.append("FN:").append(safeName).append("\r\n")
-            sb.append("N:").append(safeName).append(";;;;\r\n")
-            for (phone in c.phones) {
-                sb.append("TEL;TYPE=CELL:").append(phone.trim()).append("\r\n")
-            }
-            for (mail in c.emails) {
-                sb.append("EMAIL;TYPE=INTERNET:").append(mail.trim()).append("\r\n")
-            }
-            sb.append("END:VCARD\r\n")
-        }
-        return sb.toString()
-    }
-
-    private fun buildBootstrapPortalHtml(deviceName: String, contactsCount: Int, token: String): String {
-        val safeTitle = deviceName
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-        return """
-            <!DOCTYPE html>
-            <html lang="it">
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width,initial-scale=1">
-              <title>DirectSwitch — Configurazione Guidata Nuovo Telefono</title>
-              <style>
-                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #e8f0f5; color: #0f172a; margin: 0; padding: 20px; }
-                .card { background: #ffffff; border-radius: 18px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.06); }
-                h1 { font-size: 22px; margin: 0 0 6px 0; color: #008f7a; }
-                p { font-size: 14px; color: #475569; line-height: 1.45; margin: 6px 0 14px 0; }
-                .btn { display: block; text-align: center; text-decoration: none; font-weight: 600; font-size: 16px; padding: 14px 16px; border-radius: 14px; margin-top: 10px; }
-                .btn-teal { background: #008f7a; color: #ffffff; }
-                .btn-blue { background: #007aff; color: #ffffff; }
-                .badge { display: inline-block; background: #e6f6f3; color: #008f7a; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 12px; margin-bottom: 8px; }
-              </style>
-            </head>
-            <body>
-              <div class="card">
-                <span class="badge">CONNESSO IN WI-FI LOCALE PROTETTA</span>
-                <h1>DirectSwitch da $safeTitle</h1>
-                <p>Questo telefono nuovo ha rilevato correttamente <b>$safeTitle</b> senza bisogno di cavi o cloud.</p>
-              </div>
-              <div class="card">
-                <h1>1. Sei su un nuovo Android?</h1>
-                <p>Scarica l'app DirectSwitch direttamente dal vecchio telefono via Wi-Fi locale (zero consumo internet). Appena aperta, i due telefoni si collegheranno in automatico!</p>
-                <a class="btn btn-teal" href="/download/directswitch.apk?token=$token">Scarica e Avvia DirectSwitch (.APK)</a>
-              </div>
-              <div class="card">
-                <h1>2. Sei su un nuovo iPhone?</h1>
-                <p>Importa subito con 1 tocco tutti i <b>$contactsCount contatti</b> nell'app Contatti nativa di iPhone e avvia l'app guidata iOS per Foto, Video 4K e Album.</p>
-                <a class="btn btn-blue" href="/download/contacts.vcf?token=$token">Importa Subito Rubrica ($contactsCount Contatti)</a>
-              </div>
-            </body>
-            </html>
-        """.trimIndent()
-    }
 }
 
 private class BoundedInputStream(
@@ -1752,33 +1576,11 @@ class DirectSwitchTransferClient(private val context: Context) {
     private val _progress = MutableStateFlow(LiveTransferProgress())
     val progress: StateFlow<LiveTransferProgress> = _progress
 
-    @Volatile
-    private var prepAnimDeferred: CompletableDeferred<Unit>? = null
+    private val _networkDiagnostic = MutableStateFlow<NetworkDiagnosticVerdict?>(null)
+    val networkDiagnostic: StateFlow<NetworkDiagnosticVerdict?> = _networkDiagnostic
 
     @Volatile
-    private var lastScannedMediaForOverflow: List<LocalMediaEntry> = emptyList()
-    @Volatile
-    private var lastOverflowPlan: OverflowSplitPlan? = null
-    @Volatile
-    private var lastOverflowTargetName: String = ""
-    @Volatile
-    private var lastAuditSessionId: String = ""
-    @Volatile
-    private var lastAuditPeerName: String = ""
-    @Volatile
-    private var lastAuditPeerPlatform: DevicePlatform = DevicePlatform.ANDROID
-    @Volatile
-    private var lastAuditContactsMigrated: Boolean = false
-    @Volatile
-    private var lastAuditCompletedFiles: Int = 0
-    @Volatile
-    private var lastAuditTransferredBytes: Long = 0L
-    @Volatile
-    private var lastAuditSkippedCount: Int = 0
-    @Volatile
-    private var lastAuditReceiverAppIds: List<String>? = null
-    @Volatile
-    private var lastAuditReceiverAppNames: List<String> = emptyList()
+    private var prepAnimDeferred: CompletableDeferred<Unit>? = null
 
     fun markPreparationAnimationCompleted() {
         prepAnimDeferred?.complete(Unit)
@@ -1787,76 +1589,8 @@ class DirectSwitchTransferClient(private val context: Context) {
     fun resetProgress() {
         prepAnimDeferred?.complete(Unit)
         prepAnimDeferred = null
-        lastOverflowPlan = null
-        lastScannedMediaForOverflow = emptyList()
+        _networkDiagnostic.value = null
         _progress.value = LiveTransferProgress()
-    }
-
-    /** Prepara e lancia il Ponte Overflow verso CloudSave per parcheggiare cifrati i media eccedenti. */
-    fun launchOverflowBridgeToCloudSave(): AndroidCloudSaveOverflowBridge.LaunchOutcome? {
-        val plan = lastOverflowPlan ?: return null
-        val outcome = AndroidCloudSaveOverflowBridge.stageAndLaunchOverflowToCloudSave(
-            context = context,
-            targetDeviceName = lastOverflowTargetName.ifBlank { _progress.value.peerDeviceName },
-            allEntries = lastScannedMediaForOverflow,
-            plan = plan
-        )
-        _progress.value = _progress.value.copy(overflowBridgeStagedNotice = outcome.message)
-        return outcome
-    }
-
-    /** Riesegue in tempo reale il controllo Anti-Lockout interrogando le app installate sul nuovo telefono. */
-    suspend fun refreshLiveDecommissionAudit(
-        qrPayload: QrPairingPayload?,
-        acknowledgedAppIds: Set<String> = emptySet()
-    ): DecommissionAuditReport? = withContext(Dispatchers.IO) {
-        var receiverIds = lastAuditReceiverAppIds
-        var receiverNames = lastAuditReceiverAppNames
-        if (qrPayload != null) {
-            val channel = resolveChannel(
-                candidateIps = qrPayload.ips,
-                port = qrPayload.port,
-                wifiSsid = qrPayload.wifiSsid,
-                wifiPass = qrPayload.wifiPass
-            )
-            if (channel != null) {
-                try {
-                    val aesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
-                    val respJson = postEncryptedJson(
-                        client = channel.client,
-                        url = "http://${channel.reachableIp}:${qrPayload.port}/v1/decommission-audit",
-                        plainJson = DirectSwitchJson.instance.encodeToString(DecommissionAuditRequest(qrPayload.sessionId)),
-                        aesKey = aesKey
-                    )
-                    val decoded = DirectSwitchJson.instance.decodeFromString<DecommissionAuditResponse>(respJson)
-                    receiverIds = decoded.installedAppIds
-                    receiverNames = decoded.installedAppNames
-                    lastAuditReceiverAppIds = receiverIds
-                    lastAuditReceiverAppNames = receiverNames
-                } catch (_: Throwable) {
-                } finally {
-                    runCatching { channel.cleanup() }
-                }
-            }
-        }
-        val senderApps = runCatching { InstalledAppsScanner.scanUserInstalledApps(context) }.getOrDefault(emptyList())
-        val localContacts = AndroidDecommissionScanner.countLocalOrSimOnlyContacts(context)
-        val report = DecommissionReadinessEvaluator.evaluate(
-            sessionId = lastAuditSessionId.ifBlank { qrPayload?.sessionId.orEmpty() },
-            peerName = lastAuditPeerName.ifBlank { qrPayload?.receiverName.orEmpty() },
-            peerPlatform = lastAuditPeerPlatform,
-            senderInstalledApps = senderApps,
-            receiverInstalledAppIds = receiverIds,
-            receiverInstalledAppNames = receiverNames,
-            localOnlyContactsCount = localContacts,
-            contactsWereMigrated = lastAuditContactsMigrated,
-            unresolvedSkippedItemsCount = lastAuditSkippedCount,
-            completedFilesCount = lastAuditCompletedFiles,
-            transferredBytes = lastAuditTransferredBytes,
-            acknowledgedAppIds = acknowledgedAppIds
-        )
-        _progress.value = _progress.value.copy(decommissionAuditReport = report)
-        report
     }
 
     suspend fun sendPairAck(qrPayload: QrPairingPayload) = withContext(Dispatchers.IO) {
@@ -1933,19 +1667,26 @@ class DirectSwitchTransferClient(private val context: Context) {
         beacon: DiscoveryBeaconPayload,
         pin: String
     ): Result<QrPairingPayload> = withContext(Dispatchers.IO) {
+        _networkDiagnostic.value = null
         try {
             val cleanPin = pin.filter { it.isDigit() }
             require(cleanPin.length == 6) { "Inserisci il codice PIN a 6 cifre mostrato sul nuovo telefono." }
-                val channel = resolveChannel(beacon.ips, beacon.port, null, null)
-                ?: return@withContext Result.failure(
-                    IllegalStateException(
-                        if (beacon.receiverPlatform == DevicePlatform.IOS) {
-                            "Impossibile raggiungere ${beacon.receiverName}: assicurati che su iPhone sia attiva Impostazioni → App → DirectSwitch → Rete locale."
-                        } else {
-                            "Impossibile raggiungere ${beacon.receiverName} sulla rete Wi-Fi locale."
-                        }
+            val channel = resolveChannel(beacon.ips, beacon.port, null, null)
+                ?: run {
+                    val errMsg = if (beacon.receiverPlatform == DevicePlatform.IOS) {
+                        "Impossibile raggiungere ${beacon.receiverName}: assicurati che su iPhone sia attiva Impostazioni → App → DirectSwitch → Rete locale."
+                    } else {
+                        "Impossibile raggiungere ${beacon.receiverName} sulla rete Wi-Fi locale."
+                    }
+                    val privIps = LocalNetworkAddresses.listPrivateIpv4Addresses()
+                    _networkDiagnostic.value = NetworkIsolationDiagnostics.analyzePairingFailure(
+                        localIp = privIps.firstOrNull(),
+                        targetIps = beacon.ips,
+                        isWifiConnected = privIps.isNotEmpty(),
+                        errorMessage = errMsg
                     )
-                )
+                    return@withContext Result.failure(IllegalStateException(errMsg))
+                }
             try {
                 val pinAesKey = DirectSwitchCrypto.derivePinAesKey(beacon.sessionId, cleanPin)
                 val reqJson = DirectSwitchJson.instance.encodeToString(
@@ -1962,11 +1703,21 @@ class DirectSwitchTransferClient(private val context: Context) {
                 )
                 val payload = QrPairingPayload.fromJson(respJson)
                 val mergedIps = (listOf(channel.reachableIp) + payload.ips).distinct()
+                _networkDiagnostic.value = null
                 Result.success(payload.copy(ips = mergedIps))
             } finally {
                 channel.cleanup()
             }
         } catch (t: Throwable) {
+            if (t !is IllegalArgumentException && (t is java.net.SocketException || t is java.net.SocketTimeoutException || t is java.io.InterruptedIOException || (t.message?.contains("timeout", ignoreCase = true) == true) || (t.message?.contains("connect", ignoreCase = true) == true))) {
+                val privIps = LocalNetworkAddresses.listPrivateIpv4Addresses()
+                _networkDiagnostic.value = NetworkIsolationDiagnostics.analyzePairingFailure(
+                    localIp = privIps.firstOrNull(),
+                    targetIps = beacon.ips,
+                    isWifiConnected = privIps.isNotEmpty(),
+                    errorMessage = t.localizedMessage ?: t.javaClass.simpleName
+                )
+            }
             Result.failure(t)
         }
     }
@@ -1992,7 +1743,8 @@ class DirectSwitchTransferClient(private val context: Context) {
         stagedPasswordCsvFiles: List<File> = emptyList(),
         deltaBaseline: CompletedMigrationRecord? = null,
         forceBatteryTriage: Boolean = false,
-        preserveOverflowBridgePlan: Boolean = false
+        smartCleanOptions: SmartCleanOptions = SmartCleanOptions(),
+        convertHeicToJpeg: Boolean = false
     ): Result<TransferCompletionReport> = withContext(Dispatchers.IO) {
         val channelCleanups = Collections.synchronizedList(mutableListOf<() -> Unit>())
         DirectSwitchKeepAliveService.start(context, "Invio dati verso ${qrPayload.receiverName}...")
@@ -2073,6 +1825,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                 arePreparationItemsReady = senderScope.isWhatsAppOnly
             )
 
+            _networkDiagnostic.value = null
             val channel = resolveChannel(
                 candidateIps = qrPayload.ips,
                 port = qrPayload.port,
@@ -2084,6 +1837,13 @@ class DirectSwitchTransferClient(private val context: Context) {
                 } else {
                     "Impossibile raggiungere ${qrPayload.receiverName}. Verifica che entrambi i telefoni siano sulla stessa Wi-Fi o accetta la connessione all'Hotspot DirectSwitch."
                 }
+                val privIps = LocalNetworkAddresses.listPrivateIpv4Addresses()
+                _networkDiagnostic.value = NetworkIsolationDiagnostics.analyzePairingFailure(
+                    localIp = privIps.firstOrNull(),
+                    targetIps = qrPayload.ips,
+                    isWifiConnected = privIps.isNotEmpty(),
+                    errorMessage = msg
+                )
                 _progress.value = _progress.value.copy(
                     sessionStage = TransferSessionStage.TRANSFERRING,
                     errorMessage = msg
@@ -2116,7 +1876,12 @@ class DirectSwitchTransferClient(private val context: Context) {
 
             // 1. Raccolta dati locali selezionati con conteggio progressivo per la schermata di preparazione
             val endOfTodayCutoff = CalendarMigrator.endOfDayMillis()
-            val contacts = if (effectiveIncludeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
+            val rawContacts = if (effectiveIncludeContacts) ContactsSmartMerger.readAllContacts(context) else emptyList()
+            val (contacts, smartCleanMergedContactsCount) = if (effectiveIncludeContacts && smartCleanOptions.mergeDuplicateContacts) {
+                SmartCleanPreTransferEngine.mergeDuplicateContacts(rawContacts)
+            } else {
+                rawContacts to 0
+            }
             if (effectiveIncludeContacts) updatePreparationItem("contacts", contacts.size, isReady = true)
 
             val photoEntries = if (includePhotos) {
@@ -2182,10 +1947,6 @@ class DirectSwitchTransferClient(private val context: Context) {
             if (effectiveIncludeApps) updatePreparationItem("apps", installedApps.size, isReady = true)
 
             val rawMediaEntries = photoEntries + videoEntries + audioEntries + docEntries
-            if (!preserveOverflowBridgePlan) {
-                lastScannedMediaForOverflow = rawMediaEntries
-                lastOverflowPlan = null
-            }
             val batterySnapshot = AndroidBatteryTriageMonitor.readSnapshot(context)
             val isBatteryTriageActive = forceBatteryTriage || batterySnapshot.recommendsAutoTriage
 
@@ -2203,10 +1964,22 @@ class DirectSwitchTransferClient(private val context: Context) {
                 }
                 else -> rawMediaEntries
             }
-            val mediaEntries = if (isBatteryTriageActive) {
-                BatteryTriagePlanner.sortByTriagePriority(filteredMediaEntries) { it.manifestItem }
+            val smartCleanMedia = if (!isTargetedRetry &&
+                (smartCleanOptions.skipExactDuplicatePhotosSha256 || smartCleanOptions.skipOldScreenshotsOlderThanMonths > 0)
+            ) {
+                SmartCleanPreTransferEngine.filterMediaSmartClean(
+                    entries = filteredMediaEntries,
+                    options = smartCleanOptions,
+                    itemOf = { it.manifestItem },
+                    sha256Of = { SmartCleanPreTransferEngine.computeContentUriSha256(context, it.contentUri) }
+                )
             } else {
-                filteredMediaEntries
+                SmartCleanMediaResult(filteredMediaEntries, 0, 0, 0L)
+            }
+            val mediaEntries = if (isBatteryTriageActive) {
+                BatteryTriagePlanner.sortByTriagePriority(smartCleanMedia.kept) { it.manifestItem }
+            } else {
+                smartCleanMedia.kept
             }
             val estimatedBytes = mediaEntries.sumOf { it.manifestItem.sizeBytes }
 
@@ -2215,8 +1988,8 @@ class DirectSwitchTransferClient(private val context: Context) {
                 sessionId = qrPayload.sessionId,
                 senderName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
                 senderPlatform = DevicePlatform.ANDROID,
-                senderHasPro = CloudSaveEntitlementDetector.isLocalProUnlocked(context),
-                senderHasCloudSavePro = CloudSaveEntitlementDetector.hasVerifiedCloudSaveProEntitlement(context),
+                senderHasPro = true,
+                senderHasCloudSavePro = false,
                 totalEstimatedBytes = estimatedBytes,
                 transferScope = senderScope,
                 isResume = resumeCheckpoint != null
@@ -2237,17 +2010,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                     availableFreeBytes = handshakeResp.freeStorageBytes,
                     items = mediaEntries.map { it.manifestItem }
                 )
-                val splitPlan = OverflowBridgePlanner.buildSplitPlan(
-                    availableFreeBytes = handshakeResp.freeStorageBytes,
-                    items = mediaEntries.map { it.manifestItem }
-                )
-                lastScannedMediaForOverflow = mediaEntries
-                lastOverflowPlan = if (splitPlan.overflowItems.isNotEmpty()) splitPlan else null
-                lastOverflowTargetName = handshakeResp.receiverName
                 _progress.value = _progress.value.copy(
                     sessionStage = TransferSessionStage.TRANSFERRING,
                     spaceReliefOffer = relief,
-                    overflowBridgePlan = lastOverflowPlan,
                     errorMessage = msg
                 )
                 return@withContext Result.failure(IllegalStateException(msg))
@@ -2260,7 +2025,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                 activeTransferScope = senderScope,
                 batteryTriageActive = isBatteryTriageActive,
                 deltaSyncModeActive = deltaBaseline != null,
-                overflowBridgePlan = if (preserveOverflowBridgePlan) lastOverflowPlan else null
+                smartCleanMergedContactsCount = smartCleanMergedContactsCount,
+                smartCleanSkippedDuplicatesCount = smartCleanMedia.skippedDuplicatesCount,
+                smartCleanSkippedScreenshotsCount = smartCleanMedia.skippedOldScreenshotsCount
             )
 
             // 3. Invio Manifesto Cifrato & Merge immediato Contatti / Calendari / SMS / Chiamate / Catalogo App
@@ -2292,17 +2059,9 @@ class DirectSwitchTransferClient(private val context: Context) {
                         availableFreeBytes = handshakeResp.freeStorageBytes,
                         items = mediaEntries.map { it.manifestItem }
                     )
-                    val splitPlan = OverflowBridgePlanner.buildSplitPlan(
-                        availableFreeBytes = handshakeResp.freeStorageBytes,
-                        items = mediaEntries.map { it.manifestItem }
-                    )
-                    lastScannedMediaForOverflow = mediaEntries
-                    lastOverflowPlan = if (splitPlan.overflowItems.isNotEmpty()) splitPlan else null
-                    lastOverflowTargetName = handshakeResp.receiverName
                     _progress.value = _progress.value.copy(
                         sessionStage = TransferSessionStage.TRANSFERRING,
                         spaceReliefOffer = relief,
-                        overflowBridgePlan = lastOverflowPlan,
                         errorMessage = manifestErr.localizedMessage
                     )
                 }
@@ -2457,9 +2216,14 @@ class DirectSwitchTransferClient(private val context: Context) {
 
             val permitSemaphore = Semaphore(3)
             val heavyAcquireLock = Mutex()
+            val thermalCheckLock = Mutex()
             val nextIndex = AtomicInteger(0)
             val healedCodecCounter = AtomicInteger(0)
             val convertedMotionCounter = AtomicInteger(0)
+            val heicConvertedCounter = AtomicInteger(0)
+            val sentSha256ById = ConcurrentHashMap<String, String>()
+            val currentThermalState = AtomicReference(ThermalGuardState.NORMAL)
+            val thermalCooldownUntilMs = AtomicLong(0L)
             val workerCount = minOf(3, entriesToUpload.size)
             if (workerCount > 0) {
                 coroutineScope {
@@ -2471,11 +2235,70 @@ class DirectSwitchTransferClient(private val context: Context) {
                                 if (idx >= entriesToUpload.size) break
                                 val entry = entriesToUpload[idx]
 
-                                val permitsNeeded = if (entry.manifestItem.sizeBytes >= 50L * 1024L * 1024L) 3 else 1
+                                if (idx % 5 == 0 || currentThermalState.get() != ThermalGuardState.NORMAL) {
+                                    thermalCheckLock.withLock {
+                                        val evaluated = ThermalGuardCore.evaluate(AndroidThermalMonitor.read(context))
+                                        currentThermalState.set(evaluated)
+                                        when (evaluated) {
+                                            ThermalGuardState.CRITICAL_COOLDOWN -> {
+                                                val now = System.currentTimeMillis()
+                                                if (thermalCooldownUntilMs.get() < now) {
+                                                    thermalCooldownUntilMs.set(now + 45_000L)
+                                                }
+                                                _progress.value = _progress.value.copy(
+                                                    thermalGuardState = ThermalGuardState.CRITICAL_COOLDOWN,
+                                                    thermalBanner = "Raffreddamento termico in corso (pausa automatica 45s)..."
+                                                )
+                                            }
+                                            ThermalGuardState.WARM_THROTTLE -> {
+                                                _progress.value = _progress.value.copy(
+                                                    thermalGuardState = ThermalGuardState.WARM_THROTTLE,
+                                                    thermalBanner = "Temperatura elevata — 1 flusso alla volta"
+                                                )
+                                            }
+                                            ThermalGuardState.NORMAL -> {
+                                                _progress.value = _progress.value.copy(
+                                                    thermalGuardState = ThermalGuardState.NORMAL,
+                                                    thermalBanner = null
+                                                )
+                                            }
+                                        }
+                                    }
+                                    while (System.currentTimeMillis() < thermalCooldownUntilMs.get() &&
+                                        abortedError.get() == null &&
+                                        currentCoroutineContext().isActive
+                                    ) {
+                                        delay(1000L)
+                                    }
+                                    val untilSnap = thermalCooldownUntilMs.get()
+                                    if (untilSnap > 0L && System.currentTimeMillis() >= untilSnap) {
+                                        thermalCheckLock.withLock {
+                                            val untilLocked = thermalCooldownUntilMs.get()
+                                            if (untilLocked > 0L && System.currentTimeMillis() >= untilLocked) {
+                                                thermalCooldownUntilMs.set(0L)
+                                                val afterCool = ThermalGuardCore.evaluate(AndroidThermalMonitor.read(context))
+                                                currentThermalState.set(afterCool)
+                                                _progress.value = _progress.value.copy(
+                                                    thermalGuardState = afterCool,
+                                                    thermalBanner = when (afterCool) {
+                                                        ThermalGuardState.CRITICAL_COOLDOWN -> "Raffreddamento termico in corso (pausa automatica 45s)..."
+                                                        ThermalGuardState.WARM_THROTTLE -> "Temperatura elevata — 1 flusso alla volta"
+                                                        ThermalGuardState.NORMAL -> null
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val permitsNeeded = if (currentThermalState.get() == ThermalGuardState.WARM_THROTTLE ||
+                                    entry.manifestItem.sizeBytes >= 50L * 1024L * 1024L
+                                ) 3 else 1
                                 var acquiredPermits = 0
                                 val safeTempId = entry.manifestItem.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
                                 val tempEncrypted = File(context.cacheDir, "tx_${safeTempId}.csgcm1")
                                 var healedAudioTemp: File? = null
+                                var heicConvTemp: File? = null
                                 var extractedMotion: AndroidLiveMotionBridge.ExtractedAndroidMotionPhoto? = null
                                 var tempLiveEncrypted: File? = null
                                 try {
@@ -2570,8 +2393,24 @@ class DirectSwitchTransferClient(private val context: Context) {
                                         }
                                     }
 
+                                    // 3) Massima compatibilità HEIC -> JPEG preservando data scatto, rotazione e GPS
+                                    if (convertHeicToJpeg &&
+                                        entry.manifestItem.category == TransferCategory.PHOTOS &&
+                                        extractedMotion == null &&
+                                        AndroidHeicCompatibilityConverter.isHeicPhoto(entry.manifestItem.fileName, entry.manifestItem.mimeType)
+                                    ) {
+                                        val tmpJpg = File(context.cacheDir, "heic_compat_${safeTempId}.jpg")
+                                        if (AndroidHeicCompatibilityConverter.convertHeicToJpegPreservingExif(context, entry.contentUri, tmpJpg)) {
+                                            heicConvTemp = tmpJpg
+                                            actualExtHeader = "jpg"
+                                            heicConvertedCounter.incrementAndGet()
+                                        } else {
+                                            runCatching { tmpJpg.delete() }
+                                        }
+                                    }
+
                                     val encPair = runCatching {
-                                        val primaryFile = healedAudioTemp ?: extractedMotion?.stillFile
+                                        val primaryFile = healedAudioTemp ?: extractedMotion?.stillFile ?: heicConvTemp
                                         if (primaryFile != null) {
                                             primaryFile.inputStream().use { rawIn ->
                                                 tempEncrypted.outputStream().use { encOut ->
@@ -2764,6 +2603,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                     }
 
                                     completedItemIdsSet.add(entry.manifestItem.id)
+                                    sentSha256ById[entry.manifestItem.id] = sha256Hex
                                     var shouldSaveCheckpoint = false
                                     progressLock.withLock {
                                         val effectiveSentBytes = plainLen + sentMotionSplitLiveBytes
@@ -2802,6 +2642,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                     tempEncrypted.delete()
                                     tempLiveEncrypted?.delete()
                                     healedAudioTemp?.delete()
+                                    heicConvTemp?.delete()
                                     extractedMotion?.stillFile?.delete()
                                     extractedMotion?.videoMp4File?.delete()
                                     repeat(acquiredPermits) { permitSemaphore.release() }
@@ -2813,7 +2654,44 @@ class DirectSwitchTransferClient(private val context: Context) {
             }
             val failedCount = accounting.failedItemsCount
 
-            // 5. Chiusura sessione cifrata e Report certificato (con 1 fallback di riconnessione se la rete cade all'ultimo)
+            // 5. Verifica integrità post-migrazione (Diff manifest + SHA-256) PRIMA di /v1/complete
+            //    così il ricevente è ancora in sessione attiva (keep-alive acceso e schermo non chiuso).
+            var reconcileVerifiedCount = 0
+            var reconcileMissingIds: List<String> = emptyList()
+            if (handshakeResp.supportsReconcile && sentSha256ById.isNotEmpty()) {
+                val sentHashesSnapshot = sentSha256ById.toMap()
+                val reconcileReq = ReconcileManifestRequest(
+                    sessionId = qrPayload.sessionId,
+                    sentItemIds = sentHashesSnapshot.keys.toList(),
+                    expectedSha256ById = sentHashesSnapshot
+                )
+                val reconcilePayloadJson = DirectSwitchJson.instance.encodeToString(reconcileReq)
+                val reconcileResp = runCatching {
+                    val recJson = try {
+                        postEncryptedJson(
+                            client = activeClient,
+                            url = "$baseUrl/v1/reconcile-manifest",
+                            plainJson = reconcilePayloadJson,
+                            aesKey = sessionAesKey
+                        )
+                    } catch (_: Throwable) {
+                        val (recoveredUrl, recoveredClient) = ensureReconnected(reconnectGeneration.get())
+                        postEncryptedJson(
+                            client = recoveredClient,
+                            url = "$recoveredUrl/v1/reconcile-manifest",
+                            plainJson = reconcilePayloadJson,
+                            aesKey = sessionAesKey
+                        )
+                    }
+                    DirectSwitchJson.instance.decodeFromString<ReconcileManifestResponse>(recJson)
+                }.getOrNull()
+                if (reconcileResp != null) {
+                    reconcileVerifiedCount = reconcileResp.totalVerified
+                    reconcileMissingIds = (reconcileResp.missingIds + reconcileResp.hashMismatchIds).distinct()
+                }
+            }
+
+            // 6. Chiusura sessione cifrata e Report certificato (con 1 fallback di riconnessione se la rete cade all'ultimo)
             val completeJson = try {
                 postEncryptedJson(
                     client = activeClient,
@@ -2858,31 +2736,6 @@ class DirectSwitchTransferClient(private val context: Context) {
                 )
             }
 
-            // Audit Anti-Lockout Dinamico (Banche / SPID / 2FA / Contatti solo-SIM)
-            val allSenderAppsForAudit = runCatching { InstalledAppsScanner.scanUserInstalledApps(context) }.getOrDefault(installedApps)
-            val localOnlyContactsCount = AndroidDecommissionScanner.countLocalOrSimOnlyContacts(context)
-            lastAuditSessionId = qrPayload.sessionId
-            lastAuditPeerName = handshakeResp.receiverName
-            lastAuditPeerPlatform = handshakeResp.receiverPlatform
-            lastAuditContactsMigrated = effectiveIncludeContacts && (report.mergedContactsCount > 0 || manifestResp.contactsSkippedDuplicates > 0 || contacts.isEmpty())
-            lastAuditCompletedFiles = report.transferredFilesCount
-            lastAuditTransferredBytes = report.transferredBytes
-            lastAuditSkippedCount = failedCount
-            lastAuditReceiverAppIds = handshakeResp.receiverInstalledAppIds
-            lastAuditReceiverAppNames = emptyList()
-            val decommissionReport = DecommissionReadinessEvaluator.evaluate(
-                sessionId = qrPayload.sessionId,
-                peerName = handshakeResp.receiverName,
-                peerPlatform = handshakeResp.receiverPlatform,
-                senderInstalledApps = allSenderAppsForAudit,
-                receiverInstalledAppIds = handshakeResp.receiverInstalledAppIds,
-                localOnlyContactsCount = localOnlyContactsCount,
-                contactsWereMigrated = lastAuditContactsMigrated,
-                unresolvedSkippedItemsCount = failedCount,
-                completedFilesCount = report.transferredFilesCount,
-                transferredBytes = report.transferredBytes
-            )
-
             val doneLabel = if (failedCount > 0) {
                 "Trasferimento completato ($failedCount file non disponibili saltati)"
             } else {
@@ -2898,8 +2751,14 @@ class DirectSwitchTransferClient(private val context: Context) {
                 skippedItems = finalSkipped,
                 healedCodecCount = healedCodecCounter.get(),
                 convertedLiveMotionCount = convertedMotionCounter.get(),
-                decommissionAuditReport = decommissionReport,
-                overflowBridgePlan = if (preserveOverflowBridgePlan) lastOverflowPlan else null,
+                heicConvertedCount = heicConvertedCounter.get(),
+                thermalGuardState = ThermalGuardState.NORMAL,
+                thermalBanner = null,
+                smartCleanMergedContactsCount = smartCleanMergedContactsCount,
+                smartCleanSkippedDuplicatesCount = smartCleanMedia.skippedDuplicatesCount,
+                smartCleanSkippedScreenshotsCount = smartCleanMedia.skippedOldScreenshotsCount,
+                reconciliationMissingIds = reconcileMissingIds,
+                reconciliationVerifiedCount = reconcileVerifiedCount,
                 pendingNativeWhatsAppMigration = wantNativeWa
             )
             DirectSwitchKeepAliveService.updateProgress(

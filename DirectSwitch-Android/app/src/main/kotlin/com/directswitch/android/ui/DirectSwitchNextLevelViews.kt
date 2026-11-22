@@ -74,22 +74,19 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.directswitch.android.migrators.AndroidDecommissionScanner
 import com.directswitch.android.migrators.BatterySnapshot
 import com.directswitch.android.migrators.InstalledAppCategoryGroup
 import com.directswitch.android.protocol.CompletedMigrationRecord
-import com.directswitch.android.protocol.DecommissionAuditReport
-import com.directswitch.android.protocol.DecommissionReadinessEvaluator
-import com.directswitch.android.protocol.DecommissionReadinessLevel
 import com.directswitch.android.protocol.DirectSwitchL10n
 import com.directswitch.android.protocol.DirectSwitchLanguage
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.MediaTransferFilterOptions
-import com.directswitch.android.protocol.OverflowSplitPlan
-import com.directswitch.android.protocol.PostMigrationChecklistItem
+import com.directswitch.android.protocol.NetworkDiagnosticVerdict
 import com.directswitch.android.protocol.SkippedTransferItemRecord
+import com.directswitch.android.protocol.SmartCleanOptions
 import com.directswitch.android.protocol.SpaceReliefActionKind
 import com.directswitch.android.protocol.SpaceReliefOffer
+import com.directswitch.android.protocol.ThermalGuardState
 import com.directswitch.android.protocol.TransferCheckpointRecord
 import com.directswitch.android.protocol.TransferConnectionMedium
 import com.directswitch.android.protocol.TransferDisplayFormatting
@@ -898,136 +895,6 @@ fun SkippedItemsReportCard(
     }
 }
 
-// MARK: - Checklist Post-Migrazione + Ricevuta Condivisibile
-
-@Composable
-fun PostMigrationChecklistCard(
-    items: List<PostMigrationChecklistItem>,
-    receiptText: String
-) {
-    val context = LocalContext.current
-    var checkedIds by remember { mutableStateOf(setOf<String>()) }
-    var expanded by remember { mutableStateOf(true) }
-
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = DirectSwitchTheme.cardSurface,
-        border = BorderStroke(0.9.dp, DirectSwitchTheme.cardBorder),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    AppleSettingsIcon(icon = Icons.Filled.Description, color = DirectSwitchTheme.green)
-                    Column {
-                        Text(
-                            text = DirectSwitchL10n.tr("Checklist finale prima di chiudere"),
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DirectSwitchTheme.textPrimary
-                        )
-                        Text(
-                            text = DirectSwitchL10n.tr("${checkedIds.size}/${items.size} passaggi verificati", en = "${checkedIds.size}/${items.size} steps verified", fr = "${checkedIds.size}/${items.size} étapes vérifiées"),
-                            fontSize = 12.sp,
-                            color = DirectSwitchTheme.textSecondary
-                        )
-                    }
-                }
-                Icon(
-                    imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = null,
-                    tint = DirectSwitchTheme.textMuted
-                )
-            }
-
-            if (expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items.forEach { item ->
-                        val checked = item.id in checkedIds
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(DirectSwitchTheme.inputSurface.copy(alpha = if (checked) 0.45f else 0.85f))
-                                .clickable {
-                                    checkedIds = if (checked) checkedIds - item.id else checkedIds + item.id
-                                }
-                                .padding(10.dp),
-                            verticalAlignment = Alignment.Top,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (checked) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                                contentDescription = null,
-                                tint = if (checked) DirectSwitchTheme.green else DirectSwitchTheme.textMuted,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(
-                                    text = item.title,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (checked) DirectSwitchTheme.textSecondary else DirectSwitchTheme.textPrimary,
-                                    textDecoration = if (checked) TextDecoration.LineThrough else TextDecoration.None
-                                )
-                                Text(
-                                    text = item.subtitle,
-                                    fontSize = 11.5.sp,
-                                    color = DirectSwitchTheme.textSecondary
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Surface(
-                onClick = {
-                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, DirectSwitchL10n.tr("DirectSwitch — Ricevuta di Migrazione", en = "DirectSwitch — Migration Receipt", fr = "DirectSwitch — Reçu de migration"))
-                        putExtra(Intent.EXTRA_TEXT, receiptText)
-                    }
-                    runCatching {
-                        context.startActivity(Intent.createChooser(shareIntent, DirectSwitchL10n.tr("Condividi ricevuta migrazione")))
-                    }
-                },
-                shape = RoundedCornerShape(12.dp),
-                color = DirectSwitchTheme.blue.copy(alpha = 0.12f),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Filled.Share, contentDescription = null, tint = DirectSwitchTheme.blue, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text(
-                        text = DirectSwitchL10n.tr("Condividi ricevuta migrazione"),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = DirectSwitchTheme.blue
-                    )
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Recupero Delta 14-30 Giorni ("Copia solo le novità")
 
 @Composable
@@ -1196,36 +1063,131 @@ fun BatteryTriageActivePill() {
     }
 }
 
-// MARK: - Audit Anti-Lockout Dinamico + Certificato Pronto per Reset
+// MARK: - 11. Componenti Practical Pro (#1–#5): Termica, Smart Clean, HEIC, Riconciliazione, AP Isolation
 
 @Composable
-fun DecommissionAuditCard(
-    report: DecommissionAuditReport,
-    senderDeviceName: String,
-    acknowledgedAppIds: Set<String>,
-    isRefreshing: Boolean,
-    onToggleAcknowledge: (String) -> Unit,
-    onRefreshLiveAudit: () -> Unit
+fun ThermalGuardBannerPill(
+    state: ThermalGuardState,
+    bannerText: String?
 ) {
-    val context = LocalContext.current
-    val (accent, badgeLabel) = when (report.readinessLevel) {
-        DecommissionReadinessLevel.BLOCKED_RED -> DirectSwitchTheme.red to DirectSwitchL10n.tr("NON FORMATTARE ANCORA", en = "DO NOT ERASE YET", fr = "NE PAS RÉINITIALISER")
-        DecommissionReadinessLevel.CAUTION_AMBER -> DirectSwitchTheme.orange to DirectSwitchL10n.tr("VERIFICA ELEMENTI SECONDARI", en = "CHECK SECONDARY ITEMS", fr = "VÉRIFIER LES ÉLÉMENTS")
-        DecommissionReadinessLevel.READY_FOR_RESET_GREEN -> DirectSwitchTheme.green to DirectSwitchL10n.tr("PRONTO PER RESET / PERMUTA ✓", en = "READY FOR RESET / TRADE-IN ✓", fr = "PRÊT POUR RÉINITIALISATION ✓")
+    if (state == ThermalGuardState.NORMAL) return
+    val isCritical = state == ThermalGuardState.CRITICAL_COOLDOWN
+    val color = if (isCritical) DirectSwitchTheme.red else DirectSwitchTheme.orange
+    val rawLabel = bannerText?.takeIf { it.isNotBlank() } ?: if (isCritical) {
+        "Raffreddamento termico (45s)"
+    } else {
+        "Limite termico (1 flusso)"
     }
+    val label = DirectSwitchL10n.tr(rawLabel)
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = color.copy(alpha = 0.14f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.45f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(15.dp)
+            )
+            Text(
+                text = label,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
 
+@Composable
+fun NetworkIsolationHotspotCard(
+    verdict: NetworkDiagnosticVerdict,
+    onRetryConnect: () -> Unit
+) {
+    val accent = if (verdict.likelyApClientIsolation) DirectSwitchTheme.orange else DirectSwitchTheme.blue
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = DirectSwitchTheme.cardSurface,
-        border = BorderStroke(1.2.dp, accent.copy(alpha = 0.55f)),
+        color = accent.copy(alpha = 0.08f),
+        border = BorderStroke(1.2.dp, accent.copy(alpha = 0.45f)),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AppleSettingsIcon(icon = Icons.Filled.WifiTethering, color = accent)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = verdict.title,
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DirectSwitchTheme.textPrimary
+                    )
+                    Text(
+                        text = verdict.description,
+                        fontSize = 12.sp,
+                        color = DirectSwitchTheme.textSecondary
+                    )
+                }
+            }
+            for (stepLine in verdict.guidanceSteps) {
+                Text(
+                    text = stepLine,
+                    fontSize = 12.sp,
+                    color = DirectSwitchTheme.textPrimary,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+            }
+            DirectSwitchSecondaryButton(
+                text = DirectSwitchL10n.tr("Ho attivato l'Hotspot • Riprova collegamento"),
+                onClick = onRetryConnect
+            )
+        }
+    }
+}
+
+@Composable
+fun SmartCleanAndCompatCard(
+    smartClean: SmartCleanOptions,
+    convertHeicToJpeg: Boolean,
+    showHeicOption: Boolean,
+    onSmartCleanChange: (SmartCleanOptions) -> Unit,
+    onToggleConvertHeic: (Boolean) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val activeCount = listOf(
+        smartClean.mergeDuplicateContacts,
+        smartClean.skipExactDuplicatePhotosSha256,
+        smartClean.skipOldScreenshotsOlderThanMonths > 0,
+        showHeicOption && convertHeicToJpeg
+    ).count { it }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = DirectSwitchTheme.cardSurface,
+        border = BorderStroke(1.dp, DirectSwitchTheme.hairline),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
@@ -1234,167 +1196,96 @@ fun DecommissionAuditCard(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    AppleSettingsIcon(
-                        icon = if (report.readinessLevel == DecommissionReadinessLevel.READY_FOR_RESET_GREEN) {
-                            Icons.Filled.VerifiedUser
-                        } else {
-                            Icons.Filled.Shield
-                        },
-                        color = accent
-                    )
+                    AppleSettingsIcon(icon = Icons.Filled.Shield, color = DirectSwitchTheme.teal, size = 28.dp)
                     Column {
                         Text(
-                            text = DirectSwitchL10n.tr("Audit Anti-Lockout & Reset"),
-                            fontSize = 15.5.sp,
-                            fontWeight = FontWeight.Bold,
+                            text = DirectSwitchL10n.tr("Smart Clean & Compatibilità Pro"),
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.SemiBold,
                             color = DirectSwitchTheme.textPrimary
                         )
                         Text(
-                            text = badgeLabel,
+                            text = DirectSwitchL10n.tr(
+                                "$activeCount protezioni attive prima dell'invio",
+                                en = "$activeCount active protections before sending",
+                                fr = "$activeCount protections actives avant l'envoi"
+                            ),
                             fontSize = 11.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = accent
+                            color = DirectSwitchTheme.textSecondary
                         )
                     }
                 }
-                Surface(
-                    onClick = { if (!isRefreshing) onRefreshLiveAudit() },
-                    shape = RoundedCornerShape(10.dp),
-                    color = DirectSwitchTheme.blue.copy(alpha = 0.12f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(Icons.Filled.Refresh, contentDescription = DirectSwitchL10n.tr("Ricontrolla"), tint = DirectSwitchTheme.blue, modifier = Modifier.size(14.dp))
-                        Text(
-                            text = if (isRefreshing) "..." else DirectSwitchL10n.tr("Ricontrolla"),
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DirectSwitchTheme.blue
-                        )
-                    }
-                }
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = null,
+                    tint = DirectSwitchTheme.textSecondary
+                )
             }
 
-            if (report.missingCriticalApps.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = DirectSwitchL10n.tr("${report.missingCriticalApps.size} app critiche (SPID / Banche / 2FA) ancora assenti su ${report.peerName}:", en = "${report.missingCriticalApps.size} critical apps (ID / Banking / 2FA) still missing on ${report.peerName}:", fr = "${report.missingCriticalApps.size} apps critiques (Banques / 2FA) encore absentes sur ${report.peerName} :"),
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = DirectSwitchTheme.red
+            if (expanded) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(DirectSwitchL10n.tr("Unisci contatti duplicati (+39)"), fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                        Text(DirectSwitchL10n.tr("Fonde numeri e note in memoria senza toccare il vecchio telefono"), fontSize = 11.sp, color = DirectSwitchTheme.textSecondary)
+                    }
+                    Switch(
+                        checked = smartClean.mergeDuplicateContacts,
+                        onCheckedChange = { onSmartCleanChange(smartClean.copy(mergeDuplicateContacts = it)) },
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = DirectSwitchTheme.teal)
                     )
-                    report.missingCriticalApps.forEach { app ->
-                        val ack = app.canonicalId in acknowledgedAppIds
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DirectSwitchTheme.inputSurface)
-                                .clickable { onToggleAcknowledge(app.canonicalId) }
-                                .padding(9.dp),
-                            verticalAlignment = Alignment.Top,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (ack) Icons.Filled.CheckCircle else Icons.Filled.Warning,
-                                contentDescription = null,
-                                tint = if (ack) DirectSwitchTheme.green else DirectSwitchTheme.red,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(
-                                    text = "${app.appName} • ${app.riskKind.displayLabel}",
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = DirectSwitchTheme.textPrimary
-                                )
-                                Text(
-                                    text = app.guidance,
-                                    fontSize = 11.5.sp,
-                                    color = DirectSwitchTheme.textSecondary
-                                )
-                                Text(
-                                    text = DirectSwitchL10n.tr("Tocca per confermare di averla già migrata manualmente", en = "Tap to confirm you already migrated it manually", fr = "Touchez pour confirmer la migration manuelle"),
-                                    fontSize = 10.5.sp,
-                                    color = DirectSwitchTheme.blue
-                                )
-                            }
-                        }
-                    }
                 }
-            }
 
-            if (report.verifiedCriticalApps.isNotEmpty()) {
-                val names = report.verifiedCriticalApps.take(4).joinToString { it.appName }
-                Text(
-                    text = DirectSwitchL10n.tr("✓ ${report.verifiedCriticalApps.size} app critiche già verificate sul nuovo telefono ($names)", en = "✓ ${report.verifiedCriticalApps.size} critical apps verified on new phone ($names)", fr = "✓ ${report.verifiedCriticalApps.size} apps critiques vérifiées sur le nouveau téléphone ($names)"),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = DirectSwitchTheme.green
-                )
-            }
-
-            if (report.localOnlyContactsCount > 0) {
-                Text(
-                    text = if (report.contactsWereMigrated) {
-                        DirectSwitchL10n.tr("✓ Rilevati ${report.localOnlyContactsCount} contatti solo-SIM/locali: inclusi nella migrazione.", en = "✓ Found ${report.localOnlyContactsCount} SIM/local-only contacts: included in migration.", fr = "✓ ${report.localOnlyContactsCount} contacts locaux/SIM inclus dans la migration.")
-                    } else {
-                        DirectSwitchL10n.tr("⚠ Rilevati ${report.localOnlyContactsCount} contatti salvati SOLO su SIM/telefono e non migrati!", en = "⚠ Found ${report.localOnlyContactsCount} SIM/local-only contacts NOT migrated!", fr = "⚠ ${report.localOnlyContactsCount} contacts locaux/SIM NON migrés !")
-                    },
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (report.contactsWereMigrated) DirectSwitchTheme.green else DirectSwitchTheme.orange
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Surface(
-                    onClick = {
-                        val certText = DecommissionReadinessEvaluator.buildResetCertificateText(report, senderDeviceName)
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, DirectSwitchL10n.tr("DirectSwitch — Certificato Pronto per Reset", en = "DirectSwitch — Ready-for-Reset Certificate", fr = "DirectSwitch — Certificat Prêt pour Réinitialisation"))
-                            putExtra(Intent.EXTRA_TEXT, certText)
-                        }
-                        runCatching {
-                            context.startActivity(Intent.createChooser(shareIntent, DirectSwitchL10n.tr("Condividi Certificato Audit", en = "Share Audit Certificate", fr = "Partager le certificat d'audit")))
-                        }
-                    },
-                    shape = RoundedCornerShape(11.dp),
-                    color = accent.copy(alpha = 0.14f),
-                    modifier = Modifier.weight(1f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(
-                        modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.Share, contentDescription = null, tint = accent, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.size(6.dp))
-                        Text(DirectSwitchL10n.tr("Certificato Reset", en = "Reset Certificate", fr = "Certificat Reset"), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = accent)
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(DirectSwitchL10n.tr("Salta foto duplicate esatte (SHA-256)"), fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                        Text(DirectSwitchL10n.tr("Evita di copiare file identici pixel-per-pixel"), fontSize = 11.sp, color = DirectSwitchTheme.textSecondary)
                     }
+                    Switch(
+                        checked = smartClean.skipExactDuplicatePhotosSha256,
+                        onCheckedChange = { onSmartCleanChange(smartClean.copy(skipExactDuplicatePhotosSha256 = it)) },
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = DirectSwitchTheme.teal)
+                    )
                 }
 
-                if (report.readinessLevel == DecommissionReadinessLevel.READY_FOR_RESET_GREEN) {
-                    Surface(
-                        onClick = { AndroidDecommissionScanner.openDeviceResetSettings(context) },
-                        shape = RoundedCornerShape(11.dp),
-                        color = DirectSwitchTheme.inputSurface
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(DirectSwitchL10n.tr("Escludi vecchi screenshot (> 12 mesi)"), fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                        Text(DirectSwitchL10n.tr("Libera spazio evitando schermate datate"), fontSize = 11.sp, color = DirectSwitchTheme.textSecondary)
+                    }
+                    Switch(
+                        checked = smartClean.skipOldScreenshotsOlderThanMonths > 0,
+                        onCheckedChange = { onSmartCleanChange(smartClean.copy(skipOldScreenshotsOlderThanMonths = if (it) 12 else 0)) },
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = DirectSwitchTheme.teal)
+                    )
+                }
+
+                if (showHeicOption) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(
-                            modifier = Modifier.padding(vertical = 10.dp, horizontal = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(Icons.Filled.SettingsBackupRestore, contentDescription = null, tint = DirectSwitchTheme.textPrimary, modifier = Modifier.size(15.dp))
-                            Text(DirectSwitchL10n.tr("Impostazioni Reset", en = "Reset Settings", fr = "Paramètres Reset"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textPrimary)
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(DirectSwitchL10n.tr("Massima compatibilità HEIC → JPEG"), fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.textPrimary)
+                            Text(DirectSwitchL10n.tr("Converte foto HEIC mantenendo data scatto, rotazione e GPS"), fontSize = 11.sp, color = DirectSwitchTheme.textSecondary)
                         }
+                        Switch(
+                            checked = convertHeicToJpeg,
+                            onCheckedChange = onToggleConvertHeic,
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = DirectSwitchTheme.teal)
+                        )
                     }
                 }
             }
@@ -1402,59 +1293,111 @@ fun DecommissionAuditCard(
     }
 }
 
-// MARK: - Ponte Overflow DirectSwitch -> CloudSave
-
 @Composable
-fun OverflowBridgeCloudSaveCard(
-    plan: OverflowSplitPlan,
-    statusNotice: String?,
-    onLaunchCloudSaveOverflow: () -> Unit
+fun PostTransferReconciliationCard(
+    verifiedCount: Int,
+    missingIds: List<String>,
+    failedCount: Int = 0,
+    heicConvertedCount: Int,
+    smartCleanMergedContacts: Int,
+    smartCleanSkippedDuplicates: Int,
+    smartCleanSkippedScreenshots: Int,
+    onRepairMissing: (List<String>) -> Unit
 ) {
+    val allClean = missingIds.isEmpty()
+    val accent = if (allClean) DirectSwitchTheme.green else DirectSwitchTheme.orange
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = DirectSwitchTheme.cardSurface,
-        border = BorderStroke(1.2.dp, DirectSwitchTheme.blue.copy(alpha = 0.55f)),
+        color = accent.copy(alpha = 0.08f),
+        border = BorderStroke(1.2.dp, accent.copy(alpha = 0.4f)),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AppleSettingsIcon(icon = Icons.Filled.CloudUpload, color = DirectSwitchTheme.blue)
+                AppleSettingsIcon(
+                    icon = if (allClean) Icons.Filled.VerifiedUser else Icons.Filled.Warning,
+                    color = accent
+                )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = DirectSwitchL10n.tr("Ponte Overflow verso CloudSave"),
-                        fontSize = 15.5.sp,
+                        text = when {
+                            allClean && failedCount == 0 -> DirectSwitchL10n.tr("Verifica SHA-256 Post-Migrazione: 100% Integro")
+                            allClean -> DirectSwitchL10n.tr(
+                                "Verifica SHA-256: $verifiedCount file ricevuti integri",
+                                en = "SHA-256 Check: $verifiedCount received files verified",
+                                fr = "Vérification SHA-256 : $verifiedCount fichiers reçus intègres"
+                            )
+                            else -> DirectSwitchL10n.tr(
+                                "Rilevati ${missingIds.size} file mancanti o alterati",
+                                en = "${missingIds.size} missing or altered files detected",
+                                fr = "${missingIds.size} fichiers manquants ou altérés détectés"
+                            )
+                        },
+                        fontSize = 14.5.sp,
                         fontWeight = FontWeight.Bold,
                         color = DirectSwitchTheme.textPrimary
                     )
                     Text(
                         text = DirectSwitchL10n.tr(
-                            "${plan.overflowItems.size} file storici (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) pronti da parcheggiare cifrati AES-256 prima del reset.",
-                            en = "${plan.overflowItems.size} older files (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) ready to park with AES-256 encryption before reset.",
-                            fr = "${plan.overflowItems.size} anciens fichiers (${TransferDisplayFormatting.formatBytes(plan.overflowTotalBytes)}) prêts à être archivés chiffrés AES-256."
+                            "$verifiedCount file verificati con impronta crittografica end-to-end.",
+                            en = "$verifiedCount files verified with end-to-end cryptographic hash.",
+                            fr = "$verifiedCount fichiers vérifiés par empreinte cryptographique de bout en bout."
                         ),
                         fontSize = 12.sp,
                         color = DirectSwitchTheme.textSecondary
                     )
                 }
             }
-            if (!statusNotice.isNullOrBlank()) {
+
+            if (smartCleanMergedContacts > 0 || smartCleanSkippedDuplicates > 0 || smartCleanSkippedScreenshots > 0 || heicConvertedCount > 0) {
+                val statsParts = buildList {
+                    if (smartCleanMergedContacts > 0) add(
+                        DirectSwitchL10n.tr(
+                            "$smartCleanMergedContacts contatti uniti",
+                            en = "$smartCleanMergedContacts contacts merged",
+                            fr = "$smartCleanMergedContacts contacts fusionnés"
+                        )
+                    )
+                    if (smartCleanSkippedDuplicates > 0) add(
+                        DirectSwitchL10n.tr(
+                            "$smartCleanSkippedDuplicates foto duplicate saltate",
+                            en = "$smartCleanSkippedDuplicates duplicate photos skipped",
+                            fr = "$smartCleanSkippedDuplicates photos en double ignorées"
+                        )
+                    )
+                    if (smartCleanSkippedScreenshots > 0) add(
+                        DirectSwitchL10n.tr(
+                            "$smartCleanSkippedScreenshots vecchi screenshot esclusi",
+                            en = "$smartCleanSkippedScreenshots old screenshots excluded",
+                            fr = "$smartCleanSkippedScreenshots anciennes captures exclues"
+                        )
+                    )
+                    if (heicConvertedCount > 0) add("$heicConvertedCount HEIC→JPEG")
+                }
                 Text(
-                    text = statusNotice,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = DirectSwitchTheme.teal
+                    text = "Smart Clean: ${statsParts.joinToString(" • ")}",
+                    fontSize = 11.5.sp,
+                    color = DirectSwitchTheme.teal,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
-            DirectSwitchPrimaryButton(
-                text = DirectSwitchL10n.tr("Salva ${plan.overflowItems.size} file eccedenti su CloudSave", en = "Save ${plan.overflowItems.size} overflow files to CloudSave", fr = "Enregistrer ${plan.overflowItems.size} fichiers sur CloudSave"),
-                onClick = onLaunchCloudSaveOverflow
-            )
+
+            if (missingIds.isNotEmpty()) {
+                DirectSwitchPrimaryButton(
+                    text = DirectSwitchL10n.tr(
+                        "Ripara ${missingIds.size} file mancanti (1 tocco)",
+                        en = "Repair ${missingIds.size} missing files (1 tap)",
+                        fr = "Réparer ${missingIds.size} fichiers manquants (1 geste)"
+                    ),
+                    onClick = { onRepairMissing(missingIds) }
+                )
+            }
         }
     }
 }

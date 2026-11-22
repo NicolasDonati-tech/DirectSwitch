@@ -422,16 +422,6 @@ enum iOSLicenseStore {
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 
-    /// Solo per cross-sell informativo: non sblocca il Pass Pro senza verifica crittografica.
-    static var isCloudSaveInstalled: Bool {
-        guard let url = URL(string: "com.cloudsave.ios://") else { return false }
-        return UIApplication.shared.canOpenURL(url)
-    }
-
-    static var hasVerifiedCloudSaveProEntitlement: Bool {
-        false
-    }
-
     /// Acquisto nativo StoreKit 2 con sblocco immediato pre-pubblicazione quando lo SKU non è ancora attivo su App Store Connect.
     @MainActor
     static func purchaseCrossOsPass(allowPreLaunchFallback: Bool = true) async -> (Bool, String) {

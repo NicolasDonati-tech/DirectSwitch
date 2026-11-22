@@ -129,7 +129,6 @@ import com.directswitch.android.migrators.DateSyncPreloadState
 import com.directswitch.android.migrators.DeviceDataAnalyzer
 import com.directswitch.android.migrators.DocumentPrecheckReport
 import com.directswitch.android.migrators.DocumentsAndWhatsAppScanner
-import com.directswitch.android.migrators.GoogleSetupBridge
 import com.directswitch.android.migrators.InstalledAppCategoryGroup
 import com.directswitch.android.migrators.InstalledAppsScanner
 import com.directswitch.android.migrators.LocalDeviceScanSummary
@@ -145,10 +144,12 @@ import com.directswitch.android.protocol.DirectSwitchLanguage
 import com.directswitch.android.protocol.DiscoveryBeaconPayload
 import com.directswitch.android.protocol.InstalledAppRecord
 import com.directswitch.android.protocol.MediaTransferFilterOptions
-import com.directswitch.android.protocol.MigrationReceiptBuilder
+import com.directswitch.android.protocol.NetworkDiagnosticVerdict
 import com.directswitch.android.protocol.QrPairingPayload
+import com.directswitch.android.protocol.SmartCleanOptions
 import com.directswitch.android.protocol.SpaceReliefActionKind
 import com.directswitch.android.protocol.SpaceReliefPlanner
+import com.directswitch.android.protocol.ThermalGuardState
 import com.directswitch.android.protocol.TransferCheckpointRecord
 import com.directswitch.android.protocol.TransferCheckpointStore
 import com.directswitch.android.protocol.TransferDisplayFormatting
@@ -195,8 +196,7 @@ private enum class WizardStep {
     SENDER_CONNECT,
     SENDER_SELECT_CATEGORIES,
     TRANSFER_PREPARING,
-    TRANSFER_PROGRESS,
-    QUICK_PORTAL
+    TRANSFER_PROGRESS
 }
 
 private data class CategorySelectionState(
@@ -233,8 +233,6 @@ fun DirectSwitchMainScreen(
     }
     var activeDeltaBaseline by remember { mutableStateOf<CompletedMigrationRecord?>(null) }
     var forceBatteryTriage by remember { mutableStateOf(false) }
-    var acknowledgedAuditAppIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var isRefreshingAudit by remember { mutableStateOf(false) }
     var step by remember { mutableStateOf(WizardStep.HOME) }
     var scanSummary by remember { mutableStateOf<LocalDeviceScanSummary?>(null) }
 
@@ -246,6 +244,10 @@ fun DirectSwitchMainScreen(
     val activePairingPin by server.activePairingPin.collectAsState()
     val serverProgress by server.progress.collectAsState()
     val clientProgress by client.progress.collectAsState()
+    val clientNetworkDiagnostic by client.networkDiagnostic.collectAsState()
+
+    var smartCleanOptions by remember { mutableStateOf(SmartCleanOptions()) }
+    var convertHeicToJpeg by remember { mutableStateOf(false) }
 
     var activeQrPayload by remember { mutableStateOf<QrPairingPayload?>(null) }
     var useOffline5GhzHotspot by remember { mutableStateOf(false) }
@@ -260,8 +262,6 @@ fun DirectSwitchMainScreen(
     var manualQrInput by remember { mutableStateOf("") }
     var showCameraScanner by remember { mutableStateOf(false) }
 
-    var bootstrapPortalUrl by remember { mutableStateOf<String?>(null) }
-    var bootstrapWifiQrString by remember { mutableStateOf<String?>(null) }
     var vaultStatusNote by remember { mutableStateOf<String?>(null) }
     var pendingDocPrecheckReport by remember { mutableStateOf<DocumentPrecheckReport?>(null) }
 
@@ -287,8 +287,6 @@ fun DirectSwitchMainScreen(
     var isLoadingAppsCatalog by remember { mutableStateOf(false) }
     var isReceiverFlow by remember { mutableStateOf(false) }
 
-    var showGoogleBridgeSheet by remember { mutableStateOf(false) }
-    var googleBridgeNote by remember { mutableStateOf<String?>(null) }
     var pendingPermissionContinuation by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
@@ -356,33 +354,42 @@ fun DirectSwitchMainScreen(
         onDispose { currentLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    fun buildRequiredPermissions(): List<String> {
+    fun buildSenderEntryPermissions(): List<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            listOf(
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+                Manifest.permission.POST_NOTIFICATIONS
+            )
+        } else {
+            listOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        }
+    }
+
+    fun buildReceiverEntryPermissions(): List<String> {
         val perms = mutableListOf(
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.WRITE_CONTACTS,
             Manifest.permission.READ_CALENDAR,
-            Manifest.permission.WRITE_CALENDAR,
-            Manifest.permission.READ_SMS,
-            Manifest.permission.READ_CALL_LOG,
-            Manifest.permission.WRITE_CALL_LOG,
-            Manifest.permission.CAMERA
+            Manifest.permission.WRITE_CALENDAR
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(Manifest.permission.READ_MEDIA_IMAGES)
-            perms.add(Manifest.permission.READ_MEDIA_VIDEO)
-            perms.add(Manifest.permission.READ_MEDIA_AUDIO)
             perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
             perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+                perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
         }
         return perms
     }
 
-    fun requestPermissionsThen(actionAfter: (() -> Unit)? = null) {
-        val missing = buildRequiredPermissions().filter { perm ->
+    fun requestEntryPermissionsThen(perms: List<String>, actionAfter: (() -> Unit)? = null) {
+        val missing = perms.filter { perm ->
             ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isEmpty()) {
@@ -602,8 +609,6 @@ fun DirectSwitchMainScreen(
         selectedBeaconForPin = null
         pinInput = ""
         pinErrorNote = null
-        bootstrapPortalUrl = null
-        bootstrapWifiQrString = null
         resetCategorySelectionsAndPreloads()
         step = WizardStep.HOME
     }
@@ -614,7 +619,6 @@ fun DirectSwitchMainScreen(
             WizardStep.RECEIVER_WAIT_CODE,
             WizardStep.RECEIVER_CONNECTED,
             WizardStep.TRANSFER_PREPARING,
-            WizardStep.QUICK_PORTAL,
             WizardStep.TRANSFER_PROGRESS -> resetAndGoHome()
             WizardStep.SENDER_CONNECT -> {
                 showCameraScanner = false
@@ -724,14 +728,12 @@ fun DirectSwitchMainScreen(
     fun launchSenderTransfer(
         targetPayload: QrPairingPayload,
         onlyRetryItemIds: Set<String>? = null,
-        resumeCheckpoint: TransferCheckpointRecord? = null,
-        preserveOverflowPlan: Boolean = false
+        resumeCheckpoint: TransferCheckpointRecord? = null
     ) {
         isLaunchingTransfer = false
         pendingDocPrecheckReport = null
         isReceiverFlow = false
         vaultStatusNote = null
-        acknowledgedAuditAppIds = emptySet()
         val selectedDetected = if (categories.installedApps && detectedAppsCatalog.isNotEmpty()) {
             detectedAppsCatalog.filter { it.packageName !in deselectedAppPackages }
         } else {
@@ -752,6 +754,8 @@ fun DirectSwitchMainScreen(
         val pwdFilesSnapshot = stagedPasswordCsvFiles
         val deltaSnapshot = activeDeltaBaseline
         val triageSnapshot = forceBatteryTriage
+        val smartCleanSnapshot = smartCleanOptions
+        val heicCompatSnapshot = convertHeicToJpeg
         scope.launch {
             client.executeTransfer(
                 qrPayload = targetPayload,
@@ -774,9 +778,13 @@ fun DirectSwitchMainScreen(
                 stagedPasswordCsvFiles = pwdFilesSnapshot,
                 deltaBaseline = deltaSnapshot,
                 forceBatteryTriage = triageSnapshot,
-                preserveOverflowBridgePlan = preserveOverflowPlan
+                smartCleanOptions = smartCleanSnapshot,
+                convertHeicToJpeg = heicCompatSnapshot
             )
-            stagedPasswordCsvFiles = emptyList()
+            val finalProg = client.progress.value
+            if (finalProg.isCompleted && finalProg.failedItemsCount == 0 && finalProg.reconciliationMissingIds.isEmpty()) {
+                stagedPasswordCsvFiles = emptyList()
+            }
             resumableCheckpoint = TransferCheckpointStore.load(context)
             completedDeltaRecord = CompletedMigrationStore.load(CompletedMigrationStore.defaultFile(context.filesDir))
         }
@@ -808,17 +816,7 @@ fun DirectSwitchMainScreen(
 
     fun applySpaceReliefAndRestart(action: SpaceReliefActionKind) {
         val target = pairedTargetPayload ?: return
-        var preserveOverflow = false
         when (action) {
-            SpaceReliefActionKind.OVERFLOW_OLDER_TO_CLOUDSAVE -> {
-                val plan = clientProgress.overflowBridgePlan
-                if (plan != null && plan.cutoffEpochMillis > 0L) {
-                    mediaFilters = mediaFilters.copy(photosLastYearOnly = true, videosLastYearOnly = true)
-                } else {
-                    mediaFilters = mediaFilters.copy(maxVideoBytes = SpaceReliefPlanner.HEAVY_VIDEO_THRESHOLD_BYTES)
-                }
-                preserveOverflow = true
-            }
             SpaceReliefActionKind.EXCLUDE_HEAVY_VIDEOS_300MB -> {
                 mediaFilters = mediaFilters.copy(maxVideoBytes = SpaceReliefPlanner.HEAVY_VIDEO_THRESHOLD_BYTES)
             }
@@ -829,7 +827,7 @@ fun DirectSwitchMainScreen(
                 categories = categories.copy(videos = false)
             }
         }
-        launchSenderTransfer(target, preserveOverflowPlan = preserveOverflow)
+        launchSenderTransfer(target)
     }
 
     val topTitle = when (step) {
@@ -844,7 +842,6 @@ fun DirectSwitchMainScreen(
             if (done) DirectSwitchL10n.tr("Completato")
             else DirectSwitchL10n.tr("Copia dati")
         }
-        WizardStep.QUICK_PORTAL -> DirectSwitchL10n.tr("QR Rapido", en = "Quick QR", fr = "QR Rapide")
     }
 
     Column(
@@ -908,7 +905,7 @@ fun DirectSwitchMainScreen(
                         },
                         completedDeltaRecord = completedDeltaRecord,
                         onStartDeltaSync = { rec ->
-                            requestPermissionsThen {
+                            requestEntryPermissionsThen(buildSenderEntryPermissions()) {
                                 isReceiverFlow = false
                                 pairedTargetPayload = null
                                 selectedBeaconForPin = null
@@ -922,7 +919,7 @@ fun DirectSwitchMainScreen(
                                         photos = rec.lastScope.photos,
                                         videos = rec.lastScope.videos,
                                         calendars = rec.lastScope.calendars,
-                                        sms = true,
+                                        sms = false,
                                         callLogs = rec.lastScope.callLogs,
                                         audio = rec.lastScope.audio,
                                         documents = rec.lastScope.documents,
@@ -940,7 +937,7 @@ fun DirectSwitchMainScreen(
                             activeDeltaBaseline = null
                         },
                         onStartReceive = {
-                            requestPermissionsThen {
+                            requestEntryPermissionsThen(buildReceiverEntryPermissions()) {
                                 isReceiverFlow = true
                                 val payload = server.startReceiverSession()
                                 activeQrPayload = payload
@@ -949,7 +946,7 @@ fun DirectSwitchMainScreen(
                             }
                         },
                         onStartSend = {
-                            requestPermissionsThen {
+                            requestEntryPermissionsThen(buildSenderEntryPermissions()) {
                                 isReceiverFlow = false
                                 activeDeltaBaseline = null
                                 pairedTargetPayload = null
@@ -959,31 +956,6 @@ fun DirectSwitchMainScreen(
                                 resetCategorySelectionsAndPreloads()
                                 autoDiscovery.startScanningForNewDevices()
                                 step = WizardStep.SENDER_CONNECT
-                            }
-                        },
-                        onOpenGoogleBridge = {
-                            googleBridgeNote = null
-                            showGoogleBridgeSheet = true
-                        },
-                        onOpenQuickPortal = {
-                            requestPermissionsThen {
-                                if (LocalNetworkAddresses.listPrivateIpv4Addresses().isNotEmpty()) {
-                                    bootstrapWifiQrString = null
-                                    bootstrapPortalUrl = server.startBootstrapPortalSession()
-                                    step = WizardStep.QUICK_PORTAL
-                                } else {
-                                    hotspotController.startHotspot { ssid, pass, _ ->
-                                        if (!ssid.isNullOrBlank() && !pass.isNullOrBlank()) {
-                                            val escSsid = ssid.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
-                                            val escPass = pass.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
-                                            bootstrapWifiQrString = "WIFI:T:WPA;S:$escSsid;P:$escPass;;"
-                                        } else {
-                                            bootstrapWifiQrString = null
-                                        }
-                                        bootstrapPortalUrl = server.startBootstrapPortalSession()
-                                        step = WizardStep.QUICK_PORTAL
-                                    }
-                                }
                             }
                         }
                     )
@@ -1035,6 +1007,7 @@ fun DirectSwitchMainScreen(
                         pinInput = pinInput,
                         isPinPairingBusy = isPinPairingBusy,
                         errorNote = pinErrorNote,
+                        networkDiagnostic = clientNetworkDiagnostic,
                         showCameraScanner = showCameraScanner,
                         manualQrInput = manualQrInput,
                         onSelectBeacon = { beacon ->
@@ -1065,7 +1038,23 @@ fun DirectSwitchMainScreen(
                                 }
                             }
                         },
-                        onToggleCamera = { showCameraScanner = !showCameraScanner },
+                        onToggleCamera = {
+                            if (showCameraScanner) {
+                                showCameraScanner = false
+                            } else {
+                                requestSpecificPermissionsThen(listOf(Manifest.permission.CAMERA)) {
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                        showCameraScanner = true
+                                    } else {
+                                        pinErrorNote = DirectSwitchL10n.tr(
+                                            "Permesso Fotocamera necessario per inquadrare il codice QR.",
+                                            en = "Camera permission is required to scan the QR code.",
+                                            fr = "L'autorisation Appareil photo est requise pour scanner le code QR."
+                                        )
+                                    }
+                                }
+                            }
+                        },
                         onQrScanned = { raw ->
                             runCatching { QrPairingPayload.fromJson(raw) }
                                 .onSuccess { paired ->
@@ -1096,6 +1085,26 @@ fun DirectSwitchMainScreen(
                                 .onFailure {
                                     pinErrorNote = "Codice manuale non valido."
                                 }
+                        },
+                        onRetryNetwork = {
+                            pinErrorNote = null
+                            autoDiscovery.startScanningForNewDevices()
+                            val beacon = selectedBeaconForPin
+                            if (beacon != null && pinInput.length == 6 && !isPinPairingBusy) {
+                                isPinPairingBusy = true
+                                scope.launch {
+                                    val res = client.pairWithBeaconUsingPin(beacon, pinInput)
+                                    isPinPairingBusy = false
+                                    res.onSuccess { paired ->
+                                        autoDiscovery.stopScanning()
+                                        pairedTargetPayload = paired
+                                        scope.launch { client.sendPairAck(paired) }
+                                        step = WizardStep.SENDER_SELECT_CATEGORIES
+                                    }.onFailure { err ->
+                                        pinErrorNote = err.localizedMessage ?: "Codice errato o scaduto."
+                                    }
+                                }
+                            }
                         }
                     )
                 }
@@ -1237,8 +1246,12 @@ fun DirectSwitchMainScreen(
                             },
                             activeDeltaBaseline = activeDeltaBaseline,
                             forceBatteryTriage = forceBatteryTriage,
+                            smartCleanOptions = smartCleanOptions,
+                            convertHeicToJpeg = convertHeicToJpeg,
                             isLaunchingTransfer = isLaunchingTransfer,
                             onToggleForceBatteryTriage = { forceBatteryTriage = it },
+                            onSmartCleanChange = { smartCleanOptions = it },
+                            onToggleConvertHeic = { convertHeicToJpeg = it },
                             onClearDeltaBaseline = { activeDeltaBaseline = null },
                             onStartTransfer = {
                                 if (isLaunchingTransfer) return@SenderCategoriesWizardView
@@ -1282,28 +1295,12 @@ fun DirectSwitchMainScreen(
                     TransferProgressWizardView(
                         progress = if (isReceiverFlow) serverProgress else clientProgress,
                         isReceiver = isReceiverFlow,
-                        acknowledgedAuditAppIds = acknowledgedAuditAppIds,
-                        isRefreshingAudit = isRefreshingAudit,
-                        onToggleAcknowledgeAudit = { appId ->
-                            val next = if (appId in acknowledgedAuditAppIds) {
-                                acknowledgedAuditAppIds - appId
-                            } else {
-                                acknowledgedAuditAppIds + appId
+                        networkDiagnostic = if (isReceiverFlow) null else clientNetworkDiagnostic,
+                        onRetryNetwork = {
+                            val target = pairedTargetPayload
+                            if (!isReceiverFlow && target != null) {
+                                launchSenderTransfer(target)
                             }
-                            acknowledgedAuditAppIds = next
-                            scope.launch {
-                                client.refreshLiveDecommissionAudit(null, acknowledgedAppIds = next)
-                            }
-                        },
-                        onRefreshLiveAudit = {
-                            scope.launch {
-                                isRefreshingAudit = true
-                                client.refreshLiveDecommissionAudit(pairedTargetPayload, acknowledgedAppIds = acknowledgedAuditAppIds)
-                                isRefreshingAudit = false
-                            }
-                        },
-                        onLaunchCloudSaveOverflow = {
-                            client.launchOverflowBridgeToCloudSave()
                         },
                         onApplySpaceRelief = { action -> applySpaceReliefAndRestart(action) },
                         onRetrySkippedOnly = { ids ->
@@ -1313,14 +1310,6 @@ fun DirectSwitchMainScreen(
                             }
                         },
                         onFinish = { resetAndGoHome() }
-                    )
-                }
-
-                WizardStep.QUICK_PORTAL -> {
-                    QuickPortalWizardView(
-                        wifiQrString = bootstrapWifiQrString,
-                        portalUrl = bootstrapPortalUrl,
-                        onClose = { resetAndGoHome() }
                     )
                 }
             }
@@ -1429,32 +1418,6 @@ fun DirectSwitchMainScreen(
             }
         )
     }
-
-    if (showGoogleBridgeSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showGoogleBridgeSheet = false },
-            sheetState = sheetState,
-            containerColor = DirectSwitchTheme.canvasMid
-        ) {
-            GoogleSetupBridgeSheetContent(
-                note = googleBridgeNote,
-                onLaunchNewAndroidRestore = {
-                    val (_, msg) = GoogleSetupBridge.launchNewPhonePostSetupRestore(context)
-                    googleBridgeNote = msg
-                },
-                onLaunchIphoneToAndroidCable = {
-                    val (_, msg) = GoogleSetupBridge.launchIphoneToAndroidGoogleRestore(context, preferWirelessQr = true)
-                    googleBridgeNote = msg
-                },
-                onLaunchOldAndroidSend = {
-                    val (_, msg) = GoogleSetupBridge.launchOldPhoneGoogleNearbySetup(context)
-                    googleBridgeNote = msg
-                },
-                onClose = { showGoogleBridgeSheet = false }
-            )
-        }
-    }
 }
 
 // MARK: - 1. Home pulita (solo Invia sopra e Ricevi sotto, sottotitoli dentro ⓘ)
@@ -1470,9 +1433,7 @@ private fun AndroidHomeView(
     onStartDeltaSync: (CompletedMigrationRecord) -> Unit,
     onDismissDelta: () -> Unit,
     onStartReceive: () -> Unit,
-    onStartSend: () -> Unit,
-    onOpenGoogleBridge: () -> Unit,
-    onOpenQuickPortal: () -> Unit
+    onStartSend: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1506,9 +1467,9 @@ private fun AndroidHomeView(
             InfoCircleButton(
                 title = "DirectSwitch",
                 message = DirectSwitchL10n.tr(
-                    "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud.",
-                    en = "Copy your data without resetting: transfers contacts, photos, 4K videos, calendars, SMS, call logs, audio, documents and WhatsApp chats directly between two already set-up phones over Wi-Fi P2P or USB-C.",
-                    fr = "Copiez vos données sans réinitialiser : contacts, photos, vidéos 4K, calendriers, SMS, appels, audio, documents et WhatsApp directement en Wi-Fi P2P ou USB-C."
+                    "Copia i tuoi dati senza formattare: trasferisce rubrica, foto, video 4K, calendari, SMS, chiamate, audio, documenti e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi locale o Hotspot 5GHz senza passare dal cloud.",
+                    en = "Copy your data without resetting: transfers contacts, photos, 4K videos, calendars, SMS, call logs, audio, documents and WhatsApp chats directly between two already set-up phones over local Wi-Fi or 5GHz Hotspot.",
+                    fr = "Copiez vos données sans réinitialiser : contacts, photos, vidéos 4K, calendriers, SMS, appels, audio, documents et WhatsApp directement en Wi-Fi local ou partage 5 GHz."
                 )
             )
         }
@@ -1885,6 +1846,7 @@ private fun SenderConnectWizardView(
     pinInput: String,
     isPinPairingBusy: Boolean,
     errorNote: String?,
+    networkDiagnostic: NetworkDiagnosticVerdict?,
     showCameraScanner: Boolean,
     manualQrInput: String,
     onSelectBeacon: (DiscoveryBeaconPayload) -> Unit,
@@ -1893,7 +1855,8 @@ private fun SenderConnectWizardView(
     onToggleCamera: () -> Unit,
     onQrScanned: (String) -> Unit,
     onManualInputChange: (String) -> Unit,
-    onApplyManualCode: () -> Unit
+    onApplyManualCode: () -> Unit,
+    onRetryNetwork: () -> Unit
 ) {
     var showManualInput by remember { mutableStateOf(false) }
 
@@ -2070,6 +2033,13 @@ private fun SenderConnectWizardView(
             Text(errorNote, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
         }
     }
+
+    if (networkDiagnostic != null) {
+        NetworkIsolationHotspotCard(
+            verdict = networkDiagnostic,
+            onRetryConnect = onRetryNetwork
+        )
+    }
 }
 
 // MARK: - 3B. Passo 2 Mittente: Scegli cosa copiare (tendine inline stile iPhone, tutto da spuntare)
@@ -2131,8 +2101,12 @@ private fun SenderCategoriesWizardView(
     onChangeDevice: () -> Unit,
     activeDeltaBaseline: CompletedMigrationRecord?,
     forceBatteryTriage: Boolean,
+    smartCleanOptions: SmartCleanOptions,
+    convertHeicToJpeg: Boolean,
     isLaunchingTransfer: Boolean = false,
     onToggleForceBatteryTriage: (Boolean) -> Unit,
+    onSmartCleanChange: (SmartCleanOptions) -> Unit,
+    onToggleConvertHeic: (Boolean) -> Unit,
     onClearDeltaBaseline: () -> Unit,
     onStartTransfer: () -> Unit
 ) {
@@ -2554,10 +2528,20 @@ private fun SenderCategoriesWizardView(
         }
     }
 
-    BatteryTriageToggleCard(
-        battery = batterySnap,
-        enabled = forceBatteryTriage,
-        onToggle = onToggleForceBatteryTriage
+    if (batterySnap.recommendsAutoTriage || (!batterySnap.isCharging && batterySnap.percent <= 25) || forceBatteryTriage) {
+        BatteryTriageToggleCard(
+            battery = batterySnap,
+            enabled = forceBatteryTriage,
+            onToggle = onToggleForceBatteryTriage
+        )
+    }
+
+    SmartCleanAndCompatCard(
+        smartClean = smartCleanOptions,
+        convertHeicToJpeg = convertHeicToJpeg,
+        showHeicOption = categories.photos,
+        onSmartCleanChange = onSmartCleanChange,
+        onToggleConvertHeic = onToggleConvertHeic
     )
 
     val isOnlyWhatsAppSelected = !isCrossOs && categories.whatsAppVault &&
@@ -2581,11 +2565,8 @@ private fun SenderCategoriesWizardView(
 private fun TransferProgressWizardView(
     progress: LiveTransferProgress,
     isReceiver: Boolean,
-    acknowledgedAuditAppIds: Set<String>,
-    isRefreshingAudit: Boolean,
-    onToggleAcknowledgeAudit: (String) -> Unit,
-    onRefreshLiveAudit: () -> Unit,
-    onLaunchCloudSaveOverflow: () -> Unit,
+    networkDiagnostic: NetworkDiagnosticVerdict?,
+    onRetryNetwork: () -> Unit,
     onApplySpaceRelief: (SpaceReliefActionKind) -> Unit,
     onRetrySkippedOnly: (List<String>) -> Unit,
     onFinish: () -> Unit
@@ -2794,6 +2775,12 @@ private fun TransferProgressWizardView(
             if (progress.batteryTriageActive) {
                 BatteryTriageActivePill()
             }
+            if (progress.thermalGuardState != ThermalGuardState.NORMAL) {
+                ThermalGuardBannerPill(
+                    state = progress.thermalGuardState,
+                    bannerText = progress.thermalBanner
+                )
+            }
         }
     }
 
@@ -2973,15 +2960,6 @@ private fun TransferProgressWizardView(
         )
     }
 
-    val overflowPlan = progress.overflowBridgePlan
-    if (!isReceiver && overflowPlan != null && reliefOffer == null && (progress.isCompleted || progress.errorMessage == null)) {
-        OverflowBridgeCloudSaveCard(
-            plan = overflowPlan,
-            statusNotice = progress.overflowBridgeStagedNotice,
-            onLaunchCloudSaveOverflow = onLaunchCloudSaveOverflow
-        )
-    }
-
     if (progress.skippedItems.isNotEmpty()) {
         SkippedItemsReportCard(
             items = progress.skippedItems,
@@ -2994,51 +2972,31 @@ private fun TransferProgressWizardView(
         DirectSwitchCard(padding = 14.dp) {
             Text(progress.errorMessage, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
         }
-    }
-
-    val auditReport = progress.decommissionAuditReport
-    if (!isReceiver && progress.isCompleted && auditReport != null) {
-        val senderModel = remember { "${Build.MANUFACTURER} ${Build.MODEL}".trim() }
-        DecommissionAuditCard(
-            report = auditReport,
-            senderDeviceName = senderModel,
-            acknowledgedAppIds = acknowledgedAuditAppIds,
-            isRefreshing = isRefreshingAudit,
-            onToggleAcknowledge = onToggleAcknowledgeAudit,
-            onRefreshLiveAudit = onRefreshLiveAudit
-        )
-    }
-
-    if (progress.isCompleted) {
-        val activeLang = DirectSwitchL10n.activeLanguage
-        val checklistItems = remember(progress.pendingNativeWhatsAppMigration, progress.receivedInstalledApps.size, progress.skippedItems.size, progress.failedItemsCount, activeLang) {
-            MigrationReceiptBuilder.defaultChecklist(
-                hasWhatsApp = progress.activeTransferScope.whatsApp || progress.pendingNativeWhatsAppMigration,
-                hasApps = progress.activeTransferScope.apps || progress.receivedInstalledApps.isNotEmpty(),
-                hasSkipped = progress.skippedItems.isNotEmpty() || progress.failedItemsCount > 0,
-                lang = activeLang
+        if (!isReceiver && networkDiagnostic != null) {
+            NetworkIsolationHotspotCard(
+                verdict = networkDiagnostic,
+                onRetryConnect = onRetryNetwork
             )
         }
-        val receiptText = remember(progress, activeLang) {
-            MigrationReceiptBuilder.buildReceiptText(
-                peerName = progress.peerDeviceName,
-                isReceiver = isReceiver,
-                connectionMedium = progress.connectionMedium,
-                completedFiles = progress.completedItems,
-                totalBytes = if (progress.transferredBytes > 0L) progress.transferredBytes else progress.totalBytes,
-                mergedContacts = progress.mergedContacts,
-                importedCalendars = progress.importedCalendars,
-                importedReminders = progress.importedReminders,
-                importedSms = progress.importedSms,
-                importedCallLogs = progress.importedCallLogs,
-                appsCount = progress.receivedInstalledApps.size,
-                skippedCount = maxOf(progress.skippedItems.size, progress.failedItemsCount),
-                lang = activeLang
-            )
-        }
-        PostMigrationChecklistCard(
-            items = checklistItems,
-            receiptText = receiptText
+    }
+
+    if (!isReceiver && progress.isCompleted &&
+        (progress.reconciliationVerifiedCount > 0 ||
+            progress.reconciliationMissingIds.isNotEmpty() ||
+            progress.heicConvertedCount > 0 ||
+            progress.smartCleanMergedContactsCount > 0 ||
+            progress.smartCleanSkippedDuplicatesCount > 0 ||
+            progress.smartCleanSkippedScreenshotsCount > 0)
+    ) {
+        PostTransferReconciliationCard(
+            verifiedCount = progress.reconciliationVerifiedCount,
+            missingIds = progress.reconciliationMissingIds,
+            failedCount = progress.failedItemsCount,
+            heicConvertedCount = progress.heicConvertedCount,
+            smartCleanMergedContacts = progress.smartCleanMergedContactsCount,
+            smartCleanSkippedDuplicates = progress.smartCleanSkippedDuplicatesCount,
+            smartCleanSkippedScreenshots = progress.smartCleanSkippedScreenshotsCount,
+            onRepairMissing = { missingIds -> onRetrySkippedOnly(missingIds) }
         )
     }
 
@@ -3086,64 +3044,6 @@ private fun SummaryItemRow(icon: ImageVector, color: Color, title: String, value
         }
         Text(value, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.textSecondary)
     }
-}
-
-// MARK: - Portale QR Rapido (Rubrica .vcf / APK senza internet)
-
-@Composable
-private fun QuickPortalWizardView(
-    wifiQrString: String?,
-    portalUrl: String?,
-    onClose: () -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text("Inquadra con la Fotocamera", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-        Text("Scarica subito la Rubrica su iPhone o l'app DirectSwitch senza internet", fontSize = 14.sp, color = DirectSwitchTheme.textSecondary, textAlign = TextAlign.Center)
-    }
-
-    DirectSwitchCard {
-        if (wifiQrString != null) {
-            Text("1. Inquadra per collegarti all'Hotspot 5GHz", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
-            val wifiBmp = remember(wifiQrString) { QrBitmapGenerator.generate(wifiQrString, 520) }
-            if (wifiBmp != null) {
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Image(
-                        bitmap = wifiBmp.asImageBitmap(),
-                        contentDescription = "QR Wi-Fi",
-                        modifier = Modifier
-                            .size(185.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color.White)
-                            .padding(8.dp)
-                    )
-                }
-            }
-            Text("2. Poi inquadra per aprire il portale", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DirectSwitchTheme.blue)
-        }
-
-        if (portalUrl != null) {
-            val portalBmp = remember(portalUrl) { QrBitmapGenerator.generate(portalUrl, 580) }
-            if (portalBmp != null) {
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Image(
-                        bitmap = portalBmp.asImageBitmap(),
-                        contentDescription = "QR Portale",
-                        modifier = Modifier
-                            .size(210.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color.White)
-                            .padding(10.dp)
-                    )
-                }
-            }
-        }
-    }
-
-    DirectSwitchPrimaryButton(text = "Chiudi", onClick = onClose)
 }
 
 @Composable
@@ -3626,45 +3526,6 @@ private fun preparationCategoryStyle(id: String): Pair<ImageVector, Color> = whe
     "documents" -> Icons.Filled.Description to DirectSwitchTheme.teal
     "apps" -> Icons.Filled.Apps to DirectSwitchTheme.blue
     else -> Icons.Filled.Folder to DirectSwitchTheme.slate
-}
-
-@Composable
-private fun GoogleSetupBridgeSheetContent(
-    note: String?,
-    onLaunchNewAndroidRestore: () -> Unit,
-    onLaunchIphoneToAndroidCable: () -> Unit,
-    onLaunchOldAndroidSend: () -> Unit,
-    onClose: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(DirectSwitchTheme.backgroundBrush)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            AppleSettingsIcon(icon = Icons.Filled.SwapHoriz, color = DirectSwitchTheme.slate)
-            Text("Passa a Android / Configura", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = DirectSwitchTheme.textPrimary)
-        }
-        Text(
-            "Avvia lo strumento nativo di Google anche se il nuovo telefono è già configurato:",
-            fontSize = 14.sp,
-            color = DirectSwitchTheme.textSecondary
-        )
-        DirectSwitchPrimaryButton(text = "Trasferisci chat WhatsApp da iPhone (QR in app)", onClick = onLaunchIphoneToAndroidCable)
-        DirectSwitchSecondaryButton(text = "Ricevi su questo Android già avviato", onClick = onLaunchNewAndroidRestore)
-        DirectSwitchSecondaryButton(text = "Invia da questo vecchio Android", onClick = onLaunchOldAndroidSend)
-
-        if (!note.isNullOrBlank()) {
-            Text(note, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.blue)
-        }
-
-        TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
-            Text("Chiudi", color = DirectSwitchTheme.textSecondary, fontWeight = FontWeight.SemiBold)
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-    }
 }
 
 // MARK: - Scanner QR CameraX

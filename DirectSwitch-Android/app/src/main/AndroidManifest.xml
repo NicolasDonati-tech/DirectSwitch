@@ -62,11 +62,6 @@
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <queries>
-        <package android:name="com.cloudsave.android" />
-        <package android:name="com.google.android.gms" />
-        <package android:name="com.google.android.apps.restore" />
-        <package android:name="com.google.android.setupwizard" />
-        <package android:name="com.sec.android.easyMover" />
         <package android:name="com.google.android.apps.messaging" />
         <package android:name="com.samsung.android.messaging" />
         <package android:name="com.whatsapp" />

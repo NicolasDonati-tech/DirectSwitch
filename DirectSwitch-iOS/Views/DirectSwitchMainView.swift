@@ -76,8 +76,8 @@ struct DirectSwitchMainView: View {
     @State private var mediaFilters: MediaTransferFilterOptions = MediaTransferFilterOptions()
     @State private var activeDeltaBaseline: CompletedMigrationRecord? = nil
     @State private var forceBatteryTriage: Bool = false
-    @State private var acknowledgedAuditAppIds: Set<String> = []
-    @State private var isRefreshingAudit: Bool = false
+    @State private var smartCleanOptions: SmartCleanOptions = SmartCleanOptions()
+    @State private var convertHeicToJpeg: Bool = false
     @State private var availablePhotoAlbums: [String] = []
     @State private var pickedAudioFiles: [(ManifestItem, URL)] = []
     @State private var contactsPreload: ContactsPreloadState = ContactsPreloadState()
@@ -232,10 +232,6 @@ struct DirectSwitchMainView: View {
                                 onStartSendToIPhone: {
                                     activeDeltaBaseline = nil
                                     startSendWizard(destination: .newIPhone)
-                                },
-                                onStartSendToAndroid: {
-                                    activeDeltaBaseline = nil
-                                    startSendWizard(destination: .newAndroid)
                                 }
                             )
 
@@ -302,11 +298,18 @@ struct DirectSwitchMainView: View {
                                 isLocalNetworkDenied: transport.isLocalNetworkDenied,
                                 needsLocalNetworkRedirect: transport.needsLocalNetworkRedirect,
                                 errorNote: pairingErrorNote,
+                                networkDiagnostic: transport.networkDiagnostic,
                                 onConfirmPin: confirmPinPairing,
                                 onScannedQrCode: handleScannedQrString,
                                 onApplyManualCode: { handleScannedQrString(manualCodeInput) },
                                 onOpenAppSettings: {
                                     DirectSwitchTransportViewModel.openAppSettings()
+                                },
+                                onRetryNetwork: {
+                                    transport.startUdpAutoDiscovery()
+                                    if selectedBeacon != nil && pinCodeInput.filter(\.isNumber).count == 6 {
+                                        confirmPinPairing()
+                                    }
                                 }
                             )
 
@@ -350,6 +353,8 @@ struct DirectSwitchMainView: View {
                                     mediaFilters: $mediaFilters,
                                     activeDeltaBaseline: activeDeltaBaseline,
                                     forceBatteryTriage: $forceBatteryTriage,
+                                    smartCleanOptions: $smartCleanOptions,
+                                    convertHeicToJpeg: $convertHeicToJpeg,
                                     onPreloadContacts: { enqueuePreloadContacts() },
                                     onPreloadPhotos: { enqueuePreloadPhotos() },
                                     onPreloadVideos: { enqueuePreloadVideos() },
@@ -435,31 +440,6 @@ struct DirectSwitchMainView: View {
                                 },
                                 onApplySpaceRelief: { action in
                                     applySpaceReliefAndRestart(action)
-                                },
-                                acknowledgedAuditAppIds: acknowledgedAuditAppIds,
-                                isRefreshingAudit: isRefreshingAudit,
-                                onToggleAcknowledgeAudit: { canonicalId in
-                                    if acknowledgedAuditAppIds.contains(canonicalId) {
-                                        acknowledgedAuditAppIds.remove(canonicalId)
-                                    } else {
-                                        acknowledgedAuditAppIds.insert(canonicalId)
-                                    }
-                                    let snapAck = acknowledgedAuditAppIds
-                                    Task {
-                                        await transport.refreshLiveDecommissionAudit(qrPayload: nil, acknowledgedAppIds: snapAck)
-                                    }
-                                },
-                                onRefreshLiveAudit: {
-                                    isRefreshingAudit = true
-                                    let targetQr = pairedTargetPayload
-                                    let snapAck = acknowledgedAuditAppIds
-                                    Task {
-                                        await transport.refreshLiveDecommissionAudit(qrPayload: targetQr, acknowledgedAppIds: snapAck)
-                                        isRefreshingAudit = false
-                                    }
-                                },
-                                onLaunchCloudSaveOverflow: {
-                                    transport.launchOverflowBridgeToCloudSave()
                                 },
                                 onReconnectNewCode: {
                                     pairedTargetPayload = nil
@@ -1001,16 +981,7 @@ struct DirectSwitchMainView: View {
 
     private func applySpaceReliefAndRestart(_ action: SpaceReliefActionKind) {
         guard let paired = pairedTargetPayload else { return }
-        var preserveOverflow = false
         switch action {
-        case .overflowOlderToCloudSave:
-            if let plan = transport.overflowBridgePlan, plan.cutoffEpochMillis > 0 {
-                mediaFilters.photosLastYearOnly = true
-                mediaFilters.videosLastYearOnly = true
-            } else {
-                mediaFilters.maxVideoBytes = SpaceReliefPlanner.heavyVideoThresholdBytes
-            }
-            preserveOverflow = true
         case .compactVideosHevc1080p:
             mediaFilters.compactVideo1080pHevc = true
         case .excludeHeavyVideos300Mb:
@@ -1019,18 +990,16 @@ struct DirectSwitchMainView: View {
             mediaFilters.photosLastYearOnly = true
             mediaFilters.videosLastYearOnly = true
         }
-        launchSenderTransferWithPayload(paired, isResume: false, preserveOverflowBridgePlan: preserveOverflow)
+        launchSenderTransferWithPayload(paired, isResume: false)
     }
 
     private func launchSenderTransferWithPayload(
         _ paired: QrPairingPayload,
         isResume: Bool,
-        onlyRetryItemIds: Set<String>? = nil,
-        preserveOverflowBridgePlan: Bool = false
+        onlyRetryItemIds: Set<String>? = nil
     ) {
         sharedVaultToast = nil
         isReceiverMode = false
-        acknowledgedAuditAppIds = []
         let isTargetedRetry = !(onlyRetryItemIds?.isEmpty ?? true)
         let currentScope = ActiveTransferScope(
             contacts: isTargetedRetry ? false : includeContacts,
@@ -1067,6 +1036,8 @@ struct DirectSwitchMainView: View {
         let remCutoff = remindersUpToTodayOnly
         let deltaSnap = activeDeltaBaseline
         let triageSnap = forceBatteryTriage
+        let smartCleanSnap = smartCleanOptions
+        let heicSnap = convertHeicToJpeg
         Task {
             await transport.executeSenderTransfer(
                 qrPayload: paired,
@@ -1089,9 +1060,10 @@ struct DirectSwitchMainView: View {
                 isResume: isResume,
                 deltaBaseline: deltaSnap,
                 forceBatteryTriage: triageSnap,
-                preserveOverflowBridgePlan: preserveOverflowBridgePlan
+                smartCleanOptions: smartCleanSnap,
+                convertHeicToJpeg: heicSnap
             )
-            if transport.isCompleted && transport.failedItemsCount == 0 {
+            if transport.isCompleted && transport.failedItemsCount == 0 && transport.reconciliationMissingIds.isEmpty {
                 pickedDocuments.removeAll()
                 pickedAudioFiles.removeAll()
                 refreshAuthorizedSummary()
@@ -1553,7 +1525,6 @@ private struct DirectSwitchHomeView: View {
     var onDismissDelta: () -> Void
     var onStartReceive: () -> Void
     var onStartSendToIPhone: () -> Void
-    var onStartSendToAndroid: () -> Void
 
     var body: some View {
         ScrollView {
@@ -1576,7 +1547,11 @@ private struct DirectSwitchHomeView: View {
                             .foregroundColor(AppleTheme.textPrimary)
                         InfoCircleButton(
                             title: "DirectSwitch",
-                            message: "Copia i tuoi dati senza formattare: trasferisce rubrica, foto con album, video originali, calendari, audio, file e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi P2P o cavo USB-C senza passare dal cloud."
+                            message: l10n.tr(
+                                "Copia i tuoi dati senza formattare: trasferisce rubrica, foto con album, video originali, calendari, audio, file e chat WhatsApp direttamente tra due telefoni già configurati, via Wi-Fi locale o Wi-Fi P2P senza passare dal cloud.",
+                                en: "Copy your data without resetting: transfers contacts, photos with albums, original videos, calendars, audio, files, and WhatsApp chats directly between two configured phones via local Wi-Fi or P2P Wi-Fi without cloud.",
+                                fr: "Copiez vos données sans réinitialiser : transfère contacts, photos avec albums, vidéos originales, calendriers, audio, fichiers et discussions WhatsApp directement entre deux téléphones configurés, en Wi-Fi local ou P2P sans passer par le cloud."
+                            )
                         )
                     }
                 }
@@ -1661,11 +1636,6 @@ private struct DirectSwitchTransferProgressView: View {
     var onRetryIfFailed: () -> Void
     var onRetrySkippedOnly: ([String]) -> Void
     var onApplySpaceRelief: (SpaceReliefActionKind) -> Void
-    let acknowledgedAuditAppIds: Set<String>
-    let isRefreshingAudit: Bool
-    var onToggleAcknowledgeAudit: (String) -> Void
-    var onRefreshLiveAudit: () -> Void
-    var onLaunchCloudSaveOverflow: () -> Void
     var onReconnectNewCode: () -> Void
     var onTransferAnotherCategory: () -> Void
     var onFinish: () -> Void
@@ -1843,7 +1813,13 @@ private struct DirectSwitchTransferProgressView: View {
                     id: "sms",
                     icon: "message.fill",
                     color: AppleTheme.green,
-                    title: "Messaggi salvati",
+                    title: isReceiverMode
+                        ? l10n.tr(
+                            "Messaggi salvati (in File)",
+                            en: "Messages saved (in Files)",
+                            fr: "Messages enregistrés (dans Fichiers)"
+                        )
+                        : "Messaggi salvati",
                     value: "\(transport.importedSms)"
                 )
             )
@@ -1855,7 +1831,13 @@ private struct DirectSwitchTransferProgressView: View {
                     id: "call_logs",
                     icon: "phone.fill",
                     color: AppleTheme.teal,
-                    title: "Cronologia chiamate salvata",
+                    title: isReceiverMode
+                        ? l10n.tr(
+                            "Cronologia chiamate (in File)",
+                            en: "Call history (in Files)",
+                            fr: "Historique d'appels (dans Fichiers)"
+                        )
+                        : "Cronologia chiamate salvata",
                     value: "\(transport.importedCallLogs)"
                 )
             )
@@ -2389,6 +2371,12 @@ private struct DirectSwitchTransferProgressView: View {
                         if transport.batteryTriageActive {
                             BatteryTriageActivePill()
                         }
+                        if transport.thermalGuardState != .normal {
+                            ThermalGuardBannerPill(
+                                state: transport.thermalGuardState,
+                                bannerText: transport.thermalBanner
+                            )
+                        }
                         Spacer()
                     }
                     .padding(.top, 2)
@@ -2417,17 +2405,6 @@ private struct DirectSwitchTransferProgressView: View {
                     SpaceReliefAssistantCard(offer: offer) { action in
                         onApplySpaceRelief(action)
                     }
-                }
-
-                if !isReceiverMode,
-                   let overflowPlan = transport.overflowBridgePlan,
-                   transport.spaceReliefOffer == nil,
-                   (transport.isCompleted || transport.errorMessage == nil) {
-                    OverflowBridgeCloudSaveCard(
-                        plan: overflowPlan,
-                        statusNotice: transport.overflowBridgeNotice,
-                        onLaunchCloudSaveOverflow: onLaunchCloudSaveOverflow
-                    )
                 }
 
                 if !transport.skippedItems.isEmpty {
@@ -2549,41 +2526,31 @@ private struct DirectSwitchTransferProgressView: View {
                     .appleCard(padding: 14)
                 }
 
+                if !isReceiverMode, transport.errorMessage != nil, let diag = transport.networkDiagnostic {
+                    NetworkIsolationHotspotCard(verdict: diag, onRetry: onRetryIfFailed)
+                }
+
                 if transport.isCompleted {
-                    if !isReceiverMode, let audit = transport.decommissionAuditReport {
-                        DecommissionAuditCard(
-                            report: audit,
-                            senderDeviceName: UIDevice.current.name,
-                            acknowledgedAppIds: acknowledgedAuditAppIds,
-                            isRefreshing: isRefreshingAudit,
-                            onToggleAcknowledge: onToggleAcknowledgeAudit,
-                            onRefreshLiveAudit: onRefreshLiveAudit
+                    if !isReceiverMode &&
+                        (transport.reconciliationVerifiedCount > 0 ||
+                            !transport.reconciliationMissingIds.isEmpty ||
+                            transport.heicConvertedCount > 0 ||
+                            transport.smartCleanMergedContactsCount > 0 ||
+                            transport.smartCleanSkippedDuplicatesCount > 0 ||
+                            transport.smartCleanSkippedScreenshotsCount > 0) {
+                        PostTransferReconciliationCard(
+                            verifiedCount: transport.reconciliationVerifiedCount,
+                            missingIds: transport.reconciliationMissingIds,
+                            failedCount: transport.failedItemsCount,
+                            heicConvertedCount: transport.heicConvertedCount,
+                            smartCleanMergedContacts: transport.smartCleanMergedContactsCount,
+                            smartCleanSkippedDuplicates: transport.smartCleanSkippedDuplicatesCount,
+                            smartCleanSkippedScreenshots: transport.smartCleanSkippedScreenshotsCount,
+                            onRepairMissing: { missingIds in
+                                onRetrySkippedOnly(missingIds)
+                            }
                         )
                     }
-
-                    PostMigrationChecklistCard(
-                        items: MigrationReceiptBuilder.defaultChecklist(
-                            hasWhatsApp: scope.whatsApp || transport.pendingNativeWhatsAppMigration,
-                            hasApps: scope.apps,
-                            hasSkipped: !transport.skippedItems.isEmpty || transport.failedItemsCount > 0,
-                            languageCode: l10n.effectiveCode
-                        ),
-                        receiptText: MigrationReceiptBuilder.buildReceiptText(
-                            peerName: transport.peerName,
-                            isReceiver: isReceiverMode,
-                            connectionMedium: transport.connectionMedium,
-                            completedFiles: transport.completedItems,
-                            totalBytes: transport.transferredBytesCount > 0 ? transport.transferredBytesCount : transport.totalBytesCount,
-                            mergedContacts: transport.mergedContacts,
-                            importedCalendars: transport.importedCalendars,
-                            importedReminders: transport.importedReminders,
-                            importedSms: transport.importedSms,
-                            importedCallLogs: transport.importedCallLogs,
-                            appsCount: isReceiverMode ? transport.receivedInstalledApps.count : transport.sentInstalledAppsCount,
-                            skippedCount: max(transport.skippedItems.count, transport.failedItemsCount),
-                            languageCode: l10n.effectiveCode
-                        )
-                    )
 
                     if canSendAnotherCategory {
                         AppleSecondaryButton(

@@ -23,7 +23,6 @@ import com.directswitch.android.protocol.HandshakeResponse
 import com.directswitch.android.protocol.ManifestItem
 import com.directswitch.android.protocol.ManifestResponse
 import com.directswitch.android.protocol.MediaTransferFilterOptions
-import com.directswitch.android.protocol.MigrationReceiptBuilder
 import com.directswitch.android.protocol.SecureTempFileShredder
 import com.directswitch.android.protocol.SessionLicenseTier
 import com.directswitch.android.protocol.SkippedTransferItemRecord
@@ -400,31 +399,6 @@ class DirectSwitchLoopbackE2ETest {
         assertEquals("Copier les éléments sélectionnés", DirectSwitchL10n.tr("Copia le voci selezionate"))
         assertEquals("Environ 5 min restantes", DirectSwitchL10n.translateEta("Circa 5 min rimanenti"))
         DirectSwitchL10n.activeLanguage = DirectSwitchLanguage.ITALIAN
-
-        val checklistEn = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp = true, hasApps = true, hasSkipped = true, lang = DirectSwitchLanguage.ENGLISH)
-        assertEquals(6, checklistEn.size)
-        assertTrue(checklistEn.first().title.contains("Contacts, Photos"))
-
-        val checklist = MigrationReceiptBuilder.defaultChecklist(hasWhatsApp = true, hasApps = true, hasSkipped = true, lang = DirectSwitchLanguage.ITALIAN)
-        assertEquals(6, checklist.size)
-        val receipt = MigrationReceiptBuilder.buildReceiptText(
-            peerName = "iPhone di Nicolas",
-            isReceiver = false,
-            connectionMedium = TransferConnectionMedium.USB_CABLE,
-            completedFiles = 120,
-            totalBytes = 4_500_000_000L,
-            mergedContacts = 350,
-            importedCalendars = 42,
-            importedReminders = 15,
-            importedSms = 88,
-            importedCallLogs = 64,
-            appsCount = 40,
-            skippedCount = 0,
-            lang = DirectSwitchLanguage.ITALIAN
-        )
-        assertTrue(receipt.contains("Cavo USB-C diretto"))
-        assertTrue(receipt.contains("Chiamate salvate: 64"))
-        assertTrue(receipt.contains("AES-256-GCM"))
 
         // Catalogo extra Android esteso e privo di duplicati
         val curated = InstalledAppsScanner.curatedExtraAndroidCategories

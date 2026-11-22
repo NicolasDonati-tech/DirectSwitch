@@ -347,10 +347,11 @@ struct HandshakeResponse: Codable, Sendable {
     let statusMessage: String
     var supportsCrossOsLiveMotion: Bool? = nil
     var receiverInstalledAppIds: [String]? = nil
+    var supportsReconcile: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case accepted, receiverName, receiverPlatform, freeStorageBytes, licenseTier, hasEnoughSpace, statusMessage
-        case supportsCrossOsLiveMotion, receiverInstalledAppIds
+        case supportsCrossOsLiveMotion, receiverInstalledAppIds, supportsReconcile
     }
 
     init(
@@ -362,7 +363,8 @@ struct HandshakeResponse: Codable, Sendable {
         hasEnoughSpace: Bool,
         statusMessage: String,
         supportsCrossOsLiveMotion: Bool? = nil,
-        receiverInstalledAppIds: [String]? = nil
+        receiverInstalledAppIds: [String]? = nil,
+        supportsReconcile: Bool? = nil
     ) {
         self.accepted = accepted
         self.receiverName = receiverName
@@ -373,6 +375,7 @@ struct HandshakeResponse: Codable, Sendable {
         self.statusMessage = statusMessage
         self.supportsCrossOsLiveMotion = supportsCrossOsLiveMotion
         self.receiverInstalledAppIds = receiverInstalledAppIds
+        self.supportsReconcile = supportsReconcile
     }
 
     init(from decoder: Decoder) throws {
@@ -386,45 +389,56 @@ struct HandshakeResponse: Codable, Sendable {
         statusMessage = try c.decode(String.self, forKey: .statusMessage)
         supportsCrossOsLiveMotion = try c.decodeIfPresent(Bool.self, forKey: .supportsCrossOsLiveMotion)
         receiverInstalledAppIds = try c.decodeIfPresent([String].self, forKey: .receiverInstalledAppIds)
+        supportsReconcile = try c.decodeIfPresent(Bool.self, forKey: .supportsReconcile)
     }
 }
 
-struct DecommissionAuditRequest: Codable, Sendable {
+struct ReconcileManifestRequest: Codable, Sendable {
     let sessionId: String
-}
-
-struct DecommissionAuditResponse: Codable, Sendable {
-    let receiverName: String
-    let receiverPlatform: DevicePlatform
-    var installedAppIds: [String] = []
-    var installedAppNames: [String] = []
-    var freeStorageBytes: Int64 = 0
+    let sentItemIds: [String]
+    var expectedSha256ById: [String: String] = [:]
 
     enum CodingKeys: String, CodingKey {
-        case receiverName, receiverPlatform, installedAppIds, installedAppNames, freeStorageBytes
+        case sessionId, sentItemIds, expectedSha256ById
     }
 
-    init(
-        receiverName: String,
-        receiverPlatform: DevicePlatform,
-        installedAppIds: [String] = [],
-        installedAppNames: [String] = [],
-        freeStorageBytes: Int64 = 0
-    ) {
-        self.receiverName = receiverName
-        self.receiverPlatform = receiverPlatform
-        self.installedAppIds = installedAppIds
-        self.installedAppNames = installedAppNames
-        self.freeStorageBytes = freeStorageBytes
+    init(sessionId: String, sentItemIds: [String], expectedSha256ById: [String: String] = [:]) {
+        self.sessionId = sessionId
+        self.sentItemIds = sentItemIds
+        self.expectedSha256ById = expectedSha256ById
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        receiverName = try c.decode(String.self, forKey: .receiverName)
-        receiverPlatform = try c.decode(DevicePlatform.self, forKey: .receiverPlatform)
-        installedAppIds = try c.decodeIfPresent([String].self, forKey: .installedAppIds) ?? []
-        installedAppNames = try c.decodeIfPresent([String].self, forKey: .installedAppNames) ?? []
-        freeStorageBytes = try c.decodeIfPresent(Int64.self, forKey: .freeStorageBytes) ?? 0
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        sentItemIds = try c.decodeIfPresent([String].self, forKey: .sentItemIds) ?? []
+        expectedSha256ById = try c.decodeIfPresent([String: String].self, forKey: .expectedSha256ById) ?? [:]
+    }
+}
+
+struct ReconcileManifestResponse: Codable, Sendable {
+    var committedIds: [String] = []
+    var missingIds: [String] = []
+    var hashMismatchIds: [String] = []
+    var totalVerified: Int = 0
+
+    enum CodingKeys: String, CodingKey {
+        case committedIds, missingIds, hashMismatchIds, totalVerified
+    }
+
+    init(committedIds: [String] = [], missingIds: [String] = [], hashMismatchIds: [String] = [], totalVerified: Int = 0) {
+        self.committedIds = committedIds
+        self.missingIds = missingIds
+        self.hashMismatchIds = hashMismatchIds
+        self.totalVerified = totalVerified
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        committedIds = try c.decodeIfPresent([String].self, forKey: .committedIds) ?? []
+        missingIds = try c.decodeIfPresent([String].self, forKey: .missingIds) ?? []
+        hashMismatchIds = try c.decodeIfPresent([String].self, forKey: .hashMismatchIds) ?? []
+        totalVerified = try c.decodeIfPresent(Int.self, forKey: .totalVerified) ?? committedIds.count
     }
 }
 
