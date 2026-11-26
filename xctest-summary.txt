@@ -1,0 +1,80 @@
+Test Case '-[DirectSwitchTests.DirectSwitchTests testDiscoveryBeaconDeduplicatesSamePhysicalDeviceAcrossSessionRotation]' passed (0.007 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testDocumentsSandboxBridgeClassifiesWholePositionsWithoutContainerLeak]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testDocumentsSandboxBridgeClassifiesWholePositionsWithoutContainerLeak]' passed (5.953 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testDocumentsSandboxBridgePreservesExactSubfoldersAndDeduplicates]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testDocumentsSandboxBridgePreservesExactSubfoldersAndDeduplicates]' passed (0.274 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testEmptyStreamCSGCM1AuthenticatesAndRejectsBareHeader]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testEmptyStreamCSGCM1AuthenticatesAndRejectsBareHeader]' passed (0.005 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testEnvelopeRoundTripAndTamperDetection]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testEnvelopeRoundTripAndTamperDetection]' passed (0.001 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testExtendedCuratedCategoriesUniquenessAndDocumentPresets]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testExtendedCuratedCategoriesUniquenessAndDocumentPresets]' passed (0.031 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testFastOverlayAppInstallerQueueAndBackNavigation]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testFastOverlayAppInstallerQueueAndBackNavigation]' passed (0.240 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testFileStreamingCSGCM1RoundTripAndEmptyFile]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testFileStreamingCSGCM1RoundTripAndEmptyFile]' passed (1.138 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testInstalledAppsCatalogManifestRoundTripAndZeroBytesFormat]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testInstalledAppsCatalogManifestRoundTripAndZeroBytesFormat]' passed (0.009 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testItalianShortAppsAndTruncatedPrefixesWithoutEllipsis]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testItalianShortAppsAndTruncatedPrefixesWithoutEllipsis]' passed (0.005 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLicenseSingleSideUnlockAndPreviewCap]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLicenseSingleSideUnlockAndPreviewCap]' passed (0.001 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLiveCameraAppStabilizerTruncatedLabelsAndRemoteScannerProtocol]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLiveCameraAppStabilizerTruncatedLabelsAndRemoteScannerProtocol]' passed (0.522 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLivePhotoSenderReceiverProgressParityAndManifestRoundTrip]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLivePhotoSenderReceiverProgressParityAndManifestRoundTrip]' passed (0.018 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLocalNetworkGuardAcceptsPrivateRanges]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLocalNetworkGuardAcceptsPrivateRanges]' passed (0.002 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLocalNetworkGuardRejectsPublicAndMalformed]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLocalNetworkGuardRejectsPublicAndMalformed]' passed (0.002 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLoopbackEndToEndEncryptedCryptoAudioAndCallLogsProtocolRoundTrip]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testLoopbackEndToEndEncryptedCryptoAudioAndCallLogsProtocolRoundTrip]' passed (0.137 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testNextLevelCoreCheckpointSpaceReliefShredderFiltersAndLocalization]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testNextLevelCoreCheckpointSpaceReliefShredderFiltersAndLocalization]' passed (0.060 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testOddAndMalformedHexReturnsNilWithoutCrashing]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testOddAndMalformedHexReturnsNilWithoutCrashing]' passed (0.001 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testOptimizedProbesPhotoMetadataDetectorAndCuratedCategories]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testOptimizedProbesPhotoMetadataDetectorAndCuratedCategories]' passed (0.116 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPhoneNormalizerAndPhotoMimeMapping]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPhoneNormalizerAndPhotoMimeMapping]' passed (0.004 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPinKeyDerivationRoundTripAndWrongPinFails]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPinKeyDerivationRoundTripAndWrongPinFails]' passed (0.612 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPracticalProFeatures1To5]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPracticalProFeatures1To5]' passed (0.004 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testProtocolDtosTolerateOmittedLegacyFields]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testProtocolDtosTolerateOmittedLegacyFields]' passed (0.032 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPublicBeaconStripsSessionKeyAndWifiPassword]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testPublicBeaconStripsSessionKeyAndWifiPassword]' passed (0.004 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testReceiverDestinationSessionPlacesFoldersIntoOriginalPositionsOutsideDirectSwitch]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testReceiverDestinationSessionPlacesFoldersIntoOriginalPositionsOutsideDirectSwitch]' passed (0.030 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testRecursiveFolderImportAndPasswordCsvDetection]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testRecursiveFolderImportAndPasswordCsvDetection]' passed (0.034 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testRichAppCatalogMetadataOcrFilteringAndWhatsAppPersonalSeparation]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testRichAppCatalogMetadataOcrFilteringAndWhatsAppPersonalSeparation]' passed (0.017 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testRichZeroCloudiOSPayloadRoundTrip]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testRichZeroCloudiOSPayloadRoundTrip]' passed (0.047 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testSelectablePositionsLoadEvenWhenEmptyFilterTransferAndProtectRealFiles]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testSelectablePositionsLoadEvenWhenEmptyFilterTransferAndProtectRealFiles]' passed (0.082 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testSequentialInstallerExcludesMissingCatalogNeverAutoLoopsOnForegroundAndStopsCleanly]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testSequentialInstallerExcludesMissingCatalogNeverAutoLoopsOnForegroundAndStopsCleanly]' passed (0.113 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testSynchronizedStageModelsAndMediaFallbackNaming]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testSynchronizedStageModelsAndMediaFallbackNaming]' passed (0.025 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTenPercentSteppedEtaTrackerUpdatesOnlyEveryTenPercentWithoutOscillation]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTenPercentSteppedEtaTrackerUpdatesOnlyEveryTenPercentWithoutOscillation]' passed (0.000 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTimelineHealerBatteryTriageDeltaAuditAndOverflowBridge]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTimelineHealerBatteryTriageDeltaAuditAndOverflowBridge]' passed (0.039 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTransferManifestNativeWhatsAppMigrationFlagAndLegacyCompat]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTransferManifestNativeWhatsAppMigrationFlagAndLegacyCompat]' passed (0.001 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTransferProgressAccountingLivePhotosFailuresAndSlidingSpeedMeter]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testTransferProgressAccountingLivePhotosFailuresAndSlidingSpeedMeter]' passed (0.000 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testWhatsAppOnlyVsCombinedTransferScopeParityWithAndroid]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testWhatsAppOnlyVsCombinedTransferScopeParityWithAndroid]' passed (0.000 seconds).
+Test Case '-[DirectSwitchTests.DirectSwitchTests testZeroHallucinationTitleMatcherAndSpatialBoundingBoxParser]' started.
+Test Case '-[DirectSwitchTests.DirectSwitchTests testZeroHallucinationTitleMatcherAndSpatialBoundingBoxParser]' passed (0.001 seconds).
+Test Suite 'DirectSwitchTests' passed at 2026-11-26 17:38:02.979.
+	 Executed 45 tests, with 0 failures (0 unexpected) in 9.831 (10.486) seconds
+Test Suite 'DirectSwitchTests.xctest' passed at 2026-11-26 17:38:02.979.
+	 Executed 45 tests, with 0 failures (0 unexpected) in 9.831 (10.487) seconds
+Test Suite 'All tests' passed at 2026-11-26 17:38:02.980.
+	 Executed 45 tests, with 0 failures (0 unexpected) in 9.831 (10.488) seconds
+** TEST SUCCEEDED **
