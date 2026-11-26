@@ -39,18 +39,20 @@ jobs:
           chmod +x gradlew
           if [ -n "${{ secrets.DS_KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.DS_KEYSTORE_BASE64 }}" | base64 -d > directswitch-release-key.jks
-            DS_STORE_FILE="$PWD/directswitch-release-key.jks" ./gradlew --console=plain testDebugUnitTest assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/android-ci.log"
+            DS_STORE_FILE="$PWD/directswitch-release-key.jks" ./gradlew --console=plain --no-daemon -Pkotlin.compiler.execution.strategy=in-process testDebugUnitTest assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/android-ci.log"
             rm -f directswitch-release-key.jks
           else
-            ./gradlew --console=plain testDebugUnitTest assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/android-ci.log"
+            ./gradlew --console=plain --no-daemon -Pkotlin.compiler.execution.strategy=in-process testDebugUnitTest assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/android-ci.log"
           fi
 
       - name: Emit Android failure summary
         if: failure()
         run: |
-          if [ -f "$GITHUB_WORKSPACE/android-ci.log" ]; then
-            grep -E "(^e: |FAILED|AssertionError|Exception|FAILURE:)" "$GITHUB_WORKSPACE/android-ci.log" | tail -n 15 | while IFS= read -r line; do
-              echo "::error::ANDROID_CI: $line"
+          LOG="$GITHUB_WORKSPACE/android-ci.log"
+          if [ -f "$LOG" ]; then
+            { grep -E "(^e: |FAILED|AssertionError|OutOfMemory|daemon disappeared|Killed|FAILURE:)" "$LOG" | tail -n 12;
+              grep -A 12 "What went wrong" "$LOG" | head -n 14; } | sed 's/%/%25/g' | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::ANDROID_CI: $line"
             done
           fi
 
