@@ -182,5 +182,71 @@ class DirectSwitchPracticalProTest {
             language = DirectSwitchLanguage.FRENCH
         )
         assertTrue(frVerdict.title.contains("réseaux Wi-Fi différents"))
+
+        val iosErrVerdict = NetworkIsolationDiagnostics.analyzePairingFailure(
+            localIp = "192.168.1.45",
+            targetIps = listOf("192.168.1.120"),
+            isWifiConnected = true,
+            errorMessage = "Impossibile collegarsi a iPhone sulla rete locale"
+        )
+        assertTrue(iosErrVerdict.likelyApClientIsolation)
+    }
+
+    @Test
+    fun smartClean_filtersNativeIosScreenshotFlagEvenWithGenericCameraFilename() {
+        val nowMs = 1_800_000_000_000L
+        val twoYearsAgoMs = nowMs - 2L * 365L * 86_400_000L
+        val items = listOf(
+            ManifestItem(
+                id = "ios_shot_1",
+                category = TransferCategory.PHOTOS,
+                fileName = "IMG_9999.PNG",
+                relativeAlbumOrFolder = "iPhone_Camera",
+                sizeBytes = 750_000L,
+                capturedEpochMillis = twoYearsAgoMs,
+                dedupKey = "img9999",
+                isScreenshot = true
+            ),
+            ManifestItem(
+                id = "fr_shot_1",
+                category = TransferCategory.PHOTOS,
+                fileName = "IMG_0002.PNG",
+                relativeAlbumOrFolder = "Captures d\u2019écran",
+                sizeBytes = 500_000L,
+                capturedEpochMillis = twoYearsAgoMs,
+                dedupKey = "img0002",
+                isScreenshot = null
+            ),
+            ManifestItem(
+                id = "ios_cam_1",
+                category = TransferCategory.PHOTOS,
+                fileName = "IMG_9998.HEIC",
+                relativeAlbumOrFolder = "iPhone_Camera",
+                sizeBytes = 2_500_000L,
+                capturedEpochMillis = twoYearsAgoMs,
+                dedupKey = "img9998",
+                isScreenshot = null
+            ),
+            ManifestItem(
+                id = "capture_one_keep",
+                category = TransferCategory.PHOTOS,
+                fileName = "IMG_5001.JPG",
+                relativeAlbumOrFolder = "Capture One",
+                sizeBytes = 1_800_000L,
+                capturedEpochMillis = twoYearsAgoMs,
+                dedupKey = "img5001",
+                isScreenshot = null
+            )
+        )
+        val res = SmartCleanPreTransferEngine.filterMediaSmartClean(
+            entries = items,
+            options = SmartCleanOptions(skipOldScreenshotsOlderThanMonths = 12),
+            nowMillis = nowMs,
+            itemOf = { it },
+            sha256Of = { null }
+        )
+        assertEquals(listOf("ios_cam_1", "capture_one_keep"), res.kept.map { it.id })
+        assertEquals(2, res.skippedOldScreenshotsCount)
+        assertEquals(1_250_000L, res.savedBytes)
     }
 }

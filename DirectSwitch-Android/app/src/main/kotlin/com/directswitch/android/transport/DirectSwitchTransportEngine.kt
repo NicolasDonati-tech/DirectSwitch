@@ -402,6 +402,7 @@ class DirectSwitchTransferServer(
         manifestMap.clear()
         cleanupPendingLiveVideoFiles()
         completedIds.clear()
+        committedItemHashes.clear()
         skippedIds.clear()
         liveVideoAccountedIds.clear()
         docFolderCounts.clear()
@@ -655,8 +656,11 @@ class DirectSwitchTransferServer(
                         return
                     }
                     manifestMap.clear()
+                    cleanupPendingLiveVideoFiles()
                     completedIds.clear()
+                    committedItemHashes.clear()
                     skippedIds.clear()
+                    liveVideoAccountedIds.clear()
                     docFolderCounts.clear()
                     transferredBytesCounter.set(0L)
                     completedFilesCounter.set(0)
@@ -720,6 +724,7 @@ class DirectSwitchTransferServer(
                     // conserviamo file completati, byte già scritti e contatori così la barra prosegue senza tornare a 0%.
                     if (!isResume) {
                         manifestMap.clear()
+                        cleanupPendingLiveVideoFiles()
                         completedIds.clear()
                         committedItemHashes.clear()
                         skippedIds.clear()
@@ -1429,6 +1434,7 @@ class DirectSwitchTransferServer(
                         }
                     }
 
+                    cleanupPendingLiveVideoFiles()
                     _progress.value = _progress.value.copy(
                         phaseLabel = "Trasferimento completato con successo!",
                         etaLabel = null,
@@ -1582,6 +1588,32 @@ class DirectSwitchTransferClient(private val context: Context) {
     @Volatile
     private var prepAnimDeferred: CompletableDeferred<Unit>? = null
 
+    private val pairedChannelLock = Any()
+
+    @Volatile
+    private var pairedChannelCache: Pair<String, BoundHttpChannel>? = null
+
+    private fun clearPairedChannelCache() {
+        val old = synchronized(pairedChannelLock) {
+            val prev = pairedChannelCache
+            pairedChannelCache = null
+            prev
+        }
+        old?.second?.cleanup()
+    }
+
+    private fun takeCachedChannelForSession(sessionId: String): BoundHttpChannel? {
+        return synchronized(pairedChannelLock) {
+            val prev = pairedChannelCache
+            if (prev != null && prev.first == sessionId) {
+                pairedChannelCache = null
+                prev.second
+            } else {
+                null
+            }
+        }
+    }
+
     fun markPreparationAnimationCompleted() {
         prepAnimDeferred?.complete(Unit)
     }
@@ -1589,17 +1621,37 @@ class DirectSwitchTransferClient(private val context: Context) {
     fun resetProgress() {
         prepAnimDeferred?.complete(Unit)
         prepAnimDeferred = null
+        clearPairedChannelCache()
         _networkDiagnostic.value = null
         _progress.value = LiveTransferProgress()
     }
 
     suspend fun sendPairAck(qrPayload: QrPairingPayload) = withContext(Dispatchers.IO) {
-        val channel = resolveChannel(
+        val stale = synchronized(pairedChannelLock) {
+            val prev = pairedChannelCache
+            if (prev != null && prev.first != qrPayload.sessionId) {
+                pairedChannelCache = null
+                prev.second
+            } else null
+        }
+        stale?.cleanup()
+
+        val reused = takeCachedChannelForSession(qrPayload.sessionId)?.let { cached ->
+            if (findReachableIp(cached.client, listOf(cached.reachableIp), qrPayload.port) != null) {
+                cached
+            } else {
+                cached.cleanup()
+                null
+            }
+        }
+        val channel = reused ?: resolveChannel(
             candidateIps = qrPayload.ips,
             port = qrPayload.port,
             wifiSsid = qrPayload.wifiSsid,
             wifiPass = qrPayload.wifiPass
         ) ?: return@withContext
+
+        var keepAliveForTransfer = false
         try {
             val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
             val ack = PairAckRequest(
@@ -1607,21 +1659,36 @@ class DirectSwitchTransferClient(private val context: Context) {
                 senderName = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
                 senderPlatform = DevicePlatform.ANDROID
             )
-            runCatching {
-                postEncryptedJson(
-                    client = channel.client,
-                    url = "http://${channel.reachableIp}:${qrPayload.port}/v1/pair-ack",
-                    plainJson = DirectSwitchJson.instance.encodeToString(ack),
-                    aesKey = sessionAesKey
-                )
+            postEncryptedJson(
+                client = channel.client,
+                url = "http://${channel.reachableIp}:${qrPayload.port}/v1/pair-ack",
+                plainJson = DirectSwitchJson.instance.encodeToString(ack),
+                aesKey = sessionAesKey
+            )
+            val displaced = synchronized(pairedChannelLock) {
+                val prev = pairedChannelCache
+                pairedChannelCache = qrPayload.sessionId to channel
+                prev?.second?.takeIf { it !== channel }
             }
+            displaced?.cleanup()
+            keepAliveForTransfer = true
+        } catch (t: Throwable) {
+            DirectSwitchLog.warn("Invio /v1/pair-ack fallito", t)
         } finally {
-            channel.cleanup()
+            if (!keepAliveForTransfer) {
+                channel.cleanup()
+            }
         }
     }
 
     suspend fun sendPairReset(qrPayload: QrPairingPayload) = withContext(Dispatchers.IO) {
-        val channel = resolveChannel(qrPayload.ips, qrPayload.port, null, null) ?: return@withContext
+        val cached = takeCachedChannelForSession(qrPayload.sessionId)
+        val channel = cached?.takeIf {
+            findReachableIp(it.client, listOf(it.reachableIp), qrPayload.port) != null
+        } ?: run {
+            cached?.cleanup()
+            resolveChannel(qrPayload.ips, qrPayload.port, qrPayload.wifiSsid, qrPayload.wifiPass)
+        } ?: return@withContext
         try {
             val sessionAesKey = DirectSwitchCrypto.deriveSessionAesKey(qrPayload.sessionKeyHex)
             runCatching {
@@ -1826,7 +1893,15 @@ class DirectSwitchTransferClient(private val context: Context) {
             )
 
             _networkDiagnostic.value = null
-            val channel = resolveChannel(
+            val reusedChannel = takeCachedChannelForSession(qrPayload.sessionId)?.let { cached ->
+                if (findReachableIp(cached.client, listOf(cached.reachableIp), qrPayload.port) != null) {
+                    cached
+                } else {
+                    cached.cleanup()
+                    null
+                }
+            }
+            val channel = reusedChannel ?: resolveChannel(
                 candidateIps = qrPayload.ips,
                 port = qrPayload.port,
                 wifiSsid = qrPayload.wifiSsid,
@@ -2275,9 +2350,15 @@ class DirectSwitchTransferClient(private val context: Context) {
                                         thermalCheckLock.withLock {
                                             val untilLocked = thermalCooldownUntilMs.get()
                                             if (untilLocked > 0L && System.currentTimeMillis() >= untilLocked) {
-                                                thermalCooldownUntilMs.set(0L)
                                                 val afterCool = ThermalGuardCore.evaluate(AndroidThermalMonitor.read(context))
                                                 currentThermalState.set(afterCool)
+                                                thermalCooldownUntilMs.set(
+                                                    if (afterCool == ThermalGuardState.CRITICAL_COOLDOWN) {
+                                                        System.currentTimeMillis() + 45_000L
+                                                    } else {
+                                                        0L
+                                                    }
+                                                )
                                                 _progress.value = _progress.value.copy(
                                                     thermalGuardState = afterCool,
                                                     thermalBanner = when (afterCool) {
@@ -2291,7 +2372,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                     }
                                 }
 
-                                val permitsNeeded = if (currentThermalState.get() == ThermalGuardState.WARM_THROTTLE ||
+                                val permitsNeeded = if (currentThermalState.get() != ThermalGuardState.NORMAL ||
                                     entry.manifestItem.sizeBytes >= 50L * 1024L * 1024L
                                 ) 3 else 1
                                 var acquiredPermits = 0
@@ -2418,7 +2499,7 @@ class DirectSwitchTransferClient(private val context: Context) {
                                                 }
                                             }
                                         } else {
-                                            context.contentResolver.openInputStream(entry.contentUri)?.use { rawIn ->
+                                            com.directswitch.android.protocol.openMediaOriginalInputStream(context, entry.contentUri)?.use { rawIn ->
                                                 tempEncrypted.outputStream().use { encOut ->
                                                     DirectSwitchCrypto.encryptStreamCsgcm1(rawIn, encOut, sessionAesKey)
                                                 }

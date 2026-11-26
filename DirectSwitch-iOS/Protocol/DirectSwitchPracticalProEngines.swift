@@ -216,20 +216,42 @@ enum SmartCleanPreTransferEngine {
         return (result, mergedDuplicates)
     }
 
+    private static let screenshotTokens: [String] = [
+        "screenshot",
+        "screen_shot",
+        "screen shot",
+        "screencapture",
+        "screen_capture",
+        "screen capture",
+        "schermata",
+        "schermate",
+        "capture d'écran",
+        "capture d\u{2019}écran",
+        "captures d'écran",
+        "captures d\u{2019}écran",
+        "capture d'ecran",
+        "captures d'ecran",
+        "capture_d_ecran"
+    ]
+
+    static func looksLikeScreenshotNameOrAlbum(fileName: String, albumOrFolder: String) -> Bool {
+        let lowFile = fileName.lowercased()
+        let lowAlbum = albumOrFolder.lowercased()
+        return screenshotTokens.contains { token in
+            lowFile.contains(token) || lowAlbum.contains(token)
+        }
+    }
+
     static func isOldScreenshot(
         fileName: String,
         albumOrFolder: String,
         capturedEpochMillis: Int64,
         nowMillis: Int64,
-        olderThanMonths: Int
+        olderThanMonths: Int,
+        isScreenshotFlag: Bool = false
     ) -> Bool {
         guard olderThanMonths > 0, capturedEpochMillis > 0 else { return false }
-        let lowFile = fileName.lowercased()
-        let lowAlbum = albumOrFolder.lowercased()
-        let isShot = lowFile.contains("screenshot") ||
-            lowFile.contains("schermata") ||
-            lowAlbum.contains("screenshot") ||
-            lowAlbum.contains("schermate")
+        let isShot = isScreenshotFlag || looksLikeScreenshotNameOrAlbum(fileName: fileName, albumOrFolder: albumOrFolder)
         guard isShot else { return false }
         let thresholdMs = Int64(olderThanMonths) * 30 * 86_400_000
         return (nowMillis - capturedEpochMillis) > thresholdMs
@@ -270,7 +292,8 @@ enum SmartCleanPreTransferEngine {
                    albumOrFolder: item.relativeAlbumOrFolder,
                    capturedEpochMillis: item.capturedEpochMillis,
                    nowMillis: nowMillis,
-                   olderThanMonths: options.skipOldScreenshotsOlderThanMonths
+                   olderThanMonths: options.skipOldScreenshotsOlderThanMonths,
+                   isScreenshotFlag: item.isScreenshot == true
                ) {
                 skippedShots += 1
                 savedBytes += item.sizeBytes
@@ -380,10 +403,15 @@ enum NetworkIsolationDiagnostics {
         let subnetDiffers = (localParts?.count == 4) && !targetPartsList.isEmpty && !same24Subnet
         let errLow = errorMessage.lowercased()
         let isTimeoutOrBlocked = errLow.contains("timeout") ||
+            errLow.contains("timed out") ||
             errLow.contains("refused") ||
             errLow.contains("raggiungere") ||
             errLow.contains("unreachable") ||
-            errLow.contains("route")
+            errLow.contains("route") ||
+            errLow.contains("impossibile") ||
+            errLow.contains("collegarsi") ||
+            errLow.contains("non si avvia") ||
+            errLow.contains("connessione")
 
         if isWifiConnected && same24Subnet && isTimeoutOrBlocked, let lp = localParts {
             let subnetLabel = "\(lp[0]).\(lp[1]).\(lp[2]).x"
@@ -543,7 +571,7 @@ actor ThermalGuardCoordinator {
                 ? "Raffreddamento termico in corso (pausa automatica 45s)..."
                 : (next == .warmThrottle ? "Temperatura elevata — 1 flusso alla volta" : nil)
             await onStateChange(next, banner)
-            return next == .warmThrottle ? 3 : 1
+            return next != .normal ? 3 : 1
         }
         if itemCounter == 1 || itemCounter % 5 == 0 || currentState != .normal {
             let next = iOSThermalGuardMonitor.evaluate()
@@ -563,7 +591,7 @@ actor ThermalGuardCoordinator {
                         ? "Raffreddamento termico in corso (pausa automatica 45s)..."
                         : (afterCool == .warmThrottle ? "Temperatura elevata — 1 flusso alla volta" : nil)
                     await onStateChange(afterCool, banner)
-                    return afterCool == .warmThrottle ? 3 : 1
+                    return afterCool != .normal ? 3 : 1
                 } else if next == .warmThrottle {
                     await onStateChange(.warmThrottle, "Temperatura elevata — 1 flusso alla volta")
                 } else {
@@ -571,6 +599,6 @@ actor ThermalGuardCoordinator {
                 }
             }
         }
-        return currentState == .warmThrottle ? 3 : 1
+        return currentState != .normal ? 3 : 1
     }
 }

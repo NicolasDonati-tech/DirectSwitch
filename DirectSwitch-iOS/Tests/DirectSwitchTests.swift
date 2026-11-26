@@ -1,4 +1,4 @@
-﻿import XCTest
+import XCTest
 import CryptoKit
 import ImageIO
 import UIKit
@@ -2101,5 +2101,55 @@ final class DirectSwitchTests: XCTestCase {
             languageCode: "fr"
         )
         XCTAssertTrue(frDiag.title.contains("réseaux Wi-Fi différents"))
+
+        // 7. Flag isScreenshot nativo iOS + album/nome francese ("Captures d'écran")
+        let shotItems = [
+            ManifestItem(
+                id: "ios_shot_1",
+                category: .PHOTOS,
+                fileName: "IMG_9999.PNG",
+                relativeAlbumOrFolder: "iPhone_Camera",
+                sizeBytes: 750_000,
+                capturedEpochMillis: twoYearsAgoMs,
+                dedupKey: "img9999",
+                isScreenshot: true
+            ),
+            ManifestItem(
+                id: "fr_shot_1",
+                category: .PHOTOS,
+                fileName: "IMG_0002.PNG",
+                relativeAlbumOrFolder: "Captures d'écran",
+                sizeBytes: 500_000,
+                capturedEpochMillis: twoYearsAgoMs,
+                dedupKey: "img0002"
+            ),
+            ManifestItem(
+                id: "cam_keep_1",
+                category: .PHOTOS,
+                fileName: "IMG_9998.HEIC",
+                relativeAlbumOrFolder: "Camera",
+                sizeBytes: 2_500_000,
+                capturedEpochMillis: twoYearsAgoMs,
+                dedupKey: "img9998"
+            ),
+            ManifestItem(
+                id: "capture_one_keep",
+                category: .PHOTOS,
+                fileName: "IMG_5001.JPG",
+                relativeAlbumOrFolder: "Capture One",
+                sizeBytes: 1_800_000,
+                capturedEpochMillis: twoYearsAgoMs,
+                dedupKey: "img5001"
+            )
+        ]
+        let shotRes = SmartCleanPreTransferEngine.filterMediaSmartClean(
+            entries: shotItems,
+            options: SmartCleanOptions(mergeDuplicateContacts: false, skipExactDuplicatePhotosSha256: false, skipOldScreenshotsOlderThanMonths: 12),
+            nowMillis: nowMs,
+            itemOf: { $0 },
+            sha256Of: { _ in nil }
+        )
+        XCTAssertEqual(shotRes.kept.map(\.id), ["cam_keep_1", "capture_one_keep"])
+        XCTAssertEqual(shotRes.skippedOldScreenshotsCount, 2)
     }
 }

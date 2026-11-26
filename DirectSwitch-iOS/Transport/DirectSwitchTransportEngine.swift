@@ -1244,7 +1244,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             cleanupPendingLiveVideos()
             manifestItems.removeAll()
             completedItemIds.removeAll()
+            committedItemHashes.removeAll()
             skippedItemIds.removeAll()
+            liveVideoAccountedIds.removeAll()
+            motionSplitLiveBytesByItemId.removeAll()
             completedItems = 0
             totalItems = 0
             transferredBytes = 0
@@ -2517,12 +2520,12 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 _ = try? await postEncryptedJson(url: "\(baseUrl)/v1/prepare", payload: prepReq, key: key)
             }
 
-            if includeContacts && previouslySentIds.isEmpty { _ = await iOSContactsSmartMerger.requestAccessIfNeeded() }
-            if includeCalendars && previouslySentIds.isEmpty { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
-            if includeReminders && previouslySentIds.isEmpty { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
+            if transferScope.contacts && previouslySentIds.isEmpty { _ = await iOSContactsSmartMerger.requestAccessIfNeeded() }
+            if transferScope.calendars && previouslySentIds.isEmpty { _ = await iOSCalendarMigrator.requestAccessIfNeeded() }
+            if transferScope.reminders && previouslySentIds.isEmpty { _ = await iOSRemindersMigrator.requestAccessIfNeeded() }
 
             let nowCutoff = Date()
-            let needContacts = includeContacts && previouslySentIds.isEmpty
+            let needContacts = transferScope.contacts && previouslySentIds.isEmpty
             let rawContacts: [ContactTransferRecord] = needContacts
                 ? await Task.detached(priority: .userInitiated) { iOSContactsSmartMerger.readAllContacts() }.value
                 : []
@@ -2531,23 +2534,23 @@ final class DirectSwitchTransportViewModel: ObservableObject {
                 : (merged: rawContacts, mergedDuplicatesCount: 0)
             let contacts = contactsMergeOut.merged
             smartCleanMergedContactsCount = contactsMergeOut.mergedDuplicatesCount
-            if includeContacts && !isResume {
+            if transferScope.contacts && !isResume {
                 updatePreparationItem(id: "contacts", targetCount: contacts.count, isReady: true)
             }
-            let needCalendars = includeCalendars && previouslySentIds.isEmpty
+            let needCalendars = transferScope.calendars && previouslySentIds.isEmpty
             let calCutoffOpt: Date? = calendarsUpToTodayOnly ? nowCutoff : nil
             let rawCalendars: [CalendarEventRecord] = needCalendars
                 ? await Task.detached(priority: .userInitiated) { iOSCalendarMigrator.readEvents(upToDate: calCutoffOpt) }.value
                 : []
             let calendars = deltaBaseline.map { CompletedMigrationStore.filterDeltaCalendars(rawCalendars, record: $0) } ?? rawCalendars
-            if includeCalendars && !isResume {
+            if transferScope.calendars && !isResume {
                 updatePreparationItem(id: "calendars", targetCount: calendars.count, isReady: true)
             }
-            let rawReminders = (includeReminders && previouslySentIds.isEmpty)
+            let rawReminders = (transferScope.reminders && previouslySentIds.isEmpty)
                 ? await iOSRemindersMigrator.readReminders(upToDate: remindersUpToTodayOnly ? nowCutoff : nil)
                 : []
             let reminders = deltaBaseline.map { CompletedMigrationStore.filterDeltaReminders(rawReminders, record: $0) } ?? rawReminders
-            if includeReminders && !isResume {
+            if transferScope.reminders && !isResume {
                 updatePreparationItem(id: "reminders", targetCount: reminders.count, isReady: true)
             }
             let allowCloudMedia = mediaFilters.includeICloudOnlyMedia
@@ -2691,10 +2694,10 @@ final class DirectSwitchTransportViewModel: ObservableObject {
             didAuthenticateSession = true
 
             let fullCategoriesAllowed = LicensePolicyEvaluator.allowsFullCategories(hsResp.licenseTier)
-            let wantNativeWa = includeWhatsAppVault
-            let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && includeApps && !installedApps.isEmpty) ? installedApps : nil
+            let wantNativeWa = transferScope.whatsApp
+            let appsToSend: [InstalledAppRecord]? = (fullCategoriesAllowed && transferScope.apps && !installedApps.isEmpty) ? installedApps : nil
             sentInstalledAppsCount = appsToSend?.count ?? 0
-            if includeApps && !isResume {
+            if transferScope.apps && !isResume {
                 updatePreparationItem(id: "apps", targetCount: appsToSend?.count ?? 0, isReady: true)
             }
             let manifest = TransferManifest(

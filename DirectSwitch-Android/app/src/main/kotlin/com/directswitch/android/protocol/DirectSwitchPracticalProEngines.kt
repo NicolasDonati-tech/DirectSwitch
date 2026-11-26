@@ -1,21 +1,38 @@
 package com.directswitch.android.protocol
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
+import android.provider.MediaStore
+import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.serialization.Serializable
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Locale
+
+fun openMediaOriginalInputStream(context: Context, uri: android.net.Uri): InputStream? {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
+    ) {
+        runCatching {
+            val origUri = MediaStore.setRequireOriginal(uri)
+            context.contentResolver.openInputStream(origUri)
+        }.getOrNull()?.let { return it }
+    }
+    return context.contentResolver.openInputStream(uri)
+}
 
 // MARK: - 1. Guardia Termica Adattiva (Android)
 
@@ -206,18 +223,40 @@ object SmartCleanPreTransferEngine {
         return mergedList to mergedDuplicates
     }
 
+    private val screenshotTokens = listOf(
+        "screenshot",
+        "screen_shot",
+        "screen shot",
+        "screencapture",
+        "screen_capture",
+        "screen capture",
+        "schermata",
+        "schermate",
+        "capture d'écran",
+        "capture d\u2019écran",
+        "captures d'écran",
+        "captures d\u2019écran",
+        "capture d'ecran",
+        "captures d'ecran",
+        "capture_d_ecran"
+    )
+
+    fun looksLikeScreenshotNameOrAlbum(fileName: String, albumOrFolder: String): Boolean {
+        val lowFile = fileName.lowercase(Locale.ROOT)
+        val lowAlbum = albumOrFolder.lowercase(Locale.ROOT)
+        return screenshotTokens.any { token -> lowFile.contains(token) || lowAlbum.contains(token) }
+    }
+
     fun isOldScreenshot(
         fileName: String,
         albumOrFolder: String,
         capturedEpochMillis: Long,
         nowMillis: Long,
-        olderThanMonths: Int
+        olderThanMonths: Int,
+        isScreenshotFlag: Boolean = false
     ): Boolean {
         if (olderThanMonths <= 0 || capturedEpochMillis <= 0L) return false
-        val isShot = fileName.contains("screenshot", ignoreCase = true) ||
-            fileName.contains("schermata", ignoreCase = true) ||
-            albumOrFolder.contains("screenshot", ignoreCase = true) ||
-            albumOrFolder.contains("schermate", ignoreCase = true)
+        val isShot = isScreenshotFlag || looksLikeScreenshotNameOrAlbum(fileName, albumOrFolder)
         if (!isShot) return false
         val thresholdMs = olderThanMonths.toLong() * 30L * 86_400_000L
         return (nowMillis - capturedEpochMillis) > thresholdMs
@@ -260,7 +299,8 @@ object SmartCleanPreTransferEngine {
                     albumOrFolder = item.relativeAlbumOrFolder,
                     capturedEpochMillis = item.capturedEpochMillis,
                     nowMillis = nowMillis,
-                    olderThanMonths = options.skipOldScreenshotsOlderThanMonths
+                    olderThanMonths = options.skipOldScreenshotsOlderThanMonths,
+                    isScreenshotFlag = item.isScreenshot == true
                 )
             ) {
                 skippedShots++
@@ -288,7 +328,7 @@ object SmartCleanPreTransferEngine {
         return runCatching {
             val md = MessageDigest.getInstance("SHA-256")
             val buf = ByteArray(65536)
-            context.contentResolver.openInputStream(uri)?.use { stream ->
+            openMediaOriginalInputStream(context, uri)?.use { stream ->
                 while (true) {
                     val n = stream.read(buf)
                     if (n <= 0) break
@@ -358,8 +398,11 @@ object NetworkIsolationDiagnostics {
         }
         val subnetDiffers = localParts != null && localParts.size == 4 && targetPartsList.isNotEmpty() && !same24Subnet
         val errLow = errorMessage.lowercase(Locale.ROOT)
-        val isTimeoutOrBlocked = errLow.contains("timeout") || errLow.contains("refused") ||
-            errLow.contains("raggiungere") || errLow.contains("unreachable") || errLow.contains("route")
+        val isTimeoutOrBlocked = errLow.contains("timeout") || errLow.contains("timed out") ||
+            errLow.contains("refused") || errLow.contains("raggiungere") ||
+            errLow.contains("unreachable") || errLow.contains("route") ||
+            errLow.contains("impossibile") || errLow.contains("collegarsi") ||
+            errLow.contains("non si avvia") || errLow.contains("connessione")
 
         if (isWifiConnected && same24Subnet && isTimeoutOrBlocked) {
             val subnetLabel = "${localParts[0]}.${localParts[1]}.${localParts[2]}.x"
@@ -487,7 +530,7 @@ object AndroidHeicCompatibilityConverter {
     ): Boolean {
         val srcTemp = File(context.cacheDir, "heic_src_${System.nanoTime()}.heic")
         return try {
-            context.contentResolver.openInputStream(sourceUri)?.use { inp ->
+            openMediaOriginalInputStream(context, sourceUri)?.use { inp ->
                 FileOutputStream(srcTemp).use { out -> inp.copyTo(out) }
             } ?: return false
             convertHeicFileToJpegPreservingExif(srcTemp, destJpegFile)

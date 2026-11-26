@@ -1416,7 +1416,8 @@ enum iOSPhotoKitMigrator {
                     longitude: asset.location?.coordinate.longitude,
                     isLivePhoto: pairedLive != nil ? true : nil,
                     livePhotoVideoFileName: pairedLive?.resource.originalFilename,
-                    livePhotoVideoSizeBytes: liveSize > 0 ? liveSize : nil
+                    livePhotoVideoSizeBytes: liveSize > 0 ? liveSize : nil,
+                    isScreenshot: (isPhoto && asset.mediaSubtypes.contains(.photoScreenshot)) ? true : nil
                 )
                 let entry = ScannedLibraryAssetEntry(
                     item: item,

@@ -126,7 +126,7 @@ object AndroidAudioCodecHealer {
         val tempSrc = File(context.cacheDir, "aud_src_${System.nanoTime()}.${File(fileName).extension.ifBlank { "bin" }}")
         val tempOut = File(context.cacheDir, "aud_healed_${System.nanoTime()}.m4a")
         return try {
-            context.contentResolver.openInputStream(sourceUri)?.use { inp ->
+            com.directswitch.android.protocol.openMediaOriginalInputStream(context, sourceUri)?.use { inp ->
                 tempSrc.outputStream().use { out -> inp.copyTo(out) }
             } ?: return null
             if (!tempSrc.exists() || tempSrc.length() <= 0L) return null
@@ -400,7 +400,7 @@ object AndroidLiveMotionBridge {
         val outStill = File(context.cacheDir, "mp_still_${System.nanoTime()}.$ext")
         val outVideo = File(context.cacheDir, "mp_clip_${System.nanoTime()}.mp4")
         return try {
-            context.contentResolver.openInputStream(sourceUri)?.use { inp ->
+            com.directswitch.android.protocol.openMediaOriginalInputStream(context, sourceUri)?.use { inp ->
                 tempSrc.outputStream().use { out -> inp.copyTo(out) }
             } ?: return null
             if (!DirectSwitchMotionPhotoCodec.looksLikeMotionPhotoCandidateQuick(tempSrc)) return null

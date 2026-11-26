@@ -2497,7 +2497,7 @@ private struct DirectSwitchTransferProgressView: View {
                         }
                         if err.contains("Impostazioni") {
                             AppleSecondaryButton(
-                                title: "Apri Impostazioni DirectSwitch",
+                                title: l10n.tr("Apri Impostazioni DirectSwitch"),
                                 icon: "gearshape.fill",
                                 tint: AppleTheme.orange
                             ) {
@@ -2507,15 +2507,15 @@ private struct DirectSwitchTransferProgressView: View {
                         if !isReceiverMode {
                             ApplePrimaryButton(
                                 title: transport.canResumeInterruptedTransfer
-                                    ? "Riprendi trasferimento da dove era rimasto"
-                                    : "Riprova copia",
+                                    ? l10n.tr("Riprendi trasferimento da dove era rimasto")
+                                    : l10n.tr("Riprova copia"),
                                 icon: "arrow.clockwise",
                                 color: AppleTheme.blue,
                                 action: onRetryIfFailed
                             )
                             if transport.canResumeInterruptedTransfer {
                                 AppleSecondaryButton(
-                                    title: "Ricollega con nuovo codice / QR (salta già copiati)",
+                                    title: l10n.tr("Ricollega con nuovo codice / QR (salta già copiati)"),
                                     icon: "qrcode",
                                     tint: AppleTheme.teal,
                                     action: onReconnectNewCode
@@ -2527,7 +2527,7 @@ private struct DirectSwitchTransferProgressView: View {
                 }
 
                 if !isReceiverMode, transport.errorMessage != nil, let diag = transport.networkDiagnostic {
-                    NetworkIsolationHotspotCard(verdict: diag, onRetry: onRetryIfFailed)
+                    NetworkIsolationHotspotCard(verdict: diag, showRetryButton: false, onRetry: onRetryIfFailed)
                 }
 
                 if transport.isCompleted {

@@ -14,8 +14,8 @@ android {
         applicationId = "com.directswitch.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.6.3"
+        versionCode = 12
+        versionName = "1.6.4"
     }
 
     // Credenziali firma: mai nel codice. Lette da keystore.properties (ignorato da git) oppure da

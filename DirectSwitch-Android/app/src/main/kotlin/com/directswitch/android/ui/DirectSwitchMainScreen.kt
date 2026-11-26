@@ -288,6 +288,7 @@ fun DirectSwitchMainScreen(
     var isReceiverFlow by remember { mutableStateOf(false) }
 
     var pendingPermissionContinuation by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var didRequestMediaLocationUpgrade by remember { mutableStateOf(false) }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -536,13 +537,57 @@ fun DirectSwitchMainScreen(
                 listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
             ) { startContactsPreload() }
         }
+        val shouldAskMediaLocUpgrade = !MediaExifScannerAndImporter.hasMediaLocationPermission(context) && !didRequestMediaLocationUpgrade
         if (!prev.photos && next.photos) {
-            val photoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
-            schedule(MediaExifScannerAndImporter.hasPhotoPermission(context), listOf(photoPerm)) { startPhotosPreload() }
+            val photoPerms = buildList {
+                when {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                        add(Manifest.permission.READ_MEDIA_IMAGES)
+                        add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                    }
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                        add(Manifest.permission.READ_MEDIA_IMAGES)
+                    else ->
+                        add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    add(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                }
+            }
+            if (!MediaExifScannerAndImporter.hasPhotoPermission(context)) {
+                schedule(false, photoPerms) { startPhotosPreload() }
+            } else if (shouldAskMediaLocUpgrade) {
+                schedule(false, listOf(Manifest.permission.ACCESS_MEDIA_LOCATION)) { startPhotosPreload() }
+            } else {
+                startPhotosPreload()
+            }
         }
         if (!prev.videos && next.videos) {
-            val videoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
-            schedule(MediaExifScannerAndImporter.hasVideoPermission(context), listOf(videoPerm)) { startVideosPreload() }
+            val videoPerms = buildList {
+                when {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                        add(Manifest.permission.READ_MEDIA_VIDEO)
+                        add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                    }
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                        add(Manifest.permission.READ_MEDIA_VIDEO)
+                    else ->
+                        add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    add(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                }
+            }
+            if (!MediaExifScannerAndImporter.hasVideoPermission(context)) {
+                schedule(false, videoPerms) { startVideosPreload() }
+            } else if (shouldAskMediaLocUpgrade) {
+                schedule(false, listOf(Manifest.permission.ACCESS_MEDIA_LOCATION)) { startVideosPreload() }
+            } else {
+                startVideosPreload()
+            }
+        }
+        if (shouldAskMediaLocUpgrade && ((!prev.photos && next.photos) || (!prev.videos && next.videos))) {
+            didRequestMediaLocationUpgrade = true
         }
         if (!prev.calendars && next.calendars) {
             schedule(
@@ -1144,12 +1189,40 @@ fun DirectSwitchMainScreen(
                                 requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)) { startContactsPreload() }
                             },
                             onRequestPhotosPermission = {
-                                val photoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
-                                requestSpecificPermissionsThen(listOf(photoPerm)) { startPhotosPreload() }
+                                val photoPerms = buildList {
+                                    when {
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                                            add(Manifest.permission.READ_MEDIA_IMAGES)
+                                            add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                                        }
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                                            add(Manifest.permission.READ_MEDIA_IMAGES)
+                                        else ->
+                                            add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                                    }
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                        add(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                                    }
+                                }
+                                requestSpecificPermissionsThen(photoPerms) { startPhotosPreload() }
                             },
                             onRequestVideosPermission = {
-                                val videoPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
-                                requestSpecificPermissionsThen(listOf(videoPerm)) { startVideosPreload() }
+                                val videoPerms = buildList {
+                                    when {
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                                            add(Manifest.permission.READ_MEDIA_VIDEO)
+                                            add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                                        }
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                                            add(Manifest.permission.READ_MEDIA_VIDEO)
+                                        else ->
+                                            add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                                    }
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                        add(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                                    }
+                                }
+                                requestSpecificPermissionsThen(videoPerms) { startVideosPreload() }
                             },
                             onRequestCalendarsPermission = {
                                 requestSpecificPermissionsThen(listOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)) { refreshCalendarsSync() }
@@ -1299,7 +1372,8 @@ fun DirectSwitchMainScreen(
                         onRetryNetwork = {
                             val target = pairedTargetPayload
                             if (!isReceiverFlow && target != null) {
-                                launchSenderTransfer(target)
+                                val cp = TransferCheckpointStore.load(context)?.takeIf { it.sessionId == target.sessionId }
+                                launchSenderTransfer(target, resumeCheckpoint = cp)
                             }
                         },
                         onApplySpaceRelief = { action -> applySpaceReliefAndRestart(action) },
@@ -2971,11 +3045,30 @@ private fun TransferProgressWizardView(
     if (progress.errorMessage != null) {
         DirectSwitchCard(padding = 14.dp) {
             Text(progress.errorMessage, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DirectSwitchTheme.red)
+            if (!isReceiver) {
+                DirectSwitchPrimaryButton(
+                    text = if (progress.completedItems > 0) {
+                        DirectSwitchL10n.tr(
+                            "Riprendi trasferimento da dove era rimasto",
+                            en = "Resume transfer where it left off",
+                            fr = "Reprendre le transfert là où il s'est arrêté"
+                        )
+                    } else {
+                        DirectSwitchL10n.tr(
+                            "Riprova copia",
+                            en = "Retry copy",
+                            fr = "Réessayer la copie"
+                        )
+                    },
+                    onClick = onRetryNetwork
+                )
+            }
         }
         if (!isReceiver && networkDiagnostic != null) {
             NetworkIsolationHotspotCard(
                 verdict = networkDiagnostic,
-                onRetryConnect = onRetryNetwork
+                onRetryConnect = onRetryNetwork,
+                showRetryButton = false
             )
         }
     }

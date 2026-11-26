@@ -338,7 +338,8 @@ data class ManifestItem(
     val longitude: Double? = null,
     val isLivePhoto: Boolean? = null,
     val livePhotoVideoFileName: String? = null,
-    val livePhotoVideoSizeBytes: Long? = null
+    val livePhotoVideoSizeBytes: Long? = null,
+    val isScreenshot: Boolean? = null
 )
 
 @Serializable

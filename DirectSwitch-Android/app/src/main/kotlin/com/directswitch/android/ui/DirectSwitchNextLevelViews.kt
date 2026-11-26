@@ -1110,7 +1110,8 @@ fun ThermalGuardBannerPill(
 @Composable
 fun NetworkIsolationHotspotCard(
     verdict: NetworkDiagnosticVerdict,
-    onRetryConnect: () -> Unit
+    onRetryConnect: () -> Unit,
+    showRetryButton: Boolean = true
 ) {
     val accent = if (verdict.likelyApClientIsolation) DirectSwitchTheme.orange else DirectSwitchTheme.blue
     Surface(
@@ -1150,10 +1151,12 @@ fun NetworkIsolationHotspotCard(
                     modifier = Modifier.padding(start = 4.dp)
                 )
             }
-            DirectSwitchSecondaryButton(
-                text = DirectSwitchL10n.tr("Ho attivato l'Hotspot • Riprova collegamento"),
-                onClick = onRetryConnect
-            )
+            if (showRetryButton) {
+                DirectSwitchSecondaryButton(
+                    text = DirectSwitchL10n.tr("Ho attivato l'Hotspot • Riprova collegamento"),
+                    onClick = onRetryConnect
+                )
+            }
         }
     }
 }

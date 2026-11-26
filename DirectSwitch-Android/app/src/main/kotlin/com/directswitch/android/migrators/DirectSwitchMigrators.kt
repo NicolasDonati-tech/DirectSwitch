@@ -931,18 +931,30 @@ data class LocalMediaEntry(
 object MediaExifScannerAndImporter {
 
     fun hasPhotoPermission(context: Context): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+            else ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
 
     fun hasVideoPermission(context: Context): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+            else ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
+
+    fun hasMediaLocationPermission(context: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
 
     fun hasMediaPermissions(context: Context): Boolean =
         hasPhotoPermission(context) || hasVideoPermission(context)
@@ -1074,6 +1086,9 @@ object MediaExifScannerAndImporter {
             MediaStore.MediaColumns.MIME_TYPE,
             MediaStore.MediaColumns.DATA
         ).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(MediaStore.MediaColumns.RELATIVE_PATH)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 add(MediaStore.MediaColumns.IS_FAVORITE)
             }
@@ -1095,6 +1110,9 @@ object MediaExifScannerAndImporter {
                 val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
                 @Suppress("DEPRECATION")
                 val dataCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                } else -1
                 val favCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
                 } else -1
@@ -1106,6 +1124,7 @@ object MediaExifScannerAndImporter {
                     if (size <= 0L) continue
                     val contentUri = ContentUris.withAppendedId(collectionUri, id)
                     val dataPath = if (dataCol >= 0) cursor.getString(dataCol) else null
+                    val relPath = if (relCol >= 0) cursor.getString(relCol).orEmpty() else ""
                     if (!isMediaRowReadable(context, contentUri, dataPath, size)) continue
                     val rawDateTaken = cursor.getLong(dateCol)
                     val rawDateModifiedSec = cursor.getLong(modCol)
@@ -1119,6 +1138,16 @@ object MediaExifScannerAndImporter {
                     val album = cursor.getString(bucketCol) ?: "Camera"
                     val mime = cursor.getString(mimeCol)
                         ?: if (category == TransferCategory.VIDEOS) "video/mp4" else "image/jpeg"
+                    val isShot = category == TransferCategory.PHOTOS && (
+                        com.directswitch.android.protocol.SmartCleanPreTransferEngine.looksLikeScreenshotNameOrAlbum(name, album) ||
+                            relPath.contains("screenshots", ignoreCase = true) ||
+                            relPath.contains("schermate", ignoreCase = true) ||
+                            relPath.contains("captures d'écran", ignoreCase = true) ||
+                            relPath.contains("captures d\u2019écran", ignoreCase = true) ||
+                            relPath.contains("captures d'ecran", ignoreCase = true) ||
+                            (dataPath?.contains("/screenshots/", ignoreCase = true) == true) ||
+                            (dataPath?.contains("/schermate/", ignoreCase = true) == true)
+                        )
                     val dedupKey = "${name.lowercase()}_${size}_$dateTaken"
 
                     out.add(
@@ -1132,7 +1161,8 @@ object MediaExifScannerAndImporter {
                                 capturedEpochMillis = dateTaken,
                                 dedupKey = dedupKey,
                                 mimeType = mime,
-                                isFavorite = if (isFav) true else null
+                                isFavorite = if (isFav) true else null,
+                                isScreenshot = if (isShot) true else null
                             ),
                             contentUri = contentUri
                         )

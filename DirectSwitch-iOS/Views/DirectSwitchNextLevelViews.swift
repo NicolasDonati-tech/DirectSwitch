@@ -730,6 +730,7 @@ struct ThermalGuardBannerPill: View {
 struct NetworkIsolationHotspotCard: View {
     @ObservedObject var l10n = DirectSwitchLocalizationStore.shared
     let verdict: NetworkDiagnosticVerdict
+    var showRetryButton: Bool = true
     var onRetry: () -> Void
 
     var body: some View {
@@ -755,12 +756,14 @@ struct NetworkIsolationHotspotCard: View {
                     .padding(.leading, 4)
             }
 
-            AppleSecondaryButton(
-                title: l10n.tr("Ho attivato l'Hotspot • Riprova collegamento"),
-                icon: "arrow.clockwise",
-                tint: accent,
-                action: onRetry
-            )
+            if showRetryButton {
+                AppleSecondaryButton(
+                    title: l10n.tr("Ho attivato l'Hotspot • Riprova collegamento"),
+                    icon: "arrow.clockwise",
+                    tint: accent,
+                    action: onRetry
+                )
+            }
         }
         .padding(14)
         .background(accent.opacity(0.08))
